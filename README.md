@@ -1,0 +1,1 @@
+This repo is for setting up a voice agent which can schedule an appointment with someone on my Google Calendar.
