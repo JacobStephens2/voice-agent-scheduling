@@ -7,6 +7,7 @@ import {
   CalendarAuthError,
   buildConsentUrl,
   createTokenProvider,
+  exchangeAuthCode,
   loadCredentials,
   saveClientConfig,
   saveRefreshToken,
@@ -58,6 +59,28 @@ describe("calendar OAuth", () => {
     const error = await provider.getAccessToken().catch((value: unknown) => value);
     expect(error).toBeInstanceOf(CalendarAuthError);
     expect((error as Error).message).not.toContain("test-client-secret");
+  });
+
+  it("exchanges an authorization code for access and refresh tokens", async () => {
+    let requestBody = "";
+    const fetchFn = (async (_url: unknown, init?: unknown) => {
+      requestBody = String((init as RequestInit)?.body ?? "");
+      return new Response(
+        JSON.stringify({ access_token: "access-1", expires_in: 3600, refresh_token: "refresh-1" }),
+      );
+    }) as typeof fetch;
+
+    const result = await exchangeAuthCode(
+      fetchFn,
+      { clientId: "id", clientSecret: "secret" },
+      "auth-code",
+      "http://localhost:1/callback",
+    );
+
+    expect(result).toEqual({ accessToken: "access-1", refreshToken: "refresh-1" });
+    expect(requestBody).toContain("grant_type=authorization_code");
+    expect(requestBody).toContain("code=auth-code");
+    expect(requestBody).not.toContain("refresh-1");
   });
 
   it("loads credentials from the environment", () => {
