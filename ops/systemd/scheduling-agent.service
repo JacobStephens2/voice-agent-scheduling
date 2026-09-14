@@ -1,0 +1,42 @@
+[Unit]
+Description=Telephone Voice Scheduling Agent Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=scheduling-agent
+Group=scheduling-agent
+WorkingDirectory=/opt/scheduling-agent/current
+Environment=NODE_ENV=production
+Environment=SCHEDULING_PORT=3531
+Environment=SCHEDULING_DATA_DIR=/var/lib/scheduling-agent
+EnvironmentFile=/etc/scheduling-agent/scheduling-agent.env
+ExecStart=/usr/bin/node /opt/scheduling-agent/current/dist/index.js
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=20s
+UMask=0027
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProtectSystem=strict
+ReadWritePaths=/var/lib/scheduling-agent
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
