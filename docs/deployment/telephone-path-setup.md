@@ -4,7 +4,7 @@ This records the isolated scheduling telephone path for GitHub issue #2.
 
 ## Isolation
 
-Per [ADR 0001](../adr/0001-isolate-the-scheduling-service.md), the scheduler is a separate service from the administrative voice agent:
+Per [ADR 0001](../adr/0001-isolate-the-scheduling-service.md), the scheduler is a separate service from the existing voice agent:
 
 - System user: `scheduling-agent`
 - Loopback port: `3531`

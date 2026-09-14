@@ -21,14 +21,10 @@ export interface SessionOutcome {
   readonly error?: string;
 }
 
-export interface SessionCoordinator {
-  start(): Promise<SessionOutcome>;
-  hangup(): void;
-}
-
 export const REQUIRED_MODEL = "grok-voice-think-fast-2.0";
 export const REQUIRED_REASONING_EFFORT = "high";
-export const MODEL_ALIASES: Readonly<Record<string, string>> = {
+
+const MODEL_ALIASES: Readonly<Record<string, string>> = {
   "grok-voice-latest": REQUIRED_MODEL,
   [REQUIRED_MODEL]: REQUIRED_MODEL,
 };
@@ -60,6 +56,56 @@ export function sipRealtimeUrl(callId: string): string {
   return url.toString();
 }
 
+function unexpectedModelError(reported: unknown): string {
+  return `Expected model ${REQUIRED_MODEL}, but provider returned ${String(reported)}`;
+}
+
+function sessionUpdatePayload(availabilityTool: SyntheticAvailabilityTool): string {
+  return JSON.stringify({
+    type: "session.update",
+    session: {
+      voice: "ara",
+      reasoning: { effort: REQUIRED_REASONING_EFFORT },
+      turn_detection: {
+        type: "server_vad",
+        threshold: 0.5,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 200,
+      },
+      instructions: INSTRUCTIONS,
+      tools: [availabilityTool.definition()],
+    },
+  });
+}
+
+function availabilityOutputMessages(
+  event: { name?: unknown; call_id?: unknown; arguments?: unknown },
+  availabilityTool: SyntheticAvailabilityTool,
+  referenceTime: Date | undefined,
+): string[] | undefined {
+  if (event.name !== "check_availability" || typeof event.call_id !== "string") {
+    return undefined;
+  }
+  let args: { date?: string } = {};
+  try {
+    args = JSON.parse(String(event.arguments ?? "{}")) as { date?: string };
+  } catch {
+    args = {};
+  }
+  const result = availabilityTool.execute(args, { referenceTime });
+  return [
+    JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "function_call_output",
+        call_id: event.call_id,
+        output: JSON.stringify(result),
+      },
+    }),
+    JSON.stringify({ type: "response.create" }),
+  ];
+}
+
 function eventText(data: unknown): string | undefined {
   if (typeof data === "string") {
     return data;
@@ -84,15 +130,10 @@ export function createTelephoneSession(options: {
   hangupCall?: (callId: string) => Promise<void>;
   referenceTime?: Date;
   maxDurationMs?: number;
-  voice?: string;
-}): SessionCoordinator {
+}): { start(): Promise<SessionOutcome> } {
   let socket: RealtimeSocket | undefined;
 
   return {
-    hangup(): void {
-      socket?.close();
-    },
-
     start(): Promise<SessionOutcome> {
       return new Promise((resolve) => {
         const startedAt = Date.now();
@@ -161,34 +202,15 @@ export function createTelephoneSession(options: {
           switch (event.type) {
             case "session.created": {
               const session = event.session as { model?: unknown } | undefined;
-              const resolved = resolveVoiceModel(session?.model);
-              if (session?.model !== undefined && !resolved) {
-                finish(
-                  "failed",
-                  `Expected model ${REQUIRED_MODEL}, but provider returned ${String(session.model)}`,
-                );
-                return;
-              }
-              if (resolved) {
+              if (session?.model !== undefined) {
+                const resolved = resolveVoiceModel(session.model);
+                if (!resolved) {
+                  finish("failed", unexpectedModelError(session.model));
+                  return;
+                }
                 modelVerified = resolved;
               }
-              socket?.send(
-                JSON.stringify({
-                  type: "session.update",
-                  session: {
-                    voice: options.voice ?? "ara",
-                    reasoning: { effort: REQUIRED_REASONING_EFFORT },
-                    turn_detection: {
-                      type: "server_vad",
-                      threshold: 0.5,
-                      prefix_padding_ms: 300,
-                      silence_duration_ms: 200,
-                    },
-                    instructions: INSTRUCTIONS,
-                    tools: [options.availabilityTool.definition()],
-                  },
-                }),
-              );
+              socket?.send(sessionUpdatePayload(options.availabilityTool));
               break;
             }
             case "session.updated": {
@@ -198,10 +220,7 @@ export function createTelephoneSession(options: {
               if (session?.model !== undefined) {
                 const resolved = resolveVoiceModel(session.model);
                 if (!resolved) {
-                  finish(
-                    "failed",
-                    `Expected model ${REQUIRED_MODEL}, but provider returned ${String(session.model)}`,
-                  );
+                  finish("failed", unexpectedModelError(session.model));
                   return;
                 }
                 modelVerified = resolved;
@@ -220,32 +239,22 @@ export function createTelephoneSession(options: {
               break;
             }
             case "response.function_call_arguments.done": {
-              const name = event.name;
-              const callId = event.call_id;
-              if (name !== "check_availability" || typeof callId !== "string") {
+              const messages = availabilityOutputMessages(
+                {
+                  name: event.name,
+                  call_id: event.call_id,
+                  arguments: event.arguments,
+                },
+                options.availabilityTool,
+                options.referenceTime,
+              );
+              if (!messages) {
                 break;
               }
-              let args: { date?: string } = {};
-              try {
-                args = JSON.parse(String(event.arguments ?? "{}")) as typeof args;
-              } catch {
-                args = {};
-              }
-              const result = options.availabilityTool.execute(args, {
-                referenceTime: options.referenceTime,
-              });
               toolRoundTrips += 1;
-              socket?.send(
-                JSON.stringify({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "function_call_output",
-                    call_id: callId,
-                    output: JSON.stringify(result),
-                  },
-                }),
-              );
-              socket?.send(JSON.stringify({ type: "response.create" }));
+              for (const message of messages) {
+                socket?.send(message);
+              }
               break;
             }
             case "error": {

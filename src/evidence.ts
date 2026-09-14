@@ -1,11 +1,11 @@
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-export type ConnectionRoute = "direct_sip" | "livekit";
+export const DIRECT_SIP_ROUTE = "direct_sip";
 
 export interface StructuredCallEvidence {
   readonly callId: string;
-  readonly connectionRoute: ConnectionRoute;
+  readonly connectionRoute: typeof DIRECT_SIP_ROUTE;
   readonly callerNumberMasked: string;
   readonly calledNumber: string;
   readonly status: "completed" | "failed";
@@ -18,8 +18,9 @@ export interface StructuredCallEvidence {
   readonly recordedAt: string;
 }
 
-const VOICE_USD_PER_MINUTE = 0.08;
-const MICRO_USD_PER_MS = (VOICE_USD_PER_MINUTE * 1_000_000) / 60_000;
+const GROK_VOICE_USD_PER_MINUTE = 0.08;
+const MICRO_USD_PER_MILLISECOND =
+  (GROK_VOICE_USD_PER_MINUTE * 1_000_000) / 60_000;
 
 export function maskPhoneNumber(number: string): string {
   const digits = number.replace(/\D/g, "");
@@ -32,21 +33,21 @@ export function maskPhoneNumber(number: string): string {
 }
 
 export function estimateCostMicroUsd(durationMs: number): number {
-  return Math.round(durationMs * MICRO_USD_PER_MS);
+  return Math.round(durationMs * MICRO_USD_PER_MILLISECOND);
 }
 
-export function evidencePath(dataDir: string): string {
+function evidenceFile(dataDir: string): string {
   return join(dataDir, "smoke-evidence.jsonl");
 }
 
 export function persistEvidence(dataDir: string, evidence: StructuredCallEvidence): void {
   mkdirSync(dataDir, { recursive: true });
-  appendFileSync(evidencePath(dataDir), `${JSON.stringify(evidence)}\n`, "utf8");
+  appendFileSync(evidenceFile(dataDir), `${JSON.stringify(evidence)}\n`, "utf8");
 }
 
 export function loadEvidence(dataDir: string): StructuredCallEvidence[] {
   try {
-    const text = readFileSync(evidencePath(dataDir), "utf8");
+    const text = readFileSync(evidenceFile(dataDir), "utf8");
     const records: StructuredCallEvidence[] = [];
     for (const line of text.split("\n")) {
       if (!line.trim()) {

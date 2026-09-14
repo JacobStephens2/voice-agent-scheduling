@@ -66,10 +66,8 @@ function unavailable(
   };
 }
 
-export function createSyntheticAvailabilityTool(
-  options: { defaultTimezone?: string } = {},
-): SyntheticAvailabilityTool {
-  const timezone = options.defaultTimezone ?? DEFAULT_TIMEZONE;
+export function createSyntheticAvailabilityTool(): SyntheticAvailabilityTool {
+  const timezone = DEFAULT_TIMEZONE;
 
   return {
     definition(): ToolDefinition {
