@@ -1,8 +1,16 @@
 import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { createCallLifecycleManager, type CallLifecycleManager } from "./lifecycle.js";
-import { createSyntheticAvailabilityTool } from "./synthetic-calendar.js";
-import type { ConnectWebSocket } from "./session.js";
+import {
+  loadClientConfig,
+  loadCredentials,
+  saveClientConfig,
+  saveRefreshToken,
+} from "./calendar/auth.js";
+import { createCalendarAvailabilityTool } from "./calendar/availability-tool.js";
+import { createOAuthRouter } from "./calendar/oauth-routes.js";
+import { loadSelection } from "./calendar/selection.js";
+import type { AvailabilityTool, ConnectWebSocket } from "./session.js";
 
 export interface ServerConfig {
   readonly port: number;
@@ -13,6 +21,10 @@ export interface ServerConfig {
   readonly allowedCallerNumbers?: readonly string[];
   readonly maxCallDurationMs?: number;
   readonly dataDir?: string;
+  readonly availabilityTool?: AvailabilityTool;
+  readonly operatorToken?: string;
+  readonly publicBaseUrl?: string;
+  readonly fetchFn?: typeof fetch;
   readonly connectWebSocket?: ConnectWebSocket;
   readonly hangupCall?: (callId: string) => Promise<void>;
 }
@@ -59,10 +71,13 @@ function json(res: http.ServerResponse, statusCode: number, body: unknown): void
 }
 
 export function createSchedulingServer(config: ServerConfig): SchedulingServer {
+  const fetchFn = config.fetchFn ?? fetch;
   const lifecycleManager = createCallLifecycleManager({
     webhookSecret: config.webhookSecret,
     apiKey: config.apiKey,
-    availabilityTool: createSyntheticAvailabilityTool(),
+    availabilityTool:
+      config.availabilityTool ??
+      createCalendarAvailabilityTool({ fetchFn, dataDir: config.dataDir }),
     maxConcurrentCalls: config.maxConcurrentCalls ?? 1,
     allowedCallerNumbers: config.allowedCallerNumbers,
     maxCallDurationMs: config.maxCallDurationMs,
@@ -71,8 +86,48 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
     hangupCall: config.hangupCall,
   });
 
+  const oauthRouter = config.operatorToken
+    ? createOAuthRouter({
+        operatorToken: config.operatorToken,
+        baseUrl: config.publicBaseUrl ?? "https://scheduler.stephens.page",
+        client: loadClientConfig({ dataDir: config.dataDir }),
+        fetchFn,
+        onTokensSaved: config.dataDir
+          ? (client, refreshToken) => {
+              saveClientConfig(config.dataDir!, client);
+              saveRefreshToken(config.dataDir!, refreshToken);
+            }
+          : undefined,
+        loadStatus: () => ({
+          authorized: loadCredentials({ dataDir: config.dataDir }) !== undefined,
+          selection: loadSelection({ dataDir: config.dataDir }),
+        }),
+      })
+    : undefined;
+
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+
+    if (url.pathname.startsWith("/calendar/auth/")) {
+      if (!oauthRouter) {
+        json(res, 404, { error: "operator_setup_disabled" });
+        return;
+      }
+      const headers: Record<string, string | undefined> = {};
+      for (const [name, value] of Object.entries(req.headers)) {
+        headers[name] = Array.isArray(value) ? value[0] : value;
+      }
+      void oauthRouter
+        .handle(req.method ?? "GET", url, headers)
+        .then((page) => {
+          res.writeHead(page.statusCode, { "content-type": "text/html; charset=utf-8", ...page.headers });
+          res.end(page.body);
+        })
+        .catch(() => {
+          json(res, 500, { error: "internal_server_error" });
+        });
+      return;
+    }
 
     if (req.method === "GET" && url.pathname === "/health") {
       json(res, 200, {

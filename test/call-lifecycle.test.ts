@@ -78,7 +78,8 @@ describe("scheduling call lifecycle", () => {
     expect(update.session.reasoning.effort).toBe("high");
     expect(update.session.tools[0]?.name).toBe("check_availability");
     expect(update.session.instructions.toLowerCase()).toContain("scheduling");
-    expect(update.session.instructions.toLowerCase()).toContain("synthetic");
+    expect(update.session.instructions.toLowerCase()).toContain("america/new_york");
+    expect(update.session.instructions.toLowerCase()).not.toContain("synthetic");
 
     socket.receive({
       type: "session.updated",
@@ -95,6 +96,7 @@ describe("scheduling call lifecycle", () => {
       name: "check_availability",
       arguments: JSON.stringify({ date: "2026-09-11" }),
     });
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
     const toolOutput = socket.sent.find(
       (message): message is {

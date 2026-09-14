@@ -48,6 +48,25 @@ export function zonedDateTime(date: string, time: string, timeZone: string): Dat
   return new Date(utcGuess - offsetMsAt(first, timeZone));
 }
 
+export function formatTimeInZone(instant: Date, timeZone: string): string | undefined {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(instant);
+    const hour = parts.find((part) => part.type === "hour")?.value;
+    const minute = parts.find((part) => part.type === "minute")?.value;
+    if (hour === undefined || minute === undefined) {
+      return undefined;
+    }
+    return `${hour === "24" ? "00" : hour}:${minute}`;
+  } catch {
+    return undefined;
+  }
+}
+
 export function weekdayInTimeZone(date: string, timeZone: string): string | undefined {
   const noon = zonedDateTime(date, "12:00", timeZone);
   if (!noon) {
