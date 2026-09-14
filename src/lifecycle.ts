@@ -15,11 +15,11 @@ import {
 } from "./evidence.js";
 import {
   createTelephoneSession,
+  type AvailabilityTool,
   type ConnectWebSocket,
   type RealtimeSocket,
   type SessionOutcome,
 } from "./session.js";
-import type { SyntheticAvailabilityTool } from "./synthetic-calendar.js";
 
 export interface WebhookResponse {
   readonly statusCode: number;
@@ -35,7 +35,7 @@ export interface CallLifecycleManager {
 export interface CallLifecycleManagerOptions {
   readonly webhookSecret: string;
   readonly apiKey: string;
-  readonly availabilityTool: SyntheticAvailabilityTool;
+  readonly availabilityTool: AvailabilityTool;
   readonly maxConcurrentCalls?: number;
   readonly allowedCallerNumbers?: readonly string[];
   readonly connectWebSocket?: ConnectWebSocket;

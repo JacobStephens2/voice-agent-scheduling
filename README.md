@@ -2,7 +2,7 @@
 
 A telephone scheduling agent that describes Jacob's availability and creates 30-minute phone appointments on his Google Calendar. Jacob calls the confirmed callback number at appointment time.
 
-The first telephone path is the isolated Direct SIP scheduler in this repository. It answers a dedicated Telnyx number, identifies itself as Jacob's scheduling assistant, and returns synthetic availability. Google Calendar authorization and real appointments are later tickets.
+The first telephone path is the isolated Direct SIP scheduler in this repository. It answers a dedicated Telnyx number, identifies itself as Jacob's scheduling assistant, and returns real Google Calendar availability for Jacob's selected calendars. Calendar event creation (real appointments) is a later ticket.
 
 ```bash
 npm test
@@ -13,6 +13,7 @@ SCHEDULER_URL=https://scheduler.stephens.page EVIDENCE_TOKEN=... npm run smoke:p
 - [Implementation specification and sub-issues](https://github.com/JacobStephens2/voice-agent-scheduling/issues/1)
 - [First implementation ticket: answer the scheduling number with a verified voice model](https://github.com/JacobStephens2/voice-agent-scheduling/issues/2)
 - [Telephone path setup](docs/deployment/telephone-path-setup.md)
+- [Google Calendar authorization and calendar selection](docs/deployment/calendar-setup.md)
 - [Accepted design, connection options, and acceptance scenarios](docs/design/appointment-scheduling.md)
 - [Provider research and existing voice-agent findings](docs/research/telephone-calendar-scheduling.md)
 - [Domain glossary](CONTEXT.md)

@@ -22,9 +22,16 @@ SCHEDULING_PORT=3531
 XAI_API_KEY=
 XAI_WEBHOOK_SECRET=
 EVIDENCE_TOKEN=
+OPERATOR_TOKEN=
 MAX_CONCURRENT_CALLS=1
 ALLOWED_CALLER_NUMBERS=
 MAX_CALL_DURATION_MS=600000
+GOOGLE_CALENDAR_CLIENT_ID=
+GOOGLE_CALENDAR_CLIENT_SECRET=
+GOOGLE_CALENDAR_REFRESH_TOKEN=
+SCHEDULING_PRIMARY_CALENDAR=
+SCHEDULING_CONFLICT_CALENDARS=
+PUBLIC_BASE_URL=https://scheduler.stephens.page
 EOF
   sudo chmod 0600 "$ENV_FILE"
   sudo chown root:scheduling-agent "$ENV_FILE"
@@ -34,6 +41,11 @@ fi
 if ! sudo grep -q '^EVIDENCE_TOKEN=' "$ENV_FILE"; then
   token="$(openssl rand -hex 24)"
   echo "EVIDENCE_TOKEN=${token}" | sudo tee -a "$ENV_FILE" >/dev/null
+fi
+
+if ! sudo grep -q '^OPERATOR_TOKEN=' "$ENV_FILE"; then
+  token="$(openssl rand -hex 24)"
+  echo "OPERATOR_TOKEN=${token}" | sudo tee -a "$ENV_FILE" >/dev/null
 fi
 
 sudo cp ops/systemd/scheduling-agent.service /etc/systemd/system/scheduling-agent.service
