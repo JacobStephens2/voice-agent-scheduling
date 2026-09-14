@@ -6,6 +6,7 @@ import {
   type SignedWebhook,
 } from "./admission.js";
 import {
+  DIRECT_SIP_ROUTE,
   estimateCostMicroUsd,
   loadEvidence,
   maskPhoneNumber,
@@ -27,7 +28,6 @@ export interface WebhookResponse {
 
 export interface CallLifecycleManager {
   handleWebhook(input: SignedWebhook): Promise<WebhookResponse>;
-  waitForEvidence(callId: string, timeoutMs?: number): Promise<StructuredCallEvidence | undefined>;
   listEvidence(): readonly StructuredCallEvidence[];
   activeCallCount(): number;
 }
@@ -101,17 +101,10 @@ export function createCallLifecycleManager(
       evidenceByCall.set(evidence.callId, evidence);
     }
   }
-  const waiters = new Map<string, Array<(evidence: StructuredCallEvidence) => void>>();
-
   const record = (evidence: StructuredCallEvidence) => {
     evidenceByCall.set(evidence.callId, evidence);
     if (options.dataDir) {
       persistEvidence(options.dataDir, evidence);
-    }
-    const resolvers = waiters.get(evidence.callId) ?? [];
-    waiters.delete(evidence.callId);
-    for (const resolve of resolvers) {
-      resolve(evidence);
     }
   };
 
@@ -124,7 +117,7 @@ export function createCallLifecycleManager(
     admission.release(callId);
     record({
       callId,
-      connectionRoute: "direct_sip",
+      connectionRoute: DIRECT_SIP_ROUTE,
       callerNumberMasked: maskPhoneNumber(callerNumber),
       calledNumber,
       status: outcome.status,
@@ -184,28 +177,6 @@ export function createCallLifecycleManager(
         statusCode: 200,
         body: JSON.stringify({ status: "admitted", call_id: result.callId }),
       };
-    },
-
-    waitForEvidence(callId, timeoutMs = 10_000) {
-      const existing = evidenceByCall.get(callId);
-      if (existing) {
-        return Promise.resolve(existing);
-      }
-      return new Promise((resolve) => {
-        const timer = setTimeout(() => {
-          const waiting = waiters.get(callId) ?? [];
-          waiters.set(
-            callId,
-            waiting.filter((waiter) => waiter !== onEvidence),
-          );
-          resolve(evidenceByCall.get(callId));
-        }, timeoutMs);
-        const onEvidence = (evidence: StructuredCallEvidence) => {
-          clearTimeout(timer);
-          resolve(evidence);
-        };
-        waiters.set(callId, [...(waiters.get(callId) ?? []), onEvidence]);
-      });
     },
 
     listEvidence() {

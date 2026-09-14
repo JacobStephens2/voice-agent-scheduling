@@ -8,6 +8,7 @@ import { FakeRealtimeSocket } from "./fake-socket.js";
 import {
   WEBHOOK_SECRET,
   incomingCallPayload,
+  recordedEvidence,
   signedHeaders,
 } from "./helpers.js";
 
@@ -115,7 +116,7 @@ describe("scheduling call lifecycle", () => {
 
     socket.close();
 
-    const evidence = await manager.waitForEvidence("call-life-1", 1000);
+    const evidence = await recordedEvidence(() => manager.listEvidence(), "call-life-1");
     expect(evidence).toMatchObject({
       callId: "call-life-1",
       connectionRoute: "direct_sip",
@@ -158,7 +159,7 @@ describe("scheduling call lifecycle", () => {
       error: { message: "Simulated upstream provider outage" },
     });
 
-    const evidence = await manager.waitForEvidence("call-life-2", 1000);
+    const evidence = await recordedEvidence(() => manager.listEvidence(), "call-life-2");
     expect(evidence?.status).toBe("failed");
     expect(evidence?.error).toContain("Simulated upstream provider outage");
     expect(evidence?.callerNumberMasked).toBe("+1***6543");
@@ -209,7 +210,7 @@ describe("scheduling call lifecycle", () => {
     });
     sockets[0]!.close();
 
-    const evidence = await manager.waitForEvidence("call-late-model", 1000);
+    const evidence = await recordedEvidence(() => manager.listEvidence(), "call-late-model");
     expect(evidence?.status).toBe("completed");
     expect(evidence?.modelVerified).toBe(REQUIRED_MODEL);
   });
@@ -233,7 +234,7 @@ describe("scheduling call lifecycle", () => {
     });
     sockets[0]!.close();
 
-    const evidence = await manager.waitForEvidence("call-alias", 1000);
+    const evidence = await recordedEvidence(() => manager.listEvidence(), "call-alias");
     expect(evidence?.status).toBe("completed");
     expect(evidence?.modelVerified).toBe(REQUIRED_MODEL);
     expect(evidence?.reasoningVerified).toBe("high");
@@ -252,7 +253,7 @@ describe("scheduling call lifecycle", () => {
       session: { model: "grok-voice-think-fast-1.0" },
     });
 
-    const evidence = await manager.waitForEvidence("call-wrong-model", 1000);
+    const evidence = await recordedEvidence(() => manager.listEvidence(), "call-wrong-model");
     expect(evidence?.status).toBe("failed");
     expect(evidence?.error).toContain(REQUIRED_MODEL);
     expect(manager.activeCallCount()).toBe(0);
@@ -265,7 +266,7 @@ describe("scheduling call lifecycle", () => {
     const payload = incomingCallPayload({ callId: "call-timeout" });
 
     await manager.handleWebhook(signedHeaders(payload, { webhookId: "evt_timeout" }));
-    const evidence = await manager.waitForEvidence("call-timeout", 1000);
+    const evidence = await recordedEvidence(() => manager.listEvidence(), "call-timeout");
     expect(evidence?.status).toBe("completed");
     expect(evidence?.error).toBe("duration_limit_reached");
     expect(hangups).toContain("call-timeout");

@@ -1,4 +1,5 @@
 import { computeWebhookSignature } from "../src/admission.js";
+import type { StructuredCallEvidence } from "../src/evidence.js";
 
 export const WEBHOOK_SECRET = "whsec_dGVzdHNlY3JldGZvcnNpZ25pbmd3ZWI=";
 
@@ -23,15 +24,6 @@ export function incomingCallPayload(options: {
   });
 }
 
-export function signWebhook(
-  secret: string,
-  webhookId: string,
-  timestamp: string,
-  rawBody: string,
-): string {
-  return computeWebhookSignature(secret, webhookId, timestamp, rawBody);
-}
-
 export function signedHeaders(
   rawBody: string,
   options: { webhookId: string; secret?: string; timestamp?: string } = {
@@ -43,7 +35,23 @@ export function signedHeaders(
   return {
     id: options.webhookId,
     timestamp,
-    signature: signWebhook(secret, options.webhookId, timestamp, rawBody),
+    signature: computeWebhookSignature(secret, options.webhookId, timestamp, rawBody),
     rawBody,
   };
+}
+
+export async function recordedEvidence(
+  listEvidence: () => readonly StructuredCallEvidence[],
+  callId: string,
+  timeoutMs = 1000,
+): Promise<StructuredCallEvidence> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = listEvidence().find((entry) => entry.callId === callId);
+    if (found) {
+      return found;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for evidence ${callId}`);
 }
