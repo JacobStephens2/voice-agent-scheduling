@@ -1,8 +1,8 @@
 import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { createCallLifecycleManager, type CallLifecycleManager } from "./lifecycle.js";
-import { createSyntheticAvailabilityTool } from "./synthetic-calendar.js";
-import type { ConnectWebSocket } from "./session.js";
+import { createCalendarAvailabilityTool } from "./calendar/availability-tool.js";
+import type { AvailabilityTool, ConnectWebSocket } from "./session.js";
 
 export interface ServerConfig {
   readonly port: number;
@@ -13,6 +13,7 @@ export interface ServerConfig {
   readonly allowedCallerNumbers?: readonly string[];
   readonly maxCallDurationMs?: number;
   readonly dataDir?: string;
+  readonly availabilityTool?: AvailabilityTool;
   readonly connectWebSocket?: ConnectWebSocket;
   readonly hangupCall?: (callId: string) => Promise<void>;
 }
@@ -62,7 +63,8 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
   const lifecycleManager = createCallLifecycleManager({
     webhookSecret: config.webhookSecret,
     apiKey: config.apiKey,
-    availabilityTool: createSyntheticAvailabilityTool(),
+    availabilityTool:
+      config.availabilityTool ?? createCalendarAvailabilityTool({ dataDir: config.dataDir }),
     maxConcurrentCalls: config.maxConcurrentCalls ?? 1,
     allowedCallerNumbers: config.allowedCallerNumbers,
     maxCallDurationMs: config.maxCallDurationMs,

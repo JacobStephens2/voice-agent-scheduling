@@ -1,4 +1,19 @@
-import type { SyntheticAvailabilityTool } from "./synthetic-calendar.js";
+export interface AvailabilityTool {
+  definition(): {
+    readonly type: "function";
+    readonly name: string;
+    readonly description: string;
+    readonly parameters: {
+      readonly type: "object";
+      readonly properties: Record<string, unknown>;
+      readonly required: readonly string[];
+    };
+  };
+  execute(
+    args: { date?: string; timezone?: string },
+    options?: { referenceTime?: Date },
+  ): unknown | Promise<unknown>;
+}
 
 export interface RealtimeSocket {
   send(data: string): void;
@@ -34,11 +49,14 @@ const DEFAULT_MAX_DURATION_MS = 10 * 60 * 1000;
 const INSTRUCTIONS = [
   "You are Jacob's scheduling assistant.",
   "You help callers learn Jacob's availability and arrange 30-minute phone appointments.",
-  "This call is a synthetic availability smoke test.",
   "Identify yourself as Jacob's scheduling assistant.",
-  "When the caller asks about availability, use the check_availability tool.",
-  "Tell the caller the returned times in Eastern Time (America/New_York).",
-  "Clearly say that the times are synthetic test availability, not a real appointment.",
+  "When the caller asks about availability, use the check_availability tool with the exact date in YYYY-MM-DD format.",
+  "Offer a few of the returned times by name and always state the timezone (Eastern Time, America/New_York).",
+  "If the caller asks about another timezone, call the tool again with that timezone and share the converted times.",
+  "If a date is ambiguous, ask the caller to clarify it instead of guessing.",
+  "If the caller corrects a date or timezone, check the corrected details and offer the new options.",
+  "Never describe Jacob's existing events; only share the available times the tool returns.",
+  "If the tool reports no availability or that the calendar cannot be reached, say so honestly and invite the caller to try another date or try again later.",
   "Do not claim that an appointment has been booked or written to a calendar.",
 ].join(" ");
 
@@ -60,7 +78,7 @@ function unexpectedModelError(reported: unknown): string {
   return `Expected model ${REQUIRED_MODEL}, but provider returned ${String(reported)}`;
 }
 
-function sessionUpdatePayload(availabilityTool: SyntheticAvailabilityTool): string {
+function sessionUpdatePayload(availabilityTool: AvailabilityTool): string {
   return JSON.stringify({
     type: "session.update",
     session: {
@@ -78,21 +96,24 @@ function sessionUpdatePayload(availabilityTool: SyntheticAvailabilityTool): stri
   });
 }
 
-function availabilityOutputMessages(
+async function availabilityOutputMessages(
   event: { name?: unknown; call_id?: unknown; arguments?: unknown },
-  availabilityTool: SyntheticAvailabilityTool,
+  availabilityTool: AvailabilityTool,
   referenceTime: Date | undefined,
-): string[] | undefined {
+): Promise<string[] | undefined> {
   if (event.name !== "check_availability" || typeof event.call_id !== "string") {
     return undefined;
   }
-  let args: { date?: string } = {};
+  let args: { date?: string; timezone?: string } = {};
   try {
-    args = JSON.parse(String(event.arguments ?? "{}")) as { date?: string };
+    args = JSON.parse(String(event.arguments ?? "{}")) as {
+      date?: string;
+      timezone?: string;
+    };
   } catch {
     args = {};
   }
-  const result = availabilityTool.execute(args, { referenceTime });
+  const result = await availabilityTool.execute(args, { referenceTime });
   return [
     JSON.stringify({
       type: "conversation.item.create",
@@ -125,7 +146,7 @@ function eventText(data: unknown): string | undefined {
 export function createTelephoneSession(options: {
   callId: string;
   apiKey: string;
-  availabilityTool: SyntheticAvailabilityTool;
+  availabilityTool: AvailabilityTool;
   connectWebSocket: ConnectWebSocket;
   hangupCall?: (callId: string) => Promise<void>;
   referenceTime?: Date;
@@ -239,22 +260,28 @@ export function createTelephoneSession(options: {
               break;
             }
             case "response.function_call_arguments.done": {
-              const messages = availabilityOutputMessages(
+              const callId = event.call_id;
+              void availabilityOutputMessages(
                 {
                   name: event.name,
-                  call_id: event.call_id,
+                  call_id: callId,
                   arguments: event.arguments,
                 },
                 options.availabilityTool,
                 options.referenceTime,
-              );
-              if (!messages) {
-                break;
-              }
-              toolRoundTrips += 1;
-              for (const message of messages) {
-                socket?.send(message);
-              }
+              )
+                .then((messages) => {
+                  if (!messages) {
+                    return;
+                  }
+                  toolRoundTrips += 1;
+                  for (const message of messages) {
+                    socket?.send(message);
+                  }
+                })
+                .catch(() => {
+                  finish("failed", "Availability tool failed");
+                });
               break;
             }
             case "error": {
