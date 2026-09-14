@@ -107,6 +107,32 @@ describe("incoming call admission", () => {
     ).toEqual({ admitted: false, reason: "timestamp_out_of_range" });
   });
 
+  it("admits the allowlisted caller when From is a SIP URI or national number", () => {
+    for (const [label, from] of [
+      ["sip-uri", "<sip:+15555550177@sip.telnyx.com>"],
+      ["national", "5555550177"],
+      ["pretty", "+1 (555) 555-0177"],
+      ["eleven-digit", "15555550177"],
+    ] as const) {
+      const admission = createIncomingCallAdmission({
+        webhookSecret: WEBHOOK_SECRET,
+        maxConcurrentCalls: 1,
+        allowedCallerNumbers: ["+15555550177"],
+      });
+      const payload = incomingCallPayload({
+        callId: `call-${label}`,
+        callerNumber: from,
+      });
+      const result = admission.admit(signedHeaders(payload, { webhookId: `msg_${label}` }));
+      expect(result, label).toEqual({
+        admitted: true,
+        callId: `call-${label}`,
+        callerNumber: "+15555550177",
+        calledNumber: "+18005550199",
+      });
+    }
+  });
+
   it("rejects callers outside the smoke-mode allowlist", () => {
     const admission = createIncomingCallAdmission({
       webhookSecret: WEBHOOK_SECRET,
