@@ -1,0 +1,45 @@
+name: Deploy scheduler
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: scheduler-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SCHEDULER_SSH_KEY }}
+
+      - name: Trust server host keys
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SCHEDULER_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy release
+        run: bash ops/deploy-release.sh
+        env:
+          SCHEDULER_HOST: ${{ secrets.SCHEDULER_HOST }}
+
+      - name: Verify service health
+        run: curl -fsS https://scheduler.stephens.page/health
