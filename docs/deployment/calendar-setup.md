@@ -7,21 +7,28 @@ audio or transcripts are retained.
 
 ## What Jacob does (bounded human steps)
 
-1. **Create a Desktop-app OAuth client** in the Google Cloud console for
-   `jacob@stephens.page`. Request only these scopes when consenting:
+1. **Create a Web-app OAuth client** in the Google Cloud console for
+   `jacob@stephens.page`, with this authorized redirect URI:
+   `https://scheduler.stephens.page/calendar/auth/callback`.
+   Request only these scopes when consenting:
    - `https://www.googleapis.com/auth/calendar.freebusy` (read availability)
    - `https://www.googleapis.com/auth/calendar.events.owned` (reserved for
      the later booking slice; this slice only reads)
-2. **Authorize** (one consent page, offline access so the server can refresh):
+2. **Authorize in the browser**: put `GOOGLE_CALENDAR_CLIENT_ID`,
+   `GOOGLE_CALENDAR_CLIENT_SECRET`, and `OPERATOR_TOKEN` in
+   `/etc/scheduling-agent/scheduling-agent.env`, restart the service, then
+   open as Jacob:
+   `https://scheduler.stephens.page/calendar/auth/start?token=OPERATOR_TOKEN`
+   (use the real token value once; the page immediately trades it for a
+   short-lived session cookie and drops it from the address bar). Click
+   through to Google, approve offline access so the server can refresh, and
+   you will land on a confirmation page. The exchange happens server-side;
+   codes and tokens never render, and the refresh token is stored with
+   owner-only permissions in `/var/lib/scheduling-agent`.
+3. **Authorize without the browser instead** (fallback; needs a Desktop-app
+   client with a localhost redirect):
    ```bash
    GOOGLE_CALENDAR_CLIENT_ID=... npm run calendars:auth-url
-   ```
-   Open the printed URL as `jacob@stephens.page`, approve, and copy the code.
-   The redirect URI defaults to `http://localhost:1/callback` and must be
-   registered on the OAuth client.
-3. **Exchange the code** (stores the refresh token with owner-only
-   permissions in the service data directory; the secret never prints):
-   ```bash
    GOOGLE_CALENDAR_CLIENT_ID=... GOOGLE_CALENDAR_CLIENT_SECRET=... \
      SCHEDULING_DATA_DIR=/var/lib/scheduling-agent \
      npm run calendars:auth -- --code <code>

@@ -41,43 +41,51 @@ export function loadCredentials(options: {
   readonly dataDir?: string;
 }): GoogleOAuthCredentials | undefined {
   const env = options.env ?? process.env;
-  const fromEnv = {
-    clientId: env.GOOGLE_CALENDAR_CLIENT_ID?.trim() || undefined,
-    clientSecret: env.GOOGLE_CALENDAR_CLIENT_SECRET?.trim() || undefined,
-    refreshToken: env.GOOGLE_CALENDAR_REFRESH_TOKEN?.trim() || undefined,
-  };
-  if (fromEnv.clientId && fromEnv.clientSecret && fromEnv.refreshToken) {
-    return {
-      clientId: fromEnv.clientId,
-      clientSecret: fromEnv.clientSecret,
-      refreshToken: fromEnv.refreshToken,
-    };
+  const client = loadClientConfig(options);
+  if (!client) {
+    return undefined;
+  }
+  const refreshToken =
+    env.GOOGLE_CALENDAR_REFRESH_TOKEN?.trim() ||
+    (options.dataDir ? readFileIfPresent(join(options.dataDir, "google-refresh")) : undefined);
+  if (!refreshToken) {
+    return undefined;
+  }
+  return { ...client, refreshToken };
+}
+
+export interface GoogleOAuthClient {
+  readonly clientId: string;
+  readonly clientSecret: string;
+}
+
+/** Load the OAuth client without requiring a stored refresh token. */
+export function loadClientConfig(options: {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly dataDir?: string;
+}): GoogleOAuthClient | undefined {
+  const env = options.env ?? process.env;
+  const clientId = env.GOOGLE_CALENDAR_CLIENT_ID?.trim() || undefined;
+  const clientSecret = env.GOOGLE_CALENDAR_CLIENT_SECRET?.trim() || undefined;
+  if (clientId && clientSecret) {
+    return { clientId, clientSecret };
   }
   if (!options.dataDir) {
     return undefined;
   }
-  let clientId = fromEnv.clientId;
-  let clientSecret = fromEnv.clientSecret;
   try {
     const raw = readFileIfPresent(join(options.dataDir, "google-client.json"));
-    if (raw) {
-      const parsed = JSON.parse(raw) as { clientId?: unknown; clientSecret?: unknown };
-      if (typeof parsed.clientId === "string") {
-        clientId = parsed.clientId;
-      }
-      if (typeof parsed.clientSecret === "string") {
-        clientSecret = parsed.clientSecret;
-      }
+    if (!raw) {
+      return undefined;
+    }
+    const parsed = JSON.parse(raw) as { clientId?: unknown; clientSecret?: unknown };
+    if (typeof parsed.clientId === "string" && typeof parsed.clientSecret === "string") {
+      return { clientId: parsed.clientId, clientSecret: parsed.clientSecret };
     }
   } catch {
     return undefined;
   }
-  const refreshToken =
-    fromEnv.refreshToken ?? readFileIfPresent(join(options.dataDir, "google-refresh"));
-  if (!clientId || !clientSecret || !refreshToken) {
-    return undefined;
-  }
-  return { clientId, clientSecret, refreshToken };
+  return undefined;
 }
 
 /** Persist OAuth client material with owner-only permissions. */
@@ -136,7 +144,12 @@ async function postTokenRequest(
       "Could not reach Google authorization servers. Calendar data is unavailable.",
     );
   }
-  let payload: { error?: unknown; access_token?: unknown; expires_in?: unknown } = {};
+  let payload: {
+    error?: unknown;
+    access_token?: unknown;
+    expires_in?: unknown;
+    refresh_token?: unknown;
+  } = {};
   try {
     payload = (await response.json()) as typeof payload;
   } catch {
@@ -158,6 +171,7 @@ async function postTokenRequest(
       typeof payload.expires_in === "number" && Number.isFinite(payload.expires_in)
         ? payload.expires_in
         : 3600,
+    ...(typeof payload.refresh_token === "string" ? { refresh_token: payload.refresh_token } : {}),
   };
 }
 

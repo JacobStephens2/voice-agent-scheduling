@@ -27,11 +27,20 @@ if (!allowedCallerNumbers || allowedCallerNumbers.length === 0) {
   );
 }
 
+const operatorToken = process.env.OPERATOR_TOKEN?.trim() || undefined;
+if (!operatorToken) {
+  process.stderr.write(
+    "[scheduling-agent] OPERATOR_TOKEN is not set; /calendar/auth/* setup pages are disabled.\n",
+  );
+}
+
 const app = createSchedulingServer({
   port: Number.parseInt(process.env.SCHEDULING_PORT || "3531", 10),
   webhookSecret: requiredEnv("XAI_WEBHOOK_SECRET"),
   apiKey: requiredEnv("XAI_API_KEY"),
   evidenceToken: requiredEnv("EVIDENCE_TOKEN"),
+  operatorToken,
+  publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() || undefined,
   maxConcurrentCalls: Number.parseInt(process.env.MAX_CONCURRENT_CALLS || "1", 10),
   allowedCallerNumbers,
   maxCallDurationMs: Number.parseInt(process.env.MAX_CALL_DURATION_MS || "600000", 10),
