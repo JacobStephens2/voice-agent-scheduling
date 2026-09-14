@@ -30,7 +30,7 @@ If a live call reports a different model, Direct SIP is unsuitable and the accep
 
 ## Public admission
 
-Public callers remain disabled until later tickets complete. `ALLOWED_CALLER_NUMBERS` must contain the authorized smoke-call number. Primary-calendar writes are not implemented in this slice; availability is synthetic and labeled as such.
+Public callers remain disabled until later tickets complete. `ALLOWED_CALLER_NUMBERS` must contain the authorized smoke-call number. Primary-calendar writes are not implemented in this slice; availability is real Google Calendar availability for Jacob's selected calendars (see [calendar setup](calendar-setup.md)).
 
 ## Privacy and retention
 

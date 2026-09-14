@@ -11,7 +11,11 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "smoke:pstn": "node --experimental-strip-types src/smoke.ts"
+    "smoke:pstn": "node --experimental-strip-types src/smoke.ts",
+    "calendars:auth-url": "npm run build --silent && node dist/calendar-setup.js auth-url",
+    "calendars:auth": "npm run build --silent && node dist/calendar-setup.js auth",
+    "calendars:list": "npm run build --silent && node dist/calendar-setup.js list",
+    "calendars:select": "npm run build --silent && node dist/calendar-setup.js select"
   },
   "dependencies": {
     "ws": "^8.18.3"
