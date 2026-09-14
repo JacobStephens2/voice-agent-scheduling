@@ -47,7 +47,7 @@ Provider-side retention is separate:
 # Isolated host setup (idempotent)
 bash ops/setup-scheduling-service.sh
 
-# Build, ship, and restart
+# Build, ship, and restart (also runs automatically on merge into master)
 bash ops/deploy-release.sh
 
 # Authorized inbound PSTN smoke call
