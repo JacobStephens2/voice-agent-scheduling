@@ -83,6 +83,13 @@ describe("calendar availability tool", () => {
     expect(result.slots).toEqual([]);
   });
 
+  it("asks for clarification on an impossible calendar date instead of normalizing it", async () => {
+    const result = await toolWith(EMPTY_DAY).execute({ date: "2026-02-30" });
+    expect(result.status).toBe("unavailable");
+    expect(result.reason).toBe("invalid_date");
+    expect(result.slots).toEqual([]);
+  });
+
   it("rejects a date inside the 72-hour notice period", async () => {
     const result = await toolWith(EMPTY_DAY).execute({ date: "2026-09-09" });
     expect(result.status).toBe("unavailable");

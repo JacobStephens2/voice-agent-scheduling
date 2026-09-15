@@ -1,4 +1,4 @@
-import { formatTimeInZone, isIsoDate, weekdayInTimeZone, zonedDateTime } from "../time.js";
+import { formatTimeInZone, isIsoDate, isValidCalendarDate, weekdayInTimeZone, zonedDateTime } from "../time.js";
 import {
   createTokenProvider,
   loadCredentials,
@@ -145,7 +145,7 @@ export function createCalendarAvailabilityTool(
           "Please ask the caller which date they would like, and check that exact date.",
         );
       }
-      if (!isIsoDate(args.date) || !zonedDateTime(args.date, "12:00", SCHEDULING_TIMEZONE)) {
+      if (!isIsoDate(args.date) || !isValidCalendarDate(args.date) || !zonedDateTime(args.date, "12:00", SCHEDULING_TIMEZONE)) {
         return unavailable(
           "invalid_date",
           `I could not understand '${args.date}' as a date. Please clarify the exact date with the caller and check again.`,
