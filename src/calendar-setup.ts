@@ -8,7 +8,9 @@
  *   3. GOOGLE_CALENDAR_CLIENT_ID=... GOOGLE_CALENDAR_CLIENT_SECRET=... \
  *        npm run calendars:auth -- --code <code>
  *      -> exchanges the code and stores the refresh token (0600) in the data dir.
- *   4. npm run calendars:list -> show Jacob calendar metadata.
+ *   4. npm run calendars:list -- --calendars <id,...>
+ *      -> validate Jacob's candidate calendar IDs through freeBusy
+ *         (the minimal scopes cannot browse by name) and report reachability.
  *   5. npm run calendars:select -- --primary <id> --conflicts <id,...>
  *      -> persist Jacob's explicit selection.
  *
@@ -23,7 +25,7 @@ import {
   saveClientConfig,
   saveRefreshToken,
 } from "./calendar/auth.js";
-import { listCalendars } from "./calendar/client.js";
+import { validateCalendars } from "./calendar/client.js";
 import { saveSelection } from "./calendar/selection.js";
 
 const DEFAULT_REDIRECT_URI = "http://localhost:1/callback";
@@ -99,15 +101,24 @@ async function list(): Promise<void> {
   if (!credentials) {
     throw new Error("Calendar authorization is incomplete. Run calendars:auth first.");
   }
+  const extra = (flagValue("--calendars") ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  const candidates = [...new Set(["primary", ...extra])];
   const token = await createTokenProvider(credentials, fetch).getAccessToken();
-  const calendars = await listCalendars(fetch, token);
-  for (const calendar of calendars) {
+  const validated = await validateCalendars(fetch, token, candidates);
+  for (const calendar of validated) {
     process.stdout.write(
-      `${calendar.primary ? "*" : " "} ${calendar.id} | ${calendar.summary} | ${calendar.accessRole}\n`,
+      calendar.reachable
+        ? `ok ${calendar.id}\n`
+        : `UNREACHABLE ${calendar.id} (${calendar.error ?? "unknown"})\n`,
     );
   }
   process.stdout.write(
-    `\n${calendars.length} calendar(s). Ask Jacob to choose the primary destination and every conflict calendar.\n`,
+    `\nChecked ${validated.length} candidate(s) through freeBusy; no event content was read. ` +
+      `Copy IDs from Google Calendar Settings > Integrate calendar, then persist the choice:\n` +
+      `npm run calendars:select -- --primary <id> --conflicts <id,...>\n`,
   );
 }
 
