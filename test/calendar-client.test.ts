@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   CalendarQueryError,
-  listCalendars,
   queryBusyIntervals,
+  validateCalendars,
 } from "../src/calendar/client.js";
 
 function cannedFetch(handler: (url: string, init?: RequestInit) => Response): typeof fetch {
@@ -11,30 +11,40 @@ function cannedFetch(handler: (url: string, init?: RequestInit) => Response): ty
 }
 
 describe("calendar client", () => {
-  it("presents calendar metadata for selection without event content", async () => {
+  it("validates candidate calendars through freeBusy without reading event content", async () => {
+    let requestUrl = "";
     const fetchFn = cannedFetch((url) => {
-      expect(url).toContain("/calendarList");
+      requestUrl = url;
       return Response.json({
-        items: [
-          { id: "primary-id", summary: "Jacob", primary: true, accessRole: "owner" },
-          { id: "team-id", summary: "Team", accessRole: "reader" },
-          { id: "", summary: "Bad" },
-        ],
+        calendars: {
+          primary: { busy: [] },
+          "team@example.com": {
+            errors: [{ domain: "global", reason: "notFound" }],
+            busy: [],
+          },
+        },
       });
     });
 
-    const calendars = await listCalendars(fetchFn, "token");
-    expect(calendars).toEqual([
-      { id: "primary-id", summary: "Jacob", primary: true, accessRole: "owner" },
-      { id: "team-id", summary: "Team", primary: false, accessRole: "reader" },
+    const validated = await validateCalendars(fetchFn, "token", [
+      "primary",
+      "team@example.com",
     ]);
-    const serialized = JSON.stringify(calendars);
+    expect(requestUrl).toContain("/freeBusy");
+    expect(requestUrl).not.toContain("/calendarList");
+    expect(validated).toEqual([
+      { id: "primary", reachable: true },
+      { id: "team@example.com", reachable: false, error: "notFound" },
+    ]);
+    const serialized = JSON.stringify(validated);
     expect(serialized).not.toContain("Appointment");
   });
 
   it("maps revoked authorization to an auth failure", async () => {
     const fetchFn = cannedFetch(() => new Response("{}", { status: 401 }));
-    const error = await listCalendars(fetchFn, "stale").catch((value: unknown) => value);
+    const error = await validateCalendars(fetchFn, "stale", ["primary"]).catch(
+      (value: unknown) => value,
+    );
     expect(error).toBeInstanceOf(CalendarQueryError);
     expect((error as CalendarQueryError).kind).toBe("auth");
   });

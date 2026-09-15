@@ -33,10 +33,18 @@ audio or transcripts are retained.
      SCHEDULING_DATA_DIR=/var/lib/scheduling-agent \
      npm run calendars:auth -- --code <code>
    ```
-4. **List calendar metadata** and ask Jacob to choose:
+4. **Validate candidate calendar IDs** and ask Jacob to choose. The
+   minimal scopes authorize `freeBusy` but not browsing by name, so copy
+   candidate IDs from Google Calendar Settings > Integrate calendar and check
+   reachability (prints `ok` / `UNREACHABLE` per ID, no event content read):
    ```bash
-   SCHEDULING_DATA_DIR=/var/lib/scheduling-agent npm run calendars:list
+   npm run calendars:list -- --calendars <id,...>
    ```
+   With no `--calendars` flag it checks the `primary` alias. Run this from a
+   repo checkout with `GOOGLE_CALENDAR_CLIENT_ID`,
+   `GOOGLE_CALENDAR_CLIENT_SECRET`, and `GOOGLE_CALENDAR_REFRESH_TOKEN` in
+   the environment; there is no checkout on the server (deploys ship `dist/`
+   only).
 5. **Persist his explicit selection** (primary destination plus every
    calendar that represents a real commitment):
    ```bash

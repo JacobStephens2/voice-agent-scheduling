@@ -4,11 +4,10 @@ import { CalendarAuthError } from "./auth.js";
 
 type FetchFn = typeof fetch;
 
-export interface CalendarMetadata {
+export interface CalendarValidation {
   readonly id: string;
-  readonly summary: string;
-  readonly primary: boolean;
-  readonly accessRole: string;
+  readonly reachable: boolean;
+  readonly error?: string;
 }
 
 export class CalendarQueryError extends Error {
@@ -57,44 +56,61 @@ function toAuthOrTransport(error: unknown): CalendarQueryError {
   );
 }
 
+function firstErrorReason(entry: { errors?: unknown }): string {
+  if (Array.isArray(entry.errors)) {
+    const first = entry.errors[0] as { reason?: unknown } | undefined;
+    if (first && typeof first.reason === "string" && first.reason) {
+      return first.reason;
+    }
+  }
+  return "unknown";
+}
+
 /**
- * Present calendar metadata so Jacob can select the destination and every
- * conflict calendar. Returns summaries and roles only; no event content.
+ * Validate candidate calendar IDs so Jacob can select the destination and
+ * every conflict calendar. Uses freeBusy, which the minimal Calendar scopes
+ * authorize: calendarList would need a broader read scope, so browsing by
+ * name is unavailable. Reports per-calendar reachability only; no event
+ * content is read.
  */
-export async function listCalendars(
+export async function validateCalendars(
   fetchFn: FetchFn,
   accessToken: string,
-): Promise<CalendarMetadata[]> {
+  calendarIds: readonly string[],
+): Promise<CalendarValidation[]> {
+  const timeMin = new Date();
+  const timeMax = new Date(timeMin.getTime() + 24 * 60 * 60 * 1000);
   let response: Response;
   try {
-    response = await fetchFn("https://www.googleapis.com/calendar/v3/users/me/calendarList", {
-      headers: { authorization: `Bearer ${accessToken}` },
+    response = await fetchFn("https://www.googleapis.com/calendar/v3/freeBusy", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        timeMin: timeMin.toISOString(),
+        timeMax: timeMax.toISOString(),
+        timeZone: SCHEDULING_TIMEZONE,
+        items: calendarIds.map((id) => ({ id })),
+      }),
     });
-  } catch {
-    throw new CalendarQueryError("transport", UNAVAILABLE_MESSAGE);
+  } catch (error) {
+    throw toAuthOrTransport(error);
   }
   throwForHttpStatus(response);
   const payload = await readJsonBody(response);
-  if (!Array.isArray(payload.items)) {
-    return [];
+  if (typeof payload.calendars !== "object" || payload.calendars === null) {
+    throw new CalendarQueryError("transport", UNAVAILABLE_MESSAGE);
   }
-  const calendars: CalendarMetadata[] = [];
-  for (const item of payload.items) {
-    if (typeof item !== "object" || item === null) {
-      continue;
+  const calendars = payload.calendars as Record<string, unknown>;
+  return calendarIds.map((id) => {
+    const entry = calendars[id] as { errors?: unknown } | undefined;
+    if (!entry || entry.errors !== undefined) {
+      return { id, reachable: false, error: firstErrorReason(entry ?? {}) };
     }
-    const entry = item as { id?: unknown; summary?: unknown; primary?: unknown; accessRole?: unknown };
-    if (typeof entry.id !== "string" || !entry.id) {
-      continue;
-    }
-    calendars.push({
-      id: entry.id,
-      summary: typeof entry.summary === "string" ? entry.summary : entry.id,
-      primary: entry.primary === true,
-      accessRole: typeof entry.accessRole === "string" ? entry.accessRole : "unknown",
-    });
-  }
-  return calendars;
+    return { id, reachable: true };
+  });
 }
 
 interface FreeBusyEntry {
