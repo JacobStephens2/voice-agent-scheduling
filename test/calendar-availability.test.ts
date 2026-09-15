@@ -69,6 +69,15 @@ describe("calendar availability policy", () => {
     expect(slots.map((slot) => slot.startTime)).not.toContain("14:30");
   });
 
+  it("offers no starts for an impossible calendar date", () => {
+    // 2026-02-30 normalizes to 2026-03-02, which is inside this window;
+    // without a strict date check the policy would label March slots "2026-02-30".
+    const nearMiss = new Date("2026-02-23T14:00:00-05:00");
+    expect(
+      computeAvailableStarts({ date: "2026-02-30", now: nearMiss, busy: [] }),
+    ).toEqual([]);
+  });
+
   it("offers no starts on weekends", () => {
     expect(
       computeAvailableStarts({ date: "2026-09-12", now: MONDAY_14H, busy: [] }),

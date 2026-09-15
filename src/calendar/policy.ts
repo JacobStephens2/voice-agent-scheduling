@@ -1,4 +1,4 @@
-import { weekdayInTimeZone, zonedDateTime } from "../time.js";
+import { isValidCalendarDate, weekdayInTimeZone, zonedDateTime } from "../time.js";
 
 export const SCHEDULING_TIMEZONE = "America/New_York";
 export const APPOINTMENT_MINUTES = 30;
@@ -38,6 +38,9 @@ export function computeAvailableStarts(options: {
   readonly now: Date;
   readonly busy: readonly BusyInterval[];
 }): AvailableStart[] {
+  if (!isValidCalendarDate(options.date)) {
+    return [];
+  }
   const weekday = weekdayInTimeZone(options.date, SCHEDULING_TIMEZONE);
   if (weekday === undefined || weekday === "Sat" || weekday === "Sun") {
     return [];

@@ -5,6 +5,27 @@ export function isIsoDate(value: string): boolean {
   return DATE_PATTERN.test(value);
 }
 
+/**
+ * Strict calendar-date check: the YYYY-MM-DD shape must also exist on the
+ * calendar. Date.UTC normalizes overflow (February 30 becomes March 2), so
+ * round-trip the components and reject anything that does not survive.
+ */
+export function isValidCalendarDate(value: string): boolean {
+  const match = value.match(DATE_PATTERN);
+  if (!match) {
+    return false;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const roundTrip = new Date(Date.UTC(year, month - 1, day));
+  return (
+    roundTrip.getUTCFullYear() === year &&
+    roundTrip.getUTCMonth() === month - 1 &&
+    roundTrip.getUTCDate() === day
+  );
+}
+
 function offsetMsAt(instant: Date, timeZone: string): number {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
