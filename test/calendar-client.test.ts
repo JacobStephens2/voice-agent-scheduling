@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CalendarQueryError,
+  createAppointmentEvent,
   queryBusyIntervals,
   validateCalendars,
 } from "../src/calendar/client.js";
@@ -137,5 +138,114 @@ describe("calendar client", () => {
     expect(busy).toHaveLength(1);
     expect(busy[0]?.start.toISOString()).toBe("2026-09-11T04:00:00.000Z");
     expect(busy[0]?.end.toISOString()).toBe("2026-09-12T04:00:00.000Z");
+  });
+
+  it("creates a 30-minute busy appointment and returns the stored event from GET, not the insert body", async () => {
+    const eventId = "0123456789abcdef0123456789abcdef";
+    const requests: Array<{ method?: string; url: string; body?: { [key: string]: unknown } }> =
+      [];
+    const stored = {
+      id: eventId,
+      status: "confirmed",
+      summary: "Appointment with Ada Lovelace",
+      description: "Callback number: +15551239876\nPurpose: Website review",
+      start: { dateTime: "2026-09-11T10:00:00", timeZone: "America/New_York" },
+      end: { dateTime: "2026-09-11T10:30:00", timeZone: "America/New_York" },
+      transparency: "opaque",
+      reminders: {
+        useDefault: false,
+        overrides: [{ method: "popup", minutes: 10 }],
+      },
+    };
+    const fetchFn = cannedFetch((url, init) => {
+      const method = init?.method ?? "GET";
+      requests.push({
+        method,
+        url,
+        body: init?.body
+          ? (JSON.parse(String(init.body)) as { [key: string]: unknown })
+          : undefined,
+      });
+      if (url.includes("/events") && method === "POST") {
+        return Response.json({ id: eventId, summary: "insert-response-not-proof" });
+      }
+      if (url.includes(`/events/${eventId}`) && method === "GET") {
+        return Response.json(stored);
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    });
+
+    const event = await createAppointmentEvent(fetchFn, "token", {
+      calendarId: "primary",
+      eventId,
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      purpose: "Website review",
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+
+    const insert = requests.find((entry) => entry.method === "POST");
+    expect(insert?.url).toContain("/calendars/primary/events");
+    expect(insert?.url).toContain("sendUpdates=none");
+    expect(insert?.body).toMatchObject({
+      id: eventId,
+      summary: "Appointment with Ada Lovelace",
+      description: "Callback number: +15551239876\nPurpose: Website review",
+      start: { dateTime: "2026-09-11T10:00:00", timeZone: "America/New_York" },
+      end: { dateTime: "2026-09-11T10:30:00", timeZone: "America/New_York" },
+      transparency: "opaque",
+      reminders: {
+        useDefault: false,
+        overrides: [{ method: "popup", minutes: 10 }],
+      },
+    });
+    expect(insert?.body).not.toHaveProperty("attendees");
+    expect(insert?.body).not.toHaveProperty("conferenceData");
+    expect(JSON.stringify(insert?.body)).not.toContain("email");
+
+    expect(requests.some((entry) => entry.method === "GET" && entry.url.includes(eventId))).toBe(
+      true,
+    );
+    expect(event.summary).toBe("Appointment with Ada Lovelace");
+    expect(event.summary).not.toBe("insert-response-not-proof");
+    expect(event.hangoutLink).toBeUndefined();
+    expect(event.attendees).toEqual([]);
+    expect(event.conferenceData).toBeUndefined();
+    expect(event.reminders?.overrides).toEqual([{ method: "popup", minutes: 10 }]);
+    expect(event.reminders?.useDefault).toBe(false);
+  });
+
+  it("does not treat a stored event with a Meet link or email reminder as a successful appointment", async () => {
+    const eventId = "0123456789abcdef0123456789abcdef";
+    const fetchFn = cannedFetch((url, init) => {
+      const method = init?.method ?? "GET";
+      if (url.includes("/events") && method === "POST") {
+        return Response.json({ id: eventId });
+      }
+      if (url.includes(`/events/${eventId}`) && method === "GET") {
+        return Response.json({
+          id: eventId,
+          summary: "Appointment with Ada Lovelace",
+          hangoutLink: "https://meet.google.com/abc-defg-hij",
+          attendees: [{ email: "ada@example.com" }],
+          reminders: {
+            useDefault: false,
+            overrides: [{ method: "email", minutes: 10 }],
+          },
+        });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    });
+
+    const error = await createAppointmentEvent(fetchFn, "token", {
+      calendarId: "primary",
+      eventId,
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      date: "2026-09-11",
+      startTime: "10:00",
+    }).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(CalendarQueryError);
   });
 });

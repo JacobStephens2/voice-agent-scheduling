@@ -15,7 +15,7 @@ if (!evidenceToken) {
 
 console.log(`[smoke:pstn] Target service: ${targetUrl}`);
 console.log(`[smoke:pstn] Waiting up to ${timeoutMs / 1000}s for an inbound smoke call...`);
-console.log("[smoke:pstn] Place the authorized call, ask for next Friday availability, then hang up.");
+console.log("[smoke:pstn] Place the authorized call, ask for a weekday date, and optionally complete a confirmed booking, then hang up.");
 
 const deadline = Date.now() + timeoutMs;
 
@@ -74,7 +74,7 @@ while (Date.now() < deadline) {
     }
     if (!match.toolRoundTrips || match.toolRoundTrips < 1) {
       console.error(
-        `[smoke:pstn] FAILURE: Expected at least one synthetic availability tool round trip, got ${match.toolRoundTrips}`,
+        `[smoke:pstn] FAILURE: Expected at least one scheduling tool round trip, got ${match.toolRoundTrips}`,
       );
       process.exit(1);
     }
@@ -95,7 +95,7 @@ while (Date.now() < deadline) {
     console.log(`- Connection route: ${match.connectionRoute}`);
     console.log(`- Provider model verified: ${match.modelVerified}`);
     console.log(`- Provider reasoning verified: ${match.reasoningVerified}`);
-    console.log(`- Synthetic tool round trips: ${match.toolRoundTrips}`);
+    console.log(`- Tool round trips: ${match.toolRoundTrips}`);
     console.log(`- Call duration: ${Math.round((match.durationMs ?? 0) / 1000)}s`);
     console.log(
       `- Estimated cost: $${((match.estimatedCostMicroUsd ?? 0) / 1_000_000).toFixed(4)}`,

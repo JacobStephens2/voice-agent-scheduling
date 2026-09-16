@@ -1,5 +1,5 @@
 /**
- * Operator setup for Google Calendar availability (issue #3).
+ * Operator setup for Google Calendar authorization and selection.
  *
  * Human steps (also see docs/deployment/calendar-setup.md):
  *   1. Create a Desktop-app OAuth client for jacob@stephens.page.

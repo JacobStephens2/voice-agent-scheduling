@@ -1,18 +1,30 @@
-export interface AvailabilityTool {
-  definition(): {
-    readonly type: "function";
-    readonly name: string;
-    readonly description: string;
-    readonly parameters: {
-      readonly type: "object";
-      readonly properties: Record<string, unknown>;
-      readonly required: readonly string[];
-    };
+export interface ToolDefinition {
+  readonly type: "function";
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: {
+    readonly type: "object";
+    readonly properties: Record<string, unknown>;
+    readonly required: readonly string[];
   };
+}
+
+export interface AvailabilityTool {
+  definition(): ToolDefinition;
   execute(
     args: { date?: string; timezone?: string },
     options?: { referenceTime?: Date },
   ): unknown | Promise<unknown>;
+}
+
+export interface BookingTool {
+  definitions(): readonly ToolDefinition[];
+  execute(
+    name: string,
+    args: Record<string, unknown>,
+    options: { callId: string; referenceTime?: Date },
+  ): unknown | Promise<unknown>;
+  release?(callId: string): void;
 }
 
 export interface RealtimeSocket {
@@ -46,7 +58,7 @@ const MODEL_ALIASES: Readonly<Record<string, string>> = {
 
 const DEFAULT_MAX_DURATION_MS = 10 * 60 * 1000;
 
-const INSTRUCTIONS = [
+const AVAILABILITY_INSTRUCTIONS = [
   "You are Jacob's scheduling assistant.",
   "You help callers learn Jacob's availability and arrange 30-minute phone appointments.",
   "Identify yourself as Jacob's scheduling assistant.",
@@ -57,8 +69,26 @@ const INSTRUCTIONS = [
   "If the caller corrects a date or timezone, check the corrected details and offer the new options.",
   "Never describe Jacob's existing events; only share the available times the tool returns.",
   "If the tool reports no availability or that the calendar cannot be reached, say so honestly and invite the caller to try another date or try again later.",
-  "Do not claim that an appointment has been booked or written to a calendar.",
 ].join(" ");
+
+const BOOKING_INSTRUCTIONS = [
+  "Collect the caller's name and a callback number they speak and confirm. The callback number may differ from the number that placed this call. Purpose is optional. Do not request an email address.",
+  "After the caller chooses an offered time and has confirmed their callback number, call propose_appointment with their name, confirmed callback number, date, Eastern start time, and optional purpose.",
+  "Read back every field the proposal returns: name, callback number, exact date, start and end times, and timezone. Do not call confirm_appointment until that entire readback is finished.",
+  "A material correction of name, callback number, date, time, timezone, or purpose requires a new propose_appointment and a fresh complete readback. Do not reuse an earlier proposal.",
+  "Call confirm_appointment only after the caller explicitly agrees to the current readback.",
+  "Do not call confirm_appointment for unclear assent, background speech, an interrupted readback, a refusal, or if the caller has not clearly agreed.",
+  "If confirm_appointment returns that the time is unavailable, offer fresh alternatives from check_availability. Do not claim the appointment was booked.",
+  "If confirm_appointment reports the appointment is booked, tell the caller it is booked and that Jacob will call the confirmed callback number at the agreed time. Do not send or promise any automated callback, message, or email.",
+  "Never say the appointment is booked unless confirm_appointment reported that the calendar event exists.",
+].join(" ");
+
+function sessionInstructions(booking: BookingTool | undefined): string {
+  if (!booking) {
+    return `${AVAILABILITY_INSTRUCTIONS} Do not claim that an appointment has been booked or written to a calendar.`;
+  }
+  return `${AVAILABILITY_INSTRUCTIONS} ${BOOKING_INSTRUCTIONS}`;
+}
 
 export function resolveVoiceModel(reported: unknown): string | undefined {
   if (typeof reported !== "string") {
@@ -78,7 +108,10 @@ function unexpectedModelError(reported: unknown): string {
   return `Expected model ${REQUIRED_MODEL}, but provider returned ${String(reported)}`;
 }
 
-function sessionUpdatePayload(availabilityTool: AvailabilityTool): string {
+function sessionUpdatePayload(
+  availabilityTool: AvailabilityTool,
+  booking: BookingTool | undefined,
+): string {
   return JSON.stringify({
     type: "session.update",
     session: {
@@ -90,41 +123,71 @@ function sessionUpdatePayload(availabilityTool: AvailabilityTool): string {
         prefix_padding_ms: 300,
         silence_duration_ms: 200,
       },
-      instructions: INSTRUCTIONS,
-      tools: [availabilityTool.definition()],
+      instructions: sessionInstructions(booking),
+      tools: [availabilityTool.definition(), ...(booking?.definitions() ?? [])],
     },
   });
 }
 
-async function availabilityOutputMessages(
-  event: { name?: unknown; call_id?: unknown; arguments?: unknown },
-  availabilityTool: AvailabilityTool,
-  referenceTime: Date | undefined,
-): Promise<string[] | undefined> {
-  if (event.name !== "check_availability" || typeof event.call_id !== "string") {
-    return undefined;
-  }
-  let args: { date?: string; timezone?: string } = {};
+function parseToolArgs(raw: unknown): Record<string, unknown> {
   try {
-    args = JSON.parse(String(event.arguments ?? "{}")) as {
-      date?: string;
-      timezone?: string;
-    };
+    const parsed = JSON.parse(String(raw ?? "{}")) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
   } catch {
-    args = {};
+    // The model sometimes emits invalid JSON; treat that as empty args.
   }
-  const result = await availabilityTool.execute(args, { referenceTime });
+  return {};
+}
+
+function functionOutputMessages(toolCallId: string, result: unknown): string[] {
   return [
     JSON.stringify({
       type: "conversation.item.create",
       item: {
         type: "function_call_output",
-        call_id: event.call_id,
+        call_id: toolCallId,
         output: JSON.stringify(result),
       },
     }),
     JSON.stringify({ type: "response.create" }),
   ];
+}
+
+async function toolOutputMessages(
+  event: { name?: unknown; call_id?: unknown; arguments?: unknown },
+  options: {
+    availabilityTool: AvailabilityTool;
+    booking?: BookingTool;
+    callId: string;
+    referenceTime: Date | undefined;
+  },
+): Promise<string[] | undefined> {
+  if (typeof event.call_id !== "string" || typeof event.name !== "string") {
+    return undefined;
+  }
+  const args = parseToolArgs(event.arguments);
+  if (event.name === "check_availability") {
+    const result = await options.availabilityTool.execute(
+      { date: asOptionalString(args.date), timezone: asOptionalString(args.timezone) },
+      { referenceTime: options.referenceTime },
+    );
+    return functionOutputMessages(event.call_id, result);
+  }
+  const bookingNames = new Set(options.booking?.definitions().map((tool) => tool.name) ?? []);
+  if (options.booking && bookingNames.has(event.name)) {
+    const result = await options.booking.execute(event.name, args, {
+      callId: options.callId,
+      referenceTime: options.referenceTime,
+    });
+    return functionOutputMessages(event.call_id, result);
+  }
+  return undefined;
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
 
 function eventText(data: unknown): string | undefined {
@@ -147,6 +210,7 @@ export function createTelephoneSession(options: {
   callId: string;
   apiKey: string;
   availabilityTool: AvailabilityTool;
+  booking?: BookingTool;
   connectWebSocket: ConnectWebSocket;
   hangupCall?: (callId: string) => Promise<void>;
   referenceTime?: Date;
@@ -231,7 +295,7 @@ export function createTelephoneSession(options: {
                 }
                 modelVerified = resolved;
               }
-              socket?.send(sessionUpdatePayload(options.availabilityTool));
+              socket?.send(sessionUpdatePayload(options.availabilityTool, options.booking));
               break;
             }
             case "session.updated": {
@@ -260,15 +324,19 @@ export function createTelephoneSession(options: {
               break;
             }
             case "response.function_call_arguments.done": {
-              const callId = event.call_id;
-              void availabilityOutputMessages(
+              const toolCallId = event.call_id;
+              void toolOutputMessages(
                 {
                   name: event.name,
-                  call_id: callId,
+                  call_id: toolCallId,
                   arguments: event.arguments,
                 },
-                options.availabilityTool,
-                options.referenceTime,
+                {
+                  availabilityTool: options.availabilityTool,
+                  booking: options.booking,
+                  callId: options.callId,
+                  referenceTime: options.referenceTime,
+                },
               )
                 .then((messages) => {
                   if (!messages) {
@@ -280,7 +348,7 @@ export function createTelephoneSession(options: {
                   }
                 })
                 .catch(() => {
-                  finish("failed", "Availability tool failed");
+                  finish("failed", "Scheduling tool failed");
                 });
               break;
             }

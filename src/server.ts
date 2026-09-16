@@ -8,9 +8,10 @@ import {
   saveRefreshToken,
 } from "./calendar/auth.js";
 import { createCalendarAvailabilityTool } from "./calendar/availability-tool.js";
+import { createAppointmentBooking } from "./calendar/booking-tool.js";
 import { createOAuthRouter } from "./calendar/oauth-routes.js";
 import { loadSelection } from "./calendar/selection.js";
-import type { AvailabilityTool, ConnectWebSocket } from "./session.js";
+import type { AvailabilityTool, BookingTool, ConnectWebSocket } from "./session.js";
 
 export interface ServerConfig {
   readonly port: number;
@@ -22,6 +23,7 @@ export interface ServerConfig {
   readonly maxCallDurationMs?: number;
   readonly dataDir?: string;
   readonly availabilityTool?: AvailabilityTool;
+  readonly booking?: BookingTool;
   readonly operatorToken?: string;
   readonly publicBaseUrl?: string;
   readonly fetchFn?: typeof fetch;
@@ -78,6 +80,9 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
     availabilityTool:
       config.availabilityTool ??
       createCalendarAvailabilityTool({ fetchFn, dataDir: config.dataDir }),
+    booking:
+      config.booking ??
+      createAppointmentBooking({ fetchFn, dataDir: config.dataDir }),
     maxConcurrentCalls: config.maxConcurrentCalls ?? 1,
     allowedCallerNumbers: config.allowedCallerNumbers,
     maxCallDurationMs: config.maxCallDurationMs,

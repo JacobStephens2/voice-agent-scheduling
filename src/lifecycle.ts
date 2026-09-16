@@ -16,6 +16,7 @@ import {
 import {
   createTelephoneSession,
   type AvailabilityTool,
+  type BookingTool,
   type ConnectWebSocket,
   type RealtimeSocket,
   type SessionOutcome,
@@ -36,6 +37,7 @@ export interface CallLifecycleManagerOptions {
   readonly webhookSecret: string;
   readonly apiKey: string;
   readonly availabilityTool: AvailabilityTool;
+  readonly booking?: BookingTool;
   readonly maxConcurrentCalls?: number;
   readonly allowedCallerNumbers?: readonly string[];
   readonly connectWebSocket?: ConnectWebSocket;
@@ -152,6 +154,7 @@ export function createCallLifecycleManager(
         callId: result.callId,
         apiKey: options.apiKey,
         availabilityTool: options.availabilityTool,
+        booking: options.booking,
         connectWebSocket,
         hangupCall,
         maxDurationMs: options.maxCallDurationMs,

@@ -203,3 +203,200 @@ export async function queryBusyIntervals(
   }
   return merged;
 }
+
+export interface StoredCalendarEvent {
+  readonly id: string;
+  readonly status?: string;
+  readonly summary?: string;
+  readonly description?: string;
+  readonly start?: { dateTime?: string; timeZone?: string };
+  readonly end?: { dateTime?: string; timeZone?: string };
+  readonly transparency?: string;
+  readonly attendees: readonly unknown[];
+  readonly hangoutLink?: string;
+  readonly conferenceData?: unknown;
+  readonly reminders?: {
+    readonly useDefault?: boolean;
+    readonly overrides?: readonly { readonly method?: string; readonly minutes?: number }[];
+  };
+}
+
+function eventsUrl(calendarId: string, eventId?: string): string {
+  const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
+  return eventId ? `${base}/${encodeURIComponent(eventId)}` : base;
+}
+
+function appointmentDescription(callbackNumber: string, purpose?: string): string {
+  if (purpose && purpose.trim()) {
+    return `Callback number: ${callbackNumber}\nPurpose: ${purpose.trim()}`;
+  }
+  return `Callback number: ${callbackNumber}`;
+}
+
+function endTimeOf(startTime: string): string {
+  const hour = Number(startTime.slice(0, 2));
+  const minute = Number(startTime.slice(3));
+  if (minute === 0) {
+    return `${String(hour).padStart(2, "0")}:30`;
+  }
+  return `${String(hour + 1).padStart(2, "0")}:00`;
+}
+
+function storedAppointmentMatchesPolicy(event: StoredCalendarEvent): boolean {
+  if (event.hangoutLink) {
+    return false;
+  }
+  if (event.attendees.length > 0) {
+    return false;
+  }
+  if (event.conferenceData !== undefined && event.conferenceData !== null) {
+    return false;
+  }
+  if (event.transparency && event.transparency !== "opaque") {
+    return false;
+  }
+  if (!event.summary?.startsWith("Appointment with ")) {
+    return false;
+  }
+  if (event.reminders?.useDefault !== false) {
+    return false;
+  }
+  const overrides = event.reminders.overrides ?? [];
+  if (overrides.length !== 1) {
+    return false;
+  }
+  const reminder = overrides[0];
+  return reminder?.method === "popup" && reminder.minutes === 10;
+}
+
+function asStoredEvent(payload: { [key: string]: unknown }): StoredCalendarEvent {
+  const attendees = Array.isArray(payload.attendees) ? payload.attendees : [];
+  const reminders =
+    payload.reminders && typeof payload.reminders === "object"
+      ? (payload.reminders as StoredCalendarEvent["reminders"])
+      : undefined;
+  return {
+    id: typeof payload.id === "string" ? payload.id : "",
+    status: typeof payload.status === "string" ? payload.status : undefined,
+    summary: typeof payload.summary === "string" ? payload.summary : undefined,
+    description: typeof payload.description === "string" ? payload.description : undefined,
+    start:
+      payload.start && typeof payload.start === "object"
+        ? (payload.start as StoredCalendarEvent["start"])
+        : undefined,
+    end:
+      payload.end && typeof payload.end === "object"
+        ? (payload.end as StoredCalendarEvent["end"])
+        : undefined,
+    transparency: typeof payload.transparency === "string" ? payload.transparency : undefined,
+    attendees,
+    hangoutLink: typeof payload.hangoutLink === "string" ? payload.hangoutLink : undefined,
+    conferenceData: payload.conferenceData,
+    reminders,
+  };
+}
+
+/**
+ * Read one event as stored on the account. Used after insert so callers
+ * observe account-level fields (attendees, Meet, reminders), not the
+ * insert request parameters.
+ */
+export async function getAppointmentEvent(
+  fetchFn: FetchFn,
+  accessToken: string,
+  calendarId: string,
+  eventId: string,
+): Promise<StoredCalendarEvent> {
+  let response: Response;
+  try {
+    response = await fetchFn(eventsUrl(calendarId, eventId), {
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+  } catch (error) {
+    throw toAuthOrTransport(error);
+  }
+  throwForHttpStatus(response);
+  const payload = await readJsonBody(response);
+  const stored = asStoredEvent(payload);
+  if (!stored.id) {
+    throw new CalendarQueryError("transport", UNAVAILABLE_MESSAGE);
+  }
+  return stored;
+}
+
+/**
+ * Insert a 30-minute busy appointment with the approved notification
+ * shape, then GET it. Success is the stored event, not the insert body.
+ */
+export async function createAppointmentEvent(
+  fetchFn: FetchFn,
+  accessToken: string,
+  options: {
+    readonly calendarId: string;
+    readonly eventId: string;
+    readonly callerName: string;
+    readonly callbackNumber: string;
+    readonly purpose?: string;
+    readonly date: string;
+    readonly startTime: string;
+  },
+): Promise<StoredCalendarEvent> {
+  const endTime = endTimeOf(options.startTime);
+  const body = {
+    id: options.eventId,
+    summary: `Appointment with ${options.callerName}`,
+    description: appointmentDescription(options.callbackNumber, options.purpose),
+    start: {
+      dateTime: `${options.date}T${options.startTime}:00`,
+      timeZone: SCHEDULING_TIMEZONE,
+    },
+    end: {
+      dateTime: `${options.date}T${endTime}:00`,
+      timeZone: SCHEDULING_TIMEZONE,
+    },
+    transparency: "opaque",
+    reminders: {
+      useDefault: false,
+      overrides: [{ method: "popup", minutes: 10 }],
+    },
+  };
+  let response: Response;
+  try {
+    response = await fetchFn(`${eventsUrl(options.calendarId)}?sendUpdates=none`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    throw toAuthOrTransport(error);
+  }
+  if (response.status === 409) {
+    return readMatchingAppointment(
+      fetchFn,
+      accessToken,
+      options.calendarId,
+      options.eventId,
+    );
+  }
+  throwForHttpStatus(response);
+  return readMatchingAppointment(fetchFn, accessToken, options.calendarId, options.eventId);
+}
+
+async function readMatchingAppointment(
+  fetchFn: FetchFn,
+  accessToken: string,
+  calendarId: string,
+  eventId: string,
+): Promise<StoredCalendarEvent> {
+  const stored = await getAppointmentEvent(fetchFn, accessToken, calendarId, eventId);
+  if (!storedAppointmentMatchesPolicy(stored)) {
+    throw new CalendarQueryError(
+      "transport",
+      "The stored calendar event does not match the approved appointment shape.",
+    );
+  }
+  return stored;
+}
