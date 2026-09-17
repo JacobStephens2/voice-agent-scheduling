@@ -1,3 +1,5 @@
+import { SCHEDULING_TIMEZONE } from "./calendar/policy.js";
+
 export interface ToolDefinition {
   readonly type: "function";
   readonly name: string;
@@ -107,15 +109,39 @@ const BOOKING_INSTRUCTIONS = [
   "Never say the appointment is booked unless confirm_appointment reported that the calendar event exists.",
 ].join(" ");
 
+const easternDateFormat = new Intl.DateTimeFormat("en-US", {
+  timeZone: SCHEDULING_TIMEZONE,
+  weekday: "long",
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+});
+
+/**
+ * Anchor relative days ("this coming Monday", "tomorrow") to the call's
+ * date. Without this the model must produce YYYY-MM-DD tool dates with no
+ * knowledge of today, so it cannot resolve them.
+ */
+function dateAnchorInstructions(now: Date): string {
+  return (
+    `Today is ${easternDateFormat.format(now)} in Eastern Time (America/New_York). ` +
+    `When the caller names a relative day such as "this coming Monday", "next Friday", or "tomorrow", ` +
+    `resolve it against today's date and call the tools with the resulting YYYY-MM-DD date. ` +
+    `If their words could mean two different dates, ask them to confirm the exact date instead of guessing.`
+  );
+}
+
 function sessionInstructions(
   booking: BookingTool | undefined,
   maxDurationMs: number,
+  now: Date,
 ): string {
   const durationInstructions = durationLimitInstructions(maxDurationMs);
+  const dateAnchor = dateAnchorInstructions(now);
   if (!booking) {
-    return `${AVAILABILITY_INSTRUCTIONS} ${durationInstructions} Do not claim that an appointment has been booked or written to a calendar.`;
+    return `${AVAILABILITY_INSTRUCTIONS} ${dateAnchor} ${durationInstructions} Do not claim that an appointment has been booked or written to a calendar.`;
   }
-  return `${AVAILABILITY_INSTRUCTIONS} ${BOOKING_INSTRUCTIONS} ${durationInstructions}`;
+  return `${AVAILABILITY_INSTRUCTIONS} ${BOOKING_INSTRUCTIONS} ${dateAnchor} ${durationInstructions}`;
 }
 
 export function resolveVoiceModel(reported: unknown): string | undefined {
@@ -140,6 +166,7 @@ function sessionUpdatePayload(
   availabilityTool: AvailabilityTool,
   booking: BookingTool | undefined,
   maxDurationMs: number,
+  now: Date,
 ): string {
   return JSON.stringify({
     type: "session.update",
@@ -152,7 +179,7 @@ function sessionUpdatePayload(
         prefix_padding_ms: 300,
         silence_duration_ms: 200,
       },
-      instructions: sessionInstructions(booking, maxDurationMs),
+      instructions: sessionInstructions(booking, maxDurationMs, now),
       tools: [availabilityTool.definition(), ...(booking?.definitions() ?? [])],
     },
   });
@@ -382,6 +409,7 @@ export function createTelephoneSession(options: {
                   options.availabilityTool,
                   options.booking,
                   maxDurationMs,
+                  options.referenceTime ?? new Date(),
                 ),
               );
               break;
