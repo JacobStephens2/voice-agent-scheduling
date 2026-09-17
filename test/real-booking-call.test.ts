@@ -158,6 +158,45 @@ describe("controlled inbound call with appointment booking", () => {
     expect(evidence.status).toBe("completed");
   });
 
+  it("leaves no durable booking behind when the caller disconnects before confirmation", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager, dataDir } = createBookingManager(sockets, google);
+
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-no-confirm",
+      webhookId: "evt_book_no_confirm",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    socket.close();
+
+    expect(google.writes).toEqual([]);
+    // Work without explicit confirmation never starts a calendar insertion,
+    // so no pending or booked operation may survive the disconnect.
+    let rows: unknown[] = [];
+    try {
+      rows = readFileSync(join(dataDir, "bookings.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+    } catch {
+      rows = [];
+    }
+    expect(rows).toEqual([]);
+
+    const evidence = await recordedEvidence(
+      () => manager.listEvidence(),
+      "call-book-no-confirm",
+    );
+    expect(evidence.status).toBe("completed");
+  });
+
   it("creates no event when confirmation arrives before the readback turn finishes", async () => {
     const sockets: FakeRealtimeSocket[] = [];
     const google = fakeGoogleCalendar({});
@@ -292,8 +331,26 @@ describe("controlled inbound call with appointment booking", () => {
     });
     expect(google.writes).toHaveLength(1);
 
+    // Booking completion has its own lifetime: the confirmed write lands in
+    // durable storage even though the telephone connection already ended.
+    const rows = readFileSync(join(dataDir, "bookings.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { operationId?: string; status?: string });
+    expect(rows.at(-1)).toMatchObject({
+      operationId: TEST_OPERATION_ID,
+      eventId: TEST_EVENT_ID,
+      status: "booked",
+    });
+
     const evidence = await recordedEvidence(() => manager.listEvidence(), "call-book-disconnect");
     expect(evidence.status).toBe("completed");
+    // Evidence carries structured outcomes only: no caller speech, contact
+    // details, audio, or transcripts.
+    expect(JSON.stringify(evidence)).not.toContain("Ada Lovelace");
+    expect(JSON.stringify(evidence)).not.toContain("15551239876");
+    expect(evidence).not.toHaveProperty("audio");
+    expect(evidence).not.toHaveProperty("transcript");
   });
 
   it("returns the same completed operation when the confirmation is repeated", async () => {

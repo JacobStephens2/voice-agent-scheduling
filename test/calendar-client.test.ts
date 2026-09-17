@@ -4,6 +4,7 @@ import {
   appointmentNotificationProof,
   createAppointmentEvent,
   deleteAppointmentEvent,
+  getAppointmentEvent,
   queryBusyIntervals,
   validateCalendars,
 } from "../src/calendar/client.js";
@@ -274,5 +275,22 @@ describe("calendar client", () => {
       startTime: "10:00",
     }).catch((value: unknown) => value);
     expect(error).toBeInstanceOf(CalendarQueryError);
+  });
+
+  it("reports a missing event as not_found so reconciliation can distinguish absence from an outage", async () => {
+    const eventId = "0123456789abcdef0123456789abcdef";
+    const fetchFn = cannedFetch((url, init) => {
+      const method = init?.method ?? "GET";
+      if (url.includes(`/events/${eventId}`) && method === "GET") {
+        return new Response("{}", { status: 404 });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    });
+
+    const error = await getAppointmentEvent(fetchFn, "token", "primary", eventId).catch(
+      (value: unknown) => value,
+    );
+    expect(error).toBeInstanceOf(CalendarQueryError);
+    expect((error as CalendarQueryError).kind).toBe("not_found");
   });
 });
