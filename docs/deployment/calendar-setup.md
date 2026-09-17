@@ -1,9 +1,9 @@
-# Google Calendar setup for availability (issue #3)
+# Google Calendar setup for availability and booking
 
-This slice replaces synthetic availability with real, authorized Google
-Calendar availability. The telephone flow exposes one read-only tool,
-`check_availability`; no calendar event is created by this slice, and no
-audio or transcripts are retained.
+Authorized Google Calendar access is required for both availability and
+booking. The telephone flow exposes `check_availability`,
+`propose_appointment`, and `confirm_appointment`. Events are created only
+after explicit booking confirmation. No audio or transcripts are retained.
 
 ## What Jacob does (bounded human steps)
 
@@ -12,8 +12,8 @@ audio or transcripts are retained.
    `https://scheduler.stephens.page/calendar/auth/callback`.
    Request only these scopes when consenting:
    - `https://www.googleapis.com/auth/calendar.freebusy` (read availability)
-   - `https://www.googleapis.com/auth/calendar.events.owned` (reserved for
-     the later booking slice; this slice only reads)
+   - `https://www.googleapis.com/auth/calendar.events.owned` (create the
+     confirmed appointment on a calendar Jacob owns)
 2. **Authorize in the browser**: put `GOOGLE_CALENDAR_CLIENT_ID`,
    `GOOGLE_CALENDAR_CLIENT_SECRET`, and `OPERATOR_TOKEN` in
    `/etc/scheduling-agent/scheduling-agent.env`, restart the service, then
@@ -55,22 +55,42 @@ audio or transcripts are retained.
    calendar data is unavailable rather than an empty schedule.
 6. **Verify with a controlled inbound call**: dial the dedicated number from
    the allowlisted caller, ask for a weekday date, and confirm the agent
-   offers permitted 30-minute starts in Eastern Time. Then hang up and check
-   that no calendar event was created and the evidence holds no
+   offers permitted 30-minute starts in Eastern Time. To book, give a name,
+   speak and confirm a callback number (it may differ from caller ID),
+   listen to the full readback, and explicitly agree. Then check the
+   selected destination calendar for one 30-minute busy event titled
+   `Appointment with <name>`, with the callback number and optional purpose
+   in the description, no attendees, no Google Meet link, and only a 10-minute
+   popup reminder. Confirm the authorized account received no invitation,
+   update email, or email reminder. Evidence must hold no
    audio/transcript/recording fields:
    ```bash
    SCHEDULER_URL=https://scheduler.stephens.page \
    EVIDENCE_TOKEN=... \
    npm run smoke:pstn
    ```
+   Until public release, keep `ALLOWED_CALLER_NUMBERS` set. Calendar writes
+   stay off until `SCHEDULING_ALLOW_CALENDAR_WRITES=true` is set; use a test
+   calendar as the selected primary destination, not Google's `primary` alias.
+
+7. **Prove stored notification fields on the authorized account** (GET, not
+   insert parameters). This writes one throwaway event on a test calendar,
+   inspects attendees / Meet / reminders as stored, then deletes it:
+   ```bash
+   npm run calendars:verify-booking -- --calendar <test-calendar-id>
+   ```
+   It refuses the `primary` alias unless you pass `--allow-primary`. After a
+   real telephone booking, also confirm the account inbox received no
+   invitation, update email, or email reminder.
 
 On the host, credential and selection files live under
 `/var/lib/scheduling-agent` (`google-client.json`, `google-refresh`,
 `scheduling-calendars.json`, all mode `0600`, owned by
 `scheduling-agent`). The same values may instead be supplied as
 `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`,
-`GOOGLE_CALENDAR_REFRESH_TOKEN`, `SCHEDULING_PRIMARY_CALENDAR`, and
-`SCHEDULING_CONFLICT_CALENDARS` in `/etc/scheduling-agent/scheduling-agent.env`.
+`GOOGLE_CALENDAR_REFRESH_TOKEN`, `SCHEDULING_PRIMARY_CALENDAR`,
+`SCHEDULING_CONFLICT_CALENDARS`, and `SCHEDULING_ALLOW_CALENDAR_WRITES` in
+`/etc/scheduling-agent/scheduling-agent.env`.
 
 ## Availability rules now enforced from real data
 
@@ -98,5 +118,12 @@ On the host, credential and selection files live under
 - Refresh credentials stay outside source control (`.gitignore` covers
   `.env*` and `.scratch/`), model context, and logs. Error messages carry
   bounded categories only, never secrets or caller contact data.
+- Booking confirmation is tied to the current proposal on that call. The
+  application refuses confirm until a completed assistant turn has finished
+  the readback (`response.done`) and the matching `proposalId` is supplied
+  with `confirmed: true`. Unclear assent, an interrupted readback, a stale
+  proposal, or a refusal creates no event. Disconnecting before explicit
+  agreement creates no event. Repeating the same completed confirmation
+  returns that operation's outcome and does not insert a second event.
 - The synthetic availability module from the previous slice is retired from
   the call path but kept under test as regression history.
