@@ -26,6 +26,12 @@ export interface BookingRecord {
   readonly startUtc: string;
   readonly status: BookingRecordStatus;
   readonly recordedAt: string;
+  /**
+   * Salted hash of the normalized callback number for the per-number
+   * upcoming-appointment limit. Older records predate the limit and carry
+   * no hash; the raw number is never stored. Absent hashes never match.
+   */
+  readonly numberHash?: string;
 }
 
 function bookingFile(dataDir: string): string {
@@ -53,6 +59,7 @@ export function bookingRecord(
     startUtc: fields.startUtc,
     status: fields.status,
     recordedAt: fields.recordedAt ?? new Date().toISOString(),
+    ...(fields.numberHash === undefined ? {} : { numberHash: fields.numberHash }),
   };
 }
 
