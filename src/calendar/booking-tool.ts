@@ -21,6 +21,12 @@ import {
   type BookingRecord,
 } from "./booking-store.js";
 import {
+  createCallbackNumberHasher,
+  evaluateCallbackLimit,
+  normalizeCallbackNumber,
+  type CallbackNumberHasher,
+} from "./callback-limit.js";
+import {
   appointmentNotificationProof,
   CalendarQueryError,
   createAppointmentEvent,
@@ -134,6 +140,7 @@ export function createAppointmentBooking(
     (explicitCredentials ? createTokenProvider(explicitCredentials, fetchFn) : undefined);
   const proposals = createProposalStore();
   const records: BookingRecord[] = options.dataDir ? loadBookingRecords(options.dataDir) : [];
+  const callbackHasher = createCallbackNumberHasher(options.dataDir);
   let queue: Promise<unknown> = Promise.resolve();
 
   const persist = (record: BookingRecord): void => {
@@ -196,7 +203,7 @@ export function createAppointmentBooking(
           type: "function",
           name: "confirm_appointment",
           description:
-            "Create the current proposed appointment after you have finished speaking the complete readback and the caller has explicitly agreed. Pass the proposalId from that proposal. Do not call this for unclear assent, background speech, an interrupted readback, or a refusal. Success means the calendar event exists; then tell the caller Jacob will call the confirmed callback number.",
+            "Create the current proposed appointment after you have finished speaking the complete readback and the caller has explicitly agreed. Pass the proposalId from that proposal. Do not call this for unclear assent, background speech, an interrupted readback, or a refusal. Only one upcoming appointment is allowed per confirmed callback number; when that number already holds one, the confirmation is refused and the caller is directed to Jacob. Success means the calendar event exists; then tell the caller Jacob will call the confirmed callback number.",
           parameters: {
             type: "object",
             properties: {
@@ -237,6 +244,7 @@ export function createAppointmentBooking(
             tokenProvider,
             selection: explicitSelection,
             allowWrites: options.allowWrites === true,
+            callbackHasher,
           }),
         );
       }
@@ -287,6 +295,7 @@ async function confirm(
     tokenProvider: AccessTokenProvider | undefined;
     selection: CalendarSelection | undefined;
     allowWrites: boolean;
+    callbackHasher: CallbackNumberHasher;
   },
 ): Promise<ConfirmResult> {
   const proposal = ctx.proposals.current(execOptions.callId);
@@ -355,6 +364,16 @@ async function confirm(
     };
   }
 
+  const normalizedCallback = normalizeCallbackNumber(proposal.callbackNumber);
+  if (!normalizedCallback) {
+    return {
+      status: "failed",
+      message:
+        "The callback number could not be understood. Do not claim the appointment is booked.",
+    };
+  }
+  const numberHash = ctx.callbackHasher(normalizedCallback);
+
   const generated = existing
     ? { operationId: existing.operationId, eventId: existing.eventId }
     : ctx.createIds();
@@ -366,7 +385,39 @@ async function confirm(
     proposalId: proposal.proposalId,
     calendarId,
     startUtc: start.toISOString(),
+    numberHash,
   };
+
+  let accessToken: string;
+  try {
+    accessToken = await ctx.tokenProvider.getAccessToken();
+  } catch {
+    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    return {
+      status: "failed",
+      operationId: generated.operationId,
+      eventId: generated.eventId,
+      eventExists: false,
+      message:
+        "The calendar event could not be confirmed. Do not tell the caller the appointment is booked.",
+    };
+  }
+
+  // Evaluate the per-number limit before presenting a booking as
+  // confirmed. A repeat caller keeps no new appointment: they hear that
+  // changes go through Jacob directly, without any existing details.
+  const limit = await evaluateCallbackLimit({
+    fetchFn: ctx.fetchFn,
+    accessToken,
+    records: ctx.records,
+    numberHash,
+    now: referenceTime,
+    excludeOperationId: generated.operationId,
+  });
+  if (limit !== "clear") {
+    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    return limitRefusal(limit);
+  }
 
   if (!existing) {
     ctx.persist(bookingRecord({ ...identities, status: "pending" }));
@@ -374,10 +425,8 @@ async function confirm(
 
   // Recheck policy and availability inside the serialized operation, so a
   // slot taken after the proposal is never knowingly written.
-  let accessToken: string;
   let busy: BusyInterval[];
   try {
-    accessToken = await ctx.tokenProvider.getAccessToken();
     busy = await queryBusyIntervals(ctx.fetchFn, accessToken, {
       calendarIds: requiredCalendarIds(ctx.selection),
       timeMin: dayStart,
@@ -424,6 +473,22 @@ async function confirm(
     };
   }
 
+  // Evaluate the limit again within the committing operation, after the
+  // availability recheck: a repeated attempt under fresh identities must
+  // not slip between the first evaluation and the insert.
+  const finalLimit = await evaluateCallbackLimit({
+    fetchFn: ctx.fetchFn,
+    accessToken,
+    records: ctx.records,
+    numberHash,
+    now: referenceTime,
+    excludeOperationId: generated.operationId,
+  });
+  if (finalLimit !== "clear") {
+    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    return limitRefusal(finalLimit);
+  }
+
   try {
     const stored = await createAppointmentEvent(ctx.fetchFn, accessToken, {
       calendarId,
@@ -455,6 +520,24 @@ async function confirm(
   }
 }
 
+const CALLBACK_LIMIT_MESSAGE =
+  "That callback number already has an upcoming appointment. " +
+  "The scheduling agent cannot change, cancel, or reschedule appointments. " +
+  "Please contact Jacob directly about any changes. No new appointment was created.";
+
+const CALLBACK_LIMIT_UNKNOWN_MESSAGE =
+  "Existing appointments for that callback number could not be verified right now. " +
+  "Do not tell the caller the appointment is booked. " +
+  "The caller may try again later or contact Jacob directly.";
+
+function limitRefusal(outcome: "blocked" | "unknown"): ConfirmResult {
+  return {
+    status: "unavailable",
+    eventExists: false,
+    message: outcome === "blocked" ? CALLBACK_LIMIT_MESSAGE : CALLBACK_LIMIT_UNKNOWN_MESSAGE,
+  };
+}
+
 const INCONCLUSIVE_MESSAGE =
   "The appointment could not be confirmed because the calendar write was interrupted. " +
   "Do not tell the caller the appointment is booked. " +
@@ -471,6 +554,7 @@ function persistInconclusive(
     proposalId: string;
     calendarId: string;
     startUtc: string;
+    numberHash: string;
   },
 ): ConfirmResult {
   ctx.persist(bookingRecord({ ...identities, status: "inconclusive" }));
