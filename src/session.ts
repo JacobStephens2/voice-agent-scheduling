@@ -17,6 +17,13 @@ export interface AvailabilityTool {
   ): unknown | Promise<unknown>;
 }
 
+export interface BookingReconciliation {
+  readonly operationId: string;
+  readonly eventId: string;
+  readonly status: string;
+  readonly eventExists: boolean;
+}
+
 export interface BookingTool {
   definitions(): readonly ToolDefinition[];
   execute(
@@ -25,6 +32,7 @@ export interface BookingTool {
     options: { callId: string; referenceTime?: Date },
   ): unknown | Promise<unknown>;
   markReadbackFinished?(callId: string): void;
+  reconcileUnresolvedOperations?(): Promise<readonly BookingReconciliation[]>;
 }
 
 export interface RealtimeSocket {
@@ -79,6 +87,7 @@ const BOOKING_INSTRUCTIONS = [
   "Call confirm_appointment only after you finished the full readback and the caller explicitly agrees. Pass that proposal's proposalId and confirmed true.",
   "Do not call confirm_appointment for unclear assent, background speech, an interrupted readback, a refusal, or if the caller has not clearly agreed. Interrupted readback requires a fresh complete readback first.",
   "If confirm_appointment returns that the time is unavailable, offer fresh alternatives from check_availability. Do not claim the appointment was booked.",
+  "If confirm_appointment reports the result is inconclusive, say honestly that the booking could not be confirmed and offer to try the same time again or pick another time. Never say an inconclusive appointment is booked.",
   "If confirm_appointment reports the appointment is booked, tell the caller it is booked and that Jacob will call the confirmed callback number at the agreed time. Do not send or promise any automated callback, message, or email.",
   "Never say the appointment is booked unless confirm_appointment reported that the calendar event exists.",
 ].join(" ");

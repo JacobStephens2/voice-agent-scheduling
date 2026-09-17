@@ -17,10 +17,22 @@ import {
   bookingRecord,
   latestForProposal,
   loadBookingRecords,
+  unresolvedOperations,
   type BookingRecord,
 } from "./booking-store.js";
-import { createAppointmentEvent, queryBusyIntervals } from "./client.js";
-import { computeAvailableStarts, SCHEDULING_TIMEZONE } from "./policy.js";
+import {
+  appointmentNotificationProof,
+  CalendarQueryError,
+  createAppointmentEvent,
+  getAppointmentEvent,
+  queryBusyIntervals,
+  type StoredCalendarEvent,
+} from "./client.js";
+import {
+  computeAvailableStarts,
+  SCHEDULING_TIMEZONE,
+  type BusyInterval,
+} from "./policy.js";
 import { loadSelection, requiredCalendarIds, type CalendarSelection } from "./selection.js";
 
 export type { AppointmentProposal, ProposeResult } from "./booking-proposal.js";
@@ -37,11 +49,25 @@ export interface ConfirmResult {
     | "no_proposal"
     | "readback_incomplete"
     | "unavailable"
+    | "inconclusive"
     | "failed";
   readonly operationId?: string;
   readonly eventId?: string;
   readonly eventExists?: boolean;
   readonly message: string;
+}
+
+/**
+ * Bounded outcome for one durable operation after restart recovery.
+ * "booked" means the matching event is known to exist; "inconclusive"
+ * means no matching event could be established without inventing one;
+ * "unresolved" means Calendar could not be reached to decide.
+ */
+export interface ReconcileResult {
+  readonly operationId: string;
+  readonly eventId: string;
+  readonly status: "booked" | "inconclusive" | "unresolved";
+  readonly eventExists: boolean;
 }
 
 export type BookingToolResult = ProposeResult | ConfirmResult;
@@ -63,6 +89,14 @@ export interface AppointmentBooking {
     options: { callId: string; referenceTime?: Date },
   ): Promise<BookingToolResult>;
   markReadbackFinished(callId: string): void;
+  /**
+   * Reconcile every pending/inconclusive durable operation against its
+   * stored event identity. Establishes a single matching event or a
+   * bounded unresolved outcome from durable storage alone; never
+   * re-inserts, never mints a replacement identity, and never claims
+   * success for an event that could not be read back.
+   */
+  reconcileUnresolvedOperations(): Promise<readonly ReconcileResult[]>;
 }
 
 export interface BookingToolOptions {
@@ -215,6 +249,18 @@ export function createAppointmentBooking(
     markReadbackFinished(callId) {
       proposals.markReadbackFinished(callId);
     },
+
+    reconcileUnresolvedOperations() {
+      return enqueue(() =>
+        reconcileUnresolved({
+          persist,
+          records,
+          fetchFn,
+          tokenProvider,
+          selection: explicitSelection,
+        }),
+      );
+    },
   };
 }
 
@@ -326,31 +372,59 @@ async function confirm(
     ctx.persist(bookingRecord({ ...identities, status: "pending" }));
   }
 
+  // Recheck policy and availability inside the serialized operation, so a
+  // slot taken after the proposal is never knowingly written.
+  let accessToken: string;
+  let busy: BusyInterval[];
   try {
-    const accessToken = await ctx.tokenProvider.getAccessToken();
-    const busy = await queryBusyIntervals(ctx.fetchFn, accessToken, {
+    accessToken = await ctx.tokenProvider.getAccessToken();
+    busy = await queryBusyIntervals(ctx.fetchFn, accessToken, {
       calendarIds: requiredCalendarIds(ctx.selection),
       timeMin: dayStart,
       timeMax: dayEnd,
     });
-    const stillOpen = computeAvailableStarts({
-      date: proposal.date,
-      now: referenceTime,
-      busy,
-    }).some((slot) => slot.startTime === proposal.startTime);
-    if (!stillOpen) {
-      ctx.persist(bookingRecord({ ...identities, status: "unavailable" }));
-      ctx.proposals.drop(execOptions.callId);
-      return {
-        status: "unavailable",
-        operationId: generated.operationId,
-        eventId: generated.eventId,
-        eventExists: false,
-        message:
-          "That time is no longer available. Offer fresh alternatives from check_availability. Do not claim the appointment is booked.",
-      };
+  } catch {
+    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    return {
+      status: "failed",
+      operationId: generated.operationId,
+      eventId: generated.eventId,
+      eventExists: false,
+      message:
+        "The calendar event could not be confirmed. Do not tell the caller the appointment is booked.",
+    };
+  }
+  const stillOpen = computeAvailableStarts({
+    date: proposal.date,
+    now: referenceTime,
+    busy,
+  }).some((slot) => slot.startTime === proposal.startTime);
+  if (!stillOpen) {
+    // The slot can read busy because this operation's own uncertain write
+    // already landed. Reconcile against the original event identity before
+    // reporting the time as taken by someone else.
+    const own = await readOwnEvent(ctx.fetchFn, accessToken, calendarId, generated.eventId);
+    if (own) {
+      const booked = bookingRecord({ ...identities, status: "booked" });
+      ctx.persist(booked);
+      return bookedResult(booked, proposal.callbackNumber);
     }
+    if (own === undefined) {
+      return persistInconclusive(ctx, identities);
+    }
+    ctx.persist(bookingRecord({ ...identities, status: "unavailable" }));
+    ctx.proposals.drop(execOptions.callId);
+    return {
+      status: "unavailable",
+      operationId: generated.operationId,
+      eventId: generated.eventId,
+      eventExists: false,
+      message:
+        "That time is no longer available. Offer fresh alternatives from check_availability and require confirmation of any replacement. Do not claim the appointment is booked.",
+    };
+  }
 
+  try {
     const stored = await createAppointmentEvent(ctx.fetchFn, accessToken, {
       calendarId,
       eventId: generated.eventId,
@@ -367,14 +441,143 @@ async function confirm(
     ctx.persist(booked);
     return bookedResult(booked, proposal.callbackNumber);
   } catch {
-    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
-    return {
-      status: "failed",
-      operationId: generated.operationId,
-      eventId: generated.eventId,
-      eventExists: false,
-      message:
-        "The calendar event could not be confirmed. Do not tell the caller the appointment is booked.",
-    };
+    // A timeout can fire after Google accepted the insertion. Reconcile
+    // against the original operation/event identity instead of minting a
+    // replacement: a retry of this same proposal reuses these identities,
+    // and a duplicate delivery finds the booked outcome below.
+    const own = await readOwnEvent(ctx.fetchFn, accessToken, calendarId, generated.eventId);
+    if (own) {
+      const booked = bookingRecord({ ...identities, status: "booked" });
+      ctx.persist(booked);
+      return bookedResult(booked, proposal.callbackNumber);
+    }
+    return persistInconclusive(ctx, identities);
   }
+}
+
+const INCONCLUSIVE_MESSAGE =
+  "The appointment could not be confirmed because the calendar write was interrupted. " +
+  "Do not tell the caller the appointment is booked. " +
+  "The caller may confirm the same proposal again or choose another time.";
+
+function persistInconclusive(
+  ctx: {
+    persist: (record: BookingRecord) => void;
+  },
+  identities: {
+    operationId: string;
+    eventId: string;
+    callId: string;
+    proposalId: string;
+    calendarId: string;
+    startUtc: string;
+  },
+): ConfirmResult {
+  ctx.persist(bookingRecord({ ...identities, status: "inconclusive" }));
+  return {
+    status: "inconclusive",
+    operationId: identities.operationId,
+    eventId: identities.eventId,
+    eventExists: false,
+    message: INCONCLUSIVE_MESSAGE,
+  };
+}
+
+/**
+ * Read back this operation's own event by its stored identity.
+ * Returns the stored event only when a policy-matching event exists;
+ * anything else readable under the identity (absent, or an event that
+ * does not match the approved shape) is not this operation's booked
+ * appointment, so success is never claimed for it. Returns undefined
+ * when the read itself failed and nothing can be established.
+ */
+async function readOwnEvent(
+  fetchFn: typeof fetch,
+  accessToken: string,
+  calendarId: string,
+  eventId: string,
+): Promise<StoredCalendarEvent | null | undefined> {
+  let stored: StoredCalendarEvent;
+  try {
+    stored = await getAppointmentEvent(fetchFn, accessToken, calendarId, eventId);
+  } catch (error) {
+    if (error instanceof CalendarQueryError && error.kind === "not_found") {
+      return null;
+    }
+    return undefined;
+  }
+  return appointmentNotificationProof(stored).matchesApprovedShape ? stored : null;
+}
+
+/**
+ * Reconcile durable pending/inconclusive operations after a restart, using
+ * only the stored operation/event identities. No transcript or proposal is
+ * needed: a matching stored event becomes booked, an absent event stays a
+ * bounded inconclusive outcome, and an unreachable Calendar stays
+ * unresolved. Nothing is re-inserted and no identity is replaced.
+ */
+async function reconcileUnresolved(ctx: {
+  persist: (record: BookingRecord) => void;
+  records: BookingRecord[];
+  fetchFn: typeof fetch;
+  tokenProvider: AccessTokenProvider | undefined;
+  selection: CalendarSelection | undefined;
+}): Promise<readonly ReconcileResult[]> {
+  const outcomes: ReconcileResult[] = [];
+  for (const latest of unresolvedOperations(ctx.records)) {
+    const identity = {
+      operationId: latest.operationId,
+      eventId: latest.eventId,
+    };
+    if (!ctx.tokenProvider || !ctx.selection) {
+      outcomes.push({ ...identity, status: "unresolved", eventExists: false });
+      continue;
+    }
+    let accessToken: string;
+    try {
+      accessToken = await ctx.tokenProvider.getAccessToken();
+    } catch {
+      outcomes.push({ ...identity, status: "unresolved", eventExists: false });
+      continue;
+    }
+    const own = await readOwnEvent(
+      ctx.fetchFn,
+      accessToken,
+      latest.calendarId,
+      latest.eventId,
+    );
+    if (own) {
+      const booked = bookingRecord({
+        operationId: latest.operationId,
+        eventId: latest.eventId,
+        callId: latest.callId,
+        proposalId: latest.proposalId,
+        calendarId: latest.calendarId,
+        startUtc: latest.startUtc,
+        status: "booked",
+      });
+      ctx.persist(booked);
+      outcomes.push({ ...identity, status: "booked", eventExists: true });
+      continue;
+    }
+    if (own === undefined) {
+      outcomes.push({ ...identity, status: "unresolved", eventExists: false });
+      continue;
+    }
+    if (latest.status === "pending") {
+      ctx.persist(
+        bookingRecord({
+          operationId: latest.operationId,
+          eventId: latest.eventId,
+          callId: latest.callId,
+          proposalId: latest.proposalId,
+          calendarId: latest.calendarId,
+          startUtc: latest.startUtc,
+          status: "inconclusive",
+        }),
+      );
+    }
+    outcomes.push({ ...identity, status: "inconclusive", eventExists: false });
+  }
+  return outcomes;
 }
