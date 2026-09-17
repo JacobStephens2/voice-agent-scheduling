@@ -1,7 +1,21 @@
 import { join } from "node:path";
 import { appendJsonl, loadJsonl } from "../jsonl.js";
 
-export type BookingRecordStatus = "pending" | "booked" | "unavailable" | "failed";
+export type BookingRecordStatus = "pending" | "booked" | "unavailable" | "failed" | "inconclusive";
+
+/**
+ * Records that never established whether the Calendar write landed.
+ * Restart recovery reconciles these against the stored event identity;
+ * it never mints a replacement identity or re-inserts blindly.
+ */
+export const UNRESOLVED_BOOKING_STATUSES: readonly BookingRecordStatus[] = [
+  "pending",
+  "inconclusive",
+];
+
+export function isUnresolvedBookingStatus(status: BookingRecordStatus): boolean {
+  return UNRESOLVED_BOOKING_STATUSES.includes(status);
+}
 
 export interface BookingRecord {
   readonly operationId: string;
@@ -53,4 +67,16 @@ export function latestForProposal(
     }
   }
   return undefined;
+}
+
+export function unresolvedOperations(
+  records: readonly BookingRecord[],
+): BookingRecord[] {
+  const latestByOperation = new Map<string, BookingRecord>();
+  for (const record of records) {
+    latestByOperation.set(record.operationId, record);
+  }
+  return [...latestByOperation.values()].filter((record) =>
+    isUnresolvedBookingStatus(record.status),
+  );
 }
