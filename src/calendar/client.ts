@@ -11,7 +11,7 @@ export interface CalendarValidation {
 }
 
 export class CalendarQueryError extends Error {
-  readonly kind: "auth" | "required_calendar" | "transport";
+  readonly kind: "auth" | "required_calendar" | "transport" | "not_found";
   constructor(kind: CalendarQueryError["kind"], message: string) {
     super(message);
     this.name = "CalendarQueryError";
@@ -319,6 +319,12 @@ export async function getAppointmentEvent(
     });
   } catch (error) {
     throw toAuthOrTransport(error);
+  }
+  // A missing event is a reconciled absence, not an unreachable Calendar:
+  // callers distinguish "no event under this identity" from transport/auth
+  // failures so an uncertain write is never reported as a false success.
+  if (response.status === 404 || response.status === 410) {
+    throw new CalendarQueryError("not_found", "The calendar event was not found.");
   }
   throwForHttpStatus(response);
   const payload = await readJsonBody(response);

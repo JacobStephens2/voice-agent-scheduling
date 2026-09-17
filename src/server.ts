@@ -75,19 +75,26 @@ function json(res: http.ServerResponse, statusCode: number, body: unknown): void
 
 export function createSchedulingServer(config: ServerConfig): SchedulingServer {
   const fetchFn = config.fetchFn ?? fetch;
+  const booking =
+    config.booking ??
+    createAppointmentBooking({
+      fetchFn,
+      dataDir: config.dataDir,
+      allowWrites: config.allowCalendarWrites === true,
+    });
+  // A restarted process reloads durable booking records when the booking
+  // tool is constructed. Reconcile pending/uncertain operations in the
+  // background so each one settles to a single matching event or a bounded
+  // unresolved outcome. Reconciliation only reads by stored event identity;
+  // it never re-inserts, so it cannot create a duplicate event.
+  void booking.reconcileUnresolvedOperations?.().catch(() => undefined);
   const lifecycleManager = createCallLifecycleManager({
     webhookSecret: config.webhookSecret,
     apiKey: config.apiKey,
     availabilityTool:
       config.availabilityTool ??
       createCalendarAvailabilityTool({ fetchFn, dataDir: config.dataDir }),
-    booking:
-      config.booking ??
-      createAppointmentBooking({
-        fetchFn,
-        dataDir: config.dataDir,
-        allowWrites: config.allowCalendarWrites === true,
-      }),
+    booking,
     maxConcurrentCalls: config.maxConcurrentCalls ?? 1,
     allowedCallerNumbers: config.allowedCallerNumbers,
     maxCallDurationMs: config.maxCallDurationMs,
