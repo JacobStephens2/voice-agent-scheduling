@@ -2,7 +2,7 @@
 
 A telephone scheduling agent that describes Jacob's availability and creates 30-minute phone appointments on his Google Calendar. Jacob calls the confirmed callback number at appointment time.
 
-The first telephone path is the isolated Direct SIP scheduler in this repository. It answers a dedicated Telnyx number, identifies itself as Jacob's scheduling assistant, offers real Google Calendar availability, and creates one 30-minute appointment after the caller confirms the readback. Public admission and the production primary calendar remain gated until the final release.
+The first telephone path is the isolated Direct SIP scheduler in this repository. It answers a dedicated Telnyx number, identifies itself as Jacob's scheduling assistant, offers real Google Calendar availability, and creates one 30-minute appointment after the caller confirms the readback. Public admission stays allowlisted (`ALLOWED_CALLER_NUMBERS`). Calendar writes stay off until `SCHEDULING_ALLOW_CALENDAR_WRITES=true`.
 
 ```bash
 npm test

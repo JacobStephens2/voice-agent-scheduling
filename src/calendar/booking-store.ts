@@ -1,5 +1,5 @@
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { appendJsonl, loadJsonl } from "../jsonl.js";
 
 export type BookingRecordStatus = "pending" | "booked" | "unavailable" | "failed";
 
@@ -20,27 +20,26 @@ function bookingFile(dataDir: string): string {
 
 /** Load minimal booking records. Caller speech, names, and numbers are not stored. */
 export function loadBookingRecords(dataDir: string): BookingRecord[] {
-  try {
-    const text = readFileSync(bookingFile(dataDir), "utf8");
-    const records: BookingRecord[] = [];
-    for (const line of text.split("\n")) {
-      if (!line.trim()) {
-        continue;
-      }
-      records.push(JSON.parse(line) as BookingRecord);
-    }
-    return records;
-  } catch {
-    return [];
-  }
+  return loadJsonl<BookingRecord>(bookingFile(dataDir));
 }
 
 export function appendBookingRecord(dataDir: string, record: BookingRecord): void {
-  mkdirSync(dataDir, { recursive: true });
-  appendFileSync(bookingFile(dataDir), `${JSON.stringify(record)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  appendJsonl(bookingFile(dataDir), record, 0o600);
+}
+
+export function bookingRecord(
+  fields: Omit<BookingRecord, "recordedAt"> & { recordedAt?: string },
+): BookingRecord {
+  return {
+    operationId: fields.operationId,
+    eventId: fields.eventId,
+    callId: fields.callId,
+    proposalId: fields.proposalId,
+    calendarId: fields.calendarId,
+    startUtc: fields.startUtc,
+    status: fields.status,
+    recordedAt: fields.recordedAt ?? new Date().toISOString(),
+  };
 }
 
 export function latestForProposal(

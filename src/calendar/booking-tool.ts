@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { extractE164 } from "../admission.js";
 import { zonedDateTime } from "../time.js";
 import {
   createTokenProvider,
@@ -8,7 +7,14 @@ import {
   type GoogleOAuthCredentials,
 } from "./auth.js";
 import {
+  createProposalStore,
+  proposeAppointment,
+  type ProposeResult,
+  type ProposalStore,
+} from "./booking-proposal.js";
+import {
   appendBookingRecord,
+  bookingRecord,
   latestForProposal,
   loadBookingRecords,
   type BookingRecord,
@@ -17,40 +23,21 @@ import { createAppointmentEvent, queryBusyIntervals } from "./client.js";
 import { computeAvailableStarts, SCHEDULING_TIMEZONE } from "./policy.js";
 import { loadSelection, requiredCalendarIds, type CalendarSelection } from "./selection.js";
 
+export type { AppointmentProposal, ProposeResult } from "./booking-proposal.js";
+
 export interface BookingIds {
   readonly operationId: string;
   readonly eventId: string;
 }
 
-export interface AppointmentProposal {
-  readonly proposalId: string;
-  readonly callId: string;
-  readonly callerName: string;
-  readonly callbackNumber: string;
-  readonly date: string;
-  readonly startTime: string;
-  readonly endTime: string;
-  readonly timezone: typeof SCHEDULING_TIMEZONE;
-  readonly purpose?: string;
-}
-
-export interface ProposeResult {
-  readonly status: "proposed" | "invalid";
-  readonly proposalId?: string;
-  readonly readback?: {
-    readonly callerName: string;
-    readonly callbackNumber: string;
-    readonly date: string;
-    readonly startTime: string;
-    readonly endTime: string;
-    readonly timezone: typeof SCHEDULING_TIMEZONE;
-    readonly purpose?: string;
-  };
-  readonly message: string;
-}
-
 export interface ConfirmResult {
-  readonly status: "booked" | "not_confirmed" | "no_proposal" | "unavailable" | "failed";
+  readonly status:
+    | "booked"
+    | "not_confirmed"
+    | "no_proposal"
+    | "readback_incomplete"
+    | "unavailable"
+    | "failed";
   readonly operationId?: string;
   readonly eventId?: string;
   readonly eventExists?: boolean;
@@ -75,7 +62,7 @@ export interface AppointmentBooking {
     args: Record<string, unknown>,
     options: { callId: string; referenceTime?: Date },
   ): Promise<BookingToolResult>;
-  release(callId: string): void;
+  markReadbackFinished(callId: string): void;
 }
 
 export interface BookingToolOptions {
@@ -87,20 +74,11 @@ export interface BookingToolOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly now?: () => Date;
   readonly createIds?: () => BookingIds;
+  readonly allowWrites?: boolean;
 }
-
-const E164 = /^\+\d{8,15}$/;
 
 function newHexId(): string {
   return randomBytes(16).toString("hex");
-}
-
-function asString(value: unknown): string | undefined {
-  return typeof value === "string" ? value.trim() : undefined;
-}
-
-function invalid(message: string): ProposeResult {
-  return { status: "invalid", message };
 }
 
 export function createAppointmentBooking(
@@ -120,7 +98,7 @@ export function createAppointmentBooking(
   const tokenProvider =
     options.tokenProvider ??
     (explicitCredentials ? createTokenProvider(explicitCredentials, fetchFn) : undefined);
-  const proposals = new Map<string, AppointmentProposal>();
+  const proposals = createProposalStore();
   const records: BookingRecord[] = options.dataDir ? loadBookingRecords(options.dataDir) : [];
   let queue: Promise<unknown> = Promise.resolve();
 
@@ -184,7 +162,7 @@ export function createAppointmentBooking(
           type: "function",
           name: "confirm_appointment",
           description:
-            "Create the current proposed appointment after you have finished the complete readback and the caller has explicitly agreed. Do not call this for unclear assent, background speech, an interrupted readback, or a refusal. Success means the calendar event exists; then tell the caller Jacob will call the confirmed callback number.",
+            "Create the current proposed appointment after you have finished speaking the complete readback and the caller has explicitly agreed. Pass the proposalId from that proposal. Do not call this for unclear assent, background speech, an interrupted readback, or a refusal. Success means the calendar event exists; then tell the caller Jacob will call the confirmed callback number.",
           parameters: {
             type: "object",
             properties: {
@@ -193,8 +171,12 @@ export function createAppointmentBooking(
                 description:
                   "True only when the caller explicitly agreed to the current readback.",
               },
+              proposalId: {
+                type: "string",
+                description: "The proposalId returned by the current propose_appointment result.",
+              },
             },
-            required: ["confirmed"],
+            required: ["confirmed", "proposalId"],
           },
         },
       ];
@@ -202,7 +184,12 @@ export function createAppointmentBooking(
 
     async execute(name, args, execOptions): Promise<BookingToolResult> {
       if (name === "propose_appointment") {
-        return propose(args, execOptions, { now, proposals });
+        return proposeAppointment(args, {
+          callId: execOptions.callId,
+          referenceTime: execOptions.referenceTime,
+          now,
+          proposals,
+        });
       }
       if (name === "confirm_appointment") {
         return enqueue(() =>
@@ -215,6 +202,7 @@ export function createAppointmentBooking(
             createIds,
             tokenProvider,
             selection: explicitSelection,
+            allowWrites: options.allowWrites === true,
           }),
         );
       }
@@ -224,76 +212,9 @@ export function createAppointmentBooking(
       };
     },
 
-    release(callId) {
-      proposals.delete(callId);
+    markReadbackFinished(callId) {
+      proposals.markReadbackFinished(callId);
     },
-  };
-}
-
-function propose(
-  args: Record<string, unknown>,
-  execOptions: { callId: string; referenceTime?: Date },
-  ctx: {
-    now: () => Date;
-    proposals: Map<string, AppointmentProposal>;
-  },
-): ProposeResult {
-  const callerName = asString(args.callerName);
-  if (!callerName) {
-    return invalid("Please ask the caller for their name before proposing an appointment.");
-  }
-  if (args.callbackConfirmed !== true) {
-    return invalid(
-      "Ask the caller to confirm the callback number aloud before proposing the appointment.",
-    );
-  }
-  const rawNumber = asString(args.callbackNumber);
-  const callbackNumber = rawNumber ? extractE164(rawNumber) : "";
-  if (!E164.test(callbackNumber)) {
-    return invalid(
-      "I could not understand that callback number. Ask the caller to repeat it, including the area code.",
-    );
-  }
-  const date = asString(args.date);
-  const startTime = asString(args.startTime);
-  if (!date || !startTime) {
-    return invalid("Please include the chosen date and Eastern start time.");
-  }
-  const referenceTime = execOptions.referenceTime ?? ctx.now();
-  const permitted = computeAvailableStarts({ date, now: referenceTime, busy: [] });
-  const slot = permitted.find((entry) => entry.startTime === startTime);
-  if (!slot) {
-    return invalid(
-      "That time is not a permitted 30-minute weekday start in Eastern Time. Check availability and propose an offered time.",
-    );
-  }
-  const purpose = asString(args.purpose);
-  const proposal: AppointmentProposal = {
-    proposalId: newHexId(),
-    callId: execOptions.callId,
-    callerName,
-    callbackNumber,
-    date: slot.date,
-    startTime: slot.startTime,
-    endTime: slot.endTime,
-    timezone: SCHEDULING_TIMEZONE,
-    ...(purpose ? { purpose } : {}),
-  };
-  ctx.proposals.set(execOptions.callId, proposal);
-  const purposeLine = purpose ? ` Purpose: ${purpose}.` : "";
-  return {
-    status: "proposed",
-    proposalId: proposal.proposalId,
-    readback: {
-      callerName,
-      callbackNumber,
-      date: slot.date,
-      startTime: slot.startTime,
-      endTime: slot.endTime,
-      timezone: SCHEDULING_TIMEZONE,
-      ...(purpose ? { purpose } : {}),
-    },
-    message: `Please read back: ${callerName}, callback ${callbackNumber}, ${slot.date} ${slot.startTime}–${slot.endTime} ${SCHEDULING_TIMEZONE}.${purposeLine} Wait for explicit agreement before confirming.`,
   };
 }
 
@@ -311,7 +232,7 @@ async function confirm(
   args: Record<string, unknown>,
   execOptions: { callId: string; referenceTime?: Date },
   ctx: {
-    proposals: Map<string, AppointmentProposal>;
+    proposals: ProposalStore;
     persist: (record: BookingRecord) => void;
     records: BookingRecord[];
     fetchFn: typeof fetch;
@@ -319,9 +240,10 @@ async function confirm(
     createIds: () => BookingIds;
     tokenProvider: AccessTokenProvider | undefined;
     selection: CalendarSelection | undefined;
+    allowWrites: boolean;
   },
 ): Promise<ConfirmResult> {
-  const proposal = ctx.proposals.get(execOptions.callId);
+  const proposal = ctx.proposals.current(execOptions.callId);
   if (!proposal) {
     return {
       status: "no_proposal",
@@ -332,13 +254,35 @@ async function confirm(
     return {
       status: "not_confirmed",
       message:
-        "Do not create the appointment. Finish the full readback and wait for the caller's explicit agreement.",
+        "Do not create the appointment. Unclear assent, background speech, or a refusal is not confirmation.",
+    };
+  }
+  if (typeof args.proposalId !== "string" || args.proposalId !== proposal.proposalId) {
+    return {
+      status: "no_proposal",
+      message:
+        "That confirmation does not match the current proposal on this call. Finish a fresh complete readback first.",
+    };
+  }
+  if (!ctx.proposals.readbackFinished(execOptions.callId)) {
+    return {
+      status: "readback_incomplete",
+      message:
+        "The readback is not finished. Complete the full readback without interruption before confirming. Do not create the appointment.",
     };
   }
 
   const existing = latestForProposal(ctx.records, proposal.proposalId);
   if (existing?.status === "booked") {
     return bookedResult(existing, proposal.callbackNumber);
+  }
+
+  if (!ctx.allowWrites) {
+    return {
+      status: "failed",
+      message:
+        "Calendar writes are not enabled on this deployment. Do not claim the appointment is booked.",
+    };
   }
 
   if (!ctx.selection) {
@@ -369,20 +313,17 @@ async function confirm(
     ? { operationId: existing.operationId, eventId: existing.eventId }
     : ctx.createIds();
   const calendarId = ctx.selection.primaryCalendarId;
-
-  const record = (status: BookingRecord["status"]): BookingRecord => ({
+  const identities = {
     operationId: generated.operationId,
     eventId: generated.eventId,
     callId: proposal.callId,
     proposalId: proposal.proposalId,
     calendarId,
     startUtc: start.toISOString(),
-    status,
-    recordedAt: new Date().toISOString(),
-  });
+  };
 
   if (!existing) {
-    ctx.persist(record("pending"));
+    ctx.persist(bookingRecord({ ...identities, status: "pending" }));
   }
 
   try {
@@ -398,8 +339,8 @@ async function confirm(
       busy,
     }).some((slot) => slot.startTime === proposal.startTime);
     if (!stillOpen) {
-      ctx.persist(record("unavailable"));
-      ctx.proposals.delete(execOptions.callId);
+      ctx.persist(bookingRecord({ ...identities, status: "unavailable" }));
+      ctx.proposals.drop(execOptions.callId);
       return {
         status: "unavailable",
         operationId: generated.operationId,
@@ -422,11 +363,11 @@ async function confirm(
     if (!stored.id) {
       throw new Error("missing stored event");
     }
-    const booked = record("booked");
+    const booked = bookingRecord({ ...identities, status: "booked" });
     ctx.persist(booked);
     return bookedResult(booked, proposal.callbackNumber);
   } catch {
-    ctx.persist(record("failed"));
+    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
     return {
       status: "failed",
       operationId: generated.operationId,

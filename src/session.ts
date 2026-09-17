@@ -24,7 +24,7 @@ export interface BookingTool {
     args: Record<string, unknown>,
     options: { callId: string; referenceTime?: Date },
   ): unknown | Promise<unknown>;
-  release?(callId: string): void;
+  markReadbackFinished?(callId: string): void;
 }
 
 export interface RealtimeSocket {
@@ -74,10 +74,10 @@ const AVAILABILITY_INSTRUCTIONS = [
 const BOOKING_INSTRUCTIONS = [
   "Collect the caller's name and a callback number they speak and confirm. The callback number may differ from the number that placed this call. Purpose is optional. Do not request an email address.",
   "After the caller chooses an offered time and has confirmed their callback number, call propose_appointment with their name, confirmed callback number, date, Eastern start time, and optional purpose.",
-  "Read back every field the proposal returns: name, callback number, exact date, start and end times, and timezone. Do not call confirm_appointment until that entire readback is finished.",
-  "A material correction of name, callback number, date, time, timezone, or purpose requires a new propose_appointment and a fresh complete readback. Do not reuse an earlier proposal.",
-  "Call confirm_appointment only after the caller explicitly agrees to the current readback.",
-  "Do not call confirm_appointment for unclear assent, background speech, an interrupted readback, a refusal, or if the caller has not clearly agreed.",
+  "Read back every field the proposal returns: name, callback number, exact date, start and end times, and timezone. Do not call confirm_appointment until you have finished speaking that entire readback.",
+  "A material correction of name, callback number, date, time, timezone, or purpose requires a new propose_appointment and a fresh complete readback. Do not reuse an earlier proposalId.",
+  "Call confirm_appointment only after you finished the full readback and the caller explicitly agrees. Pass that proposal's proposalId and confirmed true.",
+  "Do not call confirm_appointment for unclear assent, background speech, an interrupted readback, a refusal, or if the caller has not clearly agreed. Interrupted readback requires a fresh complete readback first.",
   "If confirm_appointment returns that the time is unavailable, offer fresh alternatives from check_availability. Do not claim the appointment was booked.",
   "If confirm_appointment reports the appointment is booked, tell the caller it is booked and that Jacob will call the confirmed callback number at the agreed time. Do not send or promise any automated callback, message, or email.",
   "Never say the appointment is booked unless confirm_appointment reported that the calendar event exists.",
@@ -321,6 +321,10 @@ export function createTelephoneSession(options: {
                 return;
               }
               socket?.send(JSON.stringify({ type: "response.create" }));
+              break;
+            }
+            case "response.done": {
+              options.booking?.markReadbackFinished?.(options.callId);
               break;
             }
             case "response.function_call_arguments.done": {

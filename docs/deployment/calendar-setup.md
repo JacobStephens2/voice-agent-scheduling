@@ -69,17 +69,28 @@ after explicit booking confirmation. No audio or transcripts are retained.
    EVIDENCE_TOKEN=... \
    npm run smoke:pstn
    ```
-   Until public release, keep `ALLOWED_CALLER_NUMBERS` set and use a test
-   calendar as the selected primary destination so production primary-calendar
-   writes stay gated.
+   Until public release, keep `ALLOWED_CALLER_NUMBERS` set. Calendar writes
+   stay off until `SCHEDULING_ALLOW_CALENDAR_WRITES=true` is set; use a test
+   calendar as the selected primary destination, not Google's `primary` alias.
+
+7. **Prove stored notification fields on the authorized account** (GET, not
+   insert parameters). This writes one throwaway event on a test calendar,
+   inspects attendees / Meet / reminders as stored, then deletes it:
+   ```bash
+   npm run calendars:verify-booking -- --calendar <test-calendar-id>
+   ```
+   It refuses the `primary` alias unless you pass `--allow-primary`. After a
+   real telephone booking, also confirm the account inbox received no
+   invitation, update email, or email reminder.
 
 On the host, credential and selection files live under
 `/var/lib/scheduling-agent` (`google-client.json`, `google-refresh`,
 `scheduling-calendars.json`, all mode `0600`, owned by
 `scheduling-agent`). The same values may instead be supplied as
 `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`,
-`GOOGLE_CALENDAR_REFRESH_TOKEN`, `SCHEDULING_PRIMARY_CALENDAR`, and
-`SCHEDULING_CONFLICT_CALENDARS` in `/etc/scheduling-agent/scheduling-agent.env`.
+`GOOGLE_CALENDAR_REFRESH_TOKEN`, `SCHEDULING_PRIMARY_CALENDAR`,
+`SCHEDULING_CONFLICT_CALENDARS`, and `SCHEDULING_ALLOW_CALENDAR_WRITES` in
+`/etc/scheduling-agent/scheduling-agent.env`.
 
 ## Availability rules now enforced from real data
 
@@ -107,10 +118,12 @@ On the host, credential and selection files live under
 - Refresh credentials stay outside source control (`.gitignore` covers
   `.env*` and `.scratch/`), model context, and logs. Error messages carry
   bounded categories only, never secrets or caller contact data.
-- Booking confirmation is tied to the current proposal on that call. A
-  material correction replaces the proposal and needs a fresh readback.
-  Disconnecting before explicit agreement creates no event. Repeating the
-  same completed confirmation returns that operation's outcome and does not
-  insert a second event.
+- Booking confirmation is tied to the current proposal on that call. The
+  application refuses confirm until a completed assistant turn has finished
+  the readback (`response.done`) and the matching `proposalId` is supplied
+  with `confirmed: true`. Unclear assent, an interrupted readback, a stale
+  proposal, or a refusal creates no event. Disconnecting before explicit
+  agreement creates no event. Repeating the same completed confirmation
+  returns that operation's outcome and does not insert a second event.
 - The synthetic availability module from the previous slice is retired from
   the call path but kept under test as regression history.

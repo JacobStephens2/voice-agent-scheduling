@@ -29,6 +29,7 @@ export interface ServerConfig {
   readonly fetchFn?: typeof fetch;
   readonly connectWebSocket?: ConnectWebSocket;
   readonly hangupCall?: (callId: string) => Promise<void>;
+  readonly allowCalendarWrites?: boolean;
 }
 
 export interface SchedulingServer {
@@ -82,7 +83,11 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
       createCalendarAvailabilityTool({ fetchFn, dataDir: config.dataDir }),
     booking:
       config.booking ??
-      createAppointmentBooking({ fetchFn, dataDir: config.dataDir }),
+      createAppointmentBooking({
+        fetchFn,
+        dataDir: config.dataDir,
+        allowWrites: config.allowCalendarWrites === true,
+      }),
     maxConcurrentCalls: config.maxConcurrentCalls ?? 1,
     allowedCallerNumbers: config.allowedCallerNumbers,
     maxCallDurationMs: config.maxCallDurationMs,

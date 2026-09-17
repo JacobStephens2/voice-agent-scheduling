@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
+import { fakeGoogleCalendar, TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
 
 const MONDAY_14H = new Date("2026-09-07T14:00:00-04:00");
 const SELECTION = {
@@ -11,62 +12,19 @@ const SELECTION = {
   updatedAt: "2026-09-07T00:00:00.000Z",
 };
 const TOKEN_PROVIDER = { getAccessToken: async () => "test-access-token" };
-const EVENT_ID = "0123456789abcdef0123456789abcdef";
-const OPERATION_ID = "fedcba9876543210fedcba9876543210";
 const CALL_ID = "call-book-1";
 
-const EMPTY_DAY = {
-  calendars: { primary: { busy: [] }, team: { busy: [] } },
+const PROPOSE_ARGS = {
+  callerName: "Ada Lovelace",
+  callbackNumber: "+15551239876",
+  callbackConfirmed: true,
+  date: "2026-09-11",
+  startTime: "10:00",
 };
 
-function storedEvent(overrides: Record<string, unknown> = {}) {
-  return {
-    id: EVENT_ID,
-    status: "confirmed",
-    summary: "Appointment with Ada Lovelace",
-    description: "Callback number: +15551239876",
-    start: { dateTime: "2026-09-11T10:00:00", timeZone: "America/New_York" },
-    end: { dateTime: "2026-09-11T10:30:00", timeZone: "America/New_York" },
-    transparency: "opaque",
-    reminders: {
-      useDefault: false,
-      overrides: [{ method: "popup", minutes: 10 }],
-    },
-    ...overrides,
-  };
-}
-
-function googleFetch(options: {
-  freeBusy?: unknown;
-  stored?: Record<string, unknown>;
-  freeBusyStatus?: number;
-}): { fetchFn: typeof fetch; writes: string[] } {
-  const writes: string[] = [];
-  const fetchFn = (async (url: unknown, init?: unknown) => {
-    const target = String(url);
-    const method = (init as RequestInit | undefined)?.method ?? "GET";
-    if (target.includes("/freeBusy")) {
-      return new Response(JSON.stringify(options.freeBusy ?? EMPTY_DAY), {
-        status: options.freeBusyStatus ?? 200,
-      });
-    }
-    if (target.includes("/events") && method === "POST") {
-      writes.push(target);
-      return new Response(JSON.stringify({ id: EVENT_ID, summary: "insert-response-not-proof" }), {
-        status: 200,
-      });
-    }
-    if (target.includes(`/events/${EVENT_ID}`) && method === "GET") {
-      return new Response(JSON.stringify(options.stored ?? storedEvent()), { status: 200 });
-    }
-    throw new Error(`unexpected request ${method} ${target}`);
-  }) as typeof fetch;
-  return { fetchFn, writes };
-}
-
 function bookingWith(
-  google: { fetchFn: typeof fetch; writes: string[] },
-  extra: { dataDir?: string } = {},
+  google: ReturnType<typeof fakeGoogleCalendar>,
+  extra: { dataDir?: string; allowWrites?: boolean } = {},
 ) {
   return createAppointmentBooking({
     fetchFn: google.fetchFn,
@@ -74,13 +32,37 @@ function bookingWith(
     selection: SELECTION,
     now: () => MONDAY_14H,
     dataDir: extra.dataDir ?? mkdtempSync(join(tmpdir(), "scheduling-bookings-")),
-    createIds: () => ({ operationId: OPERATION_ID, eventId: EVENT_ID }),
+    createIds: () => ({ operationId: TEST_OPERATION_ID, eventId: TEST_EVENT_ID }),
+    allowWrites: extra.allowWrites ?? true,
   });
+}
+
+async function proposedOn(
+  booking: ReturnType<typeof createAppointmentBooking>,
+  extra: Record<string, unknown> = {},
+  callId = CALL_ID,
+) {
+  return booking.execute("propose_appointment", { ...PROPOSE_ARGS, ...extra }, { callId });
+}
+
+async function confirmCurrent(
+  booking: ReturnType<typeof createAppointmentBooking>,
+  proposed: { proposalId?: string } | { status: string },
+  extra: Record<string, unknown> = {},
+  callId = CALL_ID,
+) {
+  booking.markReadbackFinished(callId);
+  const proposalId = "proposalId" in proposed ? proposed.proposalId : undefined;
+  return booking.execute(
+    "confirm_appointment",
+    { confirmed: true, proposalId, ...extra },
+    { callId },
+  );
 }
 
 describe("appointment booking tool", () => {
   it("proposes a chosen appointment with a confirmed callback number and does not write", async () => {
-    const google = googleFetch({});
+    const google = fakeGoogleCalendar({});
     const booking = bookingWith(google);
 
     const names = booking.definitions().map((tool) => tool.name);
@@ -126,8 +108,8 @@ describe("appointment booking tool", () => {
     expect(google.writes).toEqual([]);
   });
 
-  it("creates no event when confirmation is missing, unclear, or the call has no current proposal", async () => {
-    const google = googleFetch({});
+  it("creates no event when confirmation is missing, unclear, or belongs to another call", async () => {
+    const google = fakeGoogleCalendar({});
     const booking = bookingWith(google);
 
     const withoutProposal = await booking.execute(
@@ -138,68 +120,69 @@ describe("appointment booking tool", () => {
     expect(withoutProposal.status).toBe("no_proposal");
     expect(google.writes).toEqual([]);
 
-    await booking.execute(
-      "propose_appointment",
-      {
-        callerName: "Ada Lovelace",
-        callbackNumber: "+15551239876",
-        callbackConfirmed: true,
-        date: "2026-09-11",
-        startTime: "10:00",
-      },
-      { callId: CALL_ID },
-    );
+    const proposed = await proposedOn(booking);
 
     const unclear = await booking.execute(
       "confirm_appointment",
-      { confirmed: false },
+      { confirmed: false, proposalId: (proposed as { proposalId?: string }).proposalId },
       { callId: CALL_ID },
     );
     expect(unclear.status).toBe("not_confirmed");
     expect(google.writes).toEqual([]);
 
-    booking.release(CALL_ID);
-    const afterDisconnect = await booking.execute(
+    const otherCall = await booking.execute(
       "confirm_appointment",
-      { confirmed: true },
+      { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId },
+      { callId: "call-other" },
+    );
+    expect(otherCall.status).toBe("no_proposal");
+    expect(google.writes).toEqual([]);
+  });
+
+  it("creates no event when the readback was not finished or the proposalId is stale", async () => {
+    const google = fakeGoogleCalendar({});
+    const booking = bookingWith(google);
+    const proposed = await proposedOn(booking);
+
+    const interrupted = await booking.execute(
+      "confirm_appointment",
+      { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId },
       { callId: CALL_ID },
     );
-    expect(afterDisconnect.status).toBe("no_proposal");
+    expect(interrupted.status).toBe("readback_incomplete");
+    expect(google.writes).toEqual([]);
+
+    booking.markReadbackFinished(CALL_ID);
+    const stale = await booking.execute(
+      "confirm_appointment",
+      { confirmed: true, proposalId: "not-the-current-proposal" },
+      { callId: CALL_ID },
+    );
+    expect(stale.status).toBe("no_proposal");
+    expect(google.writes).toEqual([]);
+  });
+
+  it("does not write when calendar writes are disabled on this deployment", async () => {
+    const google = fakeGoogleCalendar({});
+    const booking = bookingWith(google, { allowWrites: false });
+    const proposed = await proposedOn(booking);
+    const result = await confirmCurrent(booking, proposed);
+    expect(result.status).toBe("failed");
+    expect(result.message).toContain("not enabled");
     expect(google.writes).toEqual([]);
   });
 
   it("creates one stored appointment after explicit confirmation and only then reports success", async () => {
-    const google = googleFetch({
-      stored: storedEvent({
-        summary: "Appointment with Ada Lovelace",
-        description: "Callback number: +15551239876\nPurpose: Website review",
-      }),
-    });
+    const google = fakeGoogleCalendar({});
     const booking = bookingWith(google);
 
-    await booking.execute(
-      "propose_appointment",
-      {
-        callerName: "Ada Lovelace",
-        callbackNumber: "+15551239876",
-        callbackConfirmed: true,
-        date: "2026-09-11",
-        startTime: "10:00",
-        purpose: "Website review",
-      },
-      { callId: CALL_ID },
-    );
-
-    const result = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true },
-      { callId: CALL_ID },
-    );
+    const proposed = await proposedOn(booking, { purpose: "Website review" });
+    const result = await confirmCurrent(booking, proposed);
 
     expect(result).toMatchObject({
       status: "booked",
-      operationId: OPERATION_ID,
-      eventId: EVENT_ID,
+      operationId: TEST_OPERATION_ID,
+      eventId: TEST_EVENT_ID,
       eventExists: true,
     });
     expect(result.message.toLowerCase()).toContain("booked");
@@ -207,29 +190,18 @@ describe("appointment booking tool", () => {
     expect(result.message).toContain("+15551239876");
     expect(google.writes).toHaveLength(1);
 
-    const again = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true },
-      { callId: CALL_ID },
-    );
+    const again = await confirmCurrent(booking, proposed);
     expect(again).toMatchObject({
       status: "booked",
-      operationId: OPERATION_ID,
-      eventId: EVENT_ID,
+      operationId: TEST_OPERATION_ID,
+      eventId: TEST_EVENT_ID,
       eventExists: true,
     });
     expect(google.writes).toHaveLength(1);
   });
 
   it("invalidates the earlier proposal when the caller makes a material correction", async () => {
-    const google = googleFetch({
-      stored: storedEvent({
-        summary: "Appointment with Ada Lovelace",
-        description: "Callback number: +15559876543",
-        start: { dateTime: "2026-09-11T14:00:00", timeZone: "America/New_York" },
-        end: { dateTime: "2026-09-11T14:30:00", timeZone: "America/New_York" },
-      }),
-    });
+    const google = fakeGoogleCalendar({});
     const booking = bookingWith(google);
 
     const first = await booking.execute(
@@ -272,17 +244,13 @@ describe("appointment booking tool", () => {
       (first as { proposalId?: string }).proposalId,
     );
 
-    const result = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true },
-      { callId: CALL_ID },
-    );
+    const result = await confirmCurrent(booking, second);
     expect(result.status).toBe("booked");
     expect(google.writes).toHaveLength(1);
   });
 
   it("does not write a time that is already unavailable on the required calendars", async () => {
-    const google = googleFetch({
+    const google = fakeGoogleCalendar({
       freeBusy: {
         calendars: {
           primary: {
@@ -294,23 +262,8 @@ describe("appointment booking tool", () => {
     });
     const booking = bookingWith(google);
 
-    await booking.execute(
-      "propose_appointment",
-      {
-        callerName: "Ada Lovelace",
-        callbackNumber: "+15551239876",
-        callbackConfirmed: true,
-        date: "2026-09-11",
-        startTime: "10:00",
-      },
-      { callId: CALL_ID },
-    );
-
-    const result = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true },
-      { callId: CALL_ID },
-    );
+    const proposed = await proposedOn(booking);
+    const result = await confirmCurrent(booking, proposed);
     expect(result.status).toBe("unavailable");
     expect(result).toMatchObject({ eventExists: false });
     expect(result.message).toContain("no longer available");
@@ -318,27 +271,16 @@ describe("appointment booking tool", () => {
   });
 
   it("stores only minimal booking records, not the conversation or caller details", async () => {
-    const google = googleFetch({});
+    const google = fakeGoogleCalendar({});
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-bookings-"));
     const booking = bookingWith(google, { dataDir });
 
-    await booking.execute(
-      "propose_appointment",
-      {
-        callerName: "Ada Lovelace",
-        callbackNumber: "+15551239876",
-        callbackConfirmed: true,
-        date: "2026-09-11",
-        startTime: "10:00",
-        purpose: "Website review",
-      },
-      { callId: CALL_ID },
-    );
-    await booking.execute("confirm_appointment", { confirmed: true }, { callId: CALL_ID });
+    const proposed = await proposedOn(booking, { purpose: "Website review" });
+    await confirmCurrent(booking, proposed);
 
     const stored = readFileSync(join(dataDir, "bookings.jsonl"), "utf8");
-    expect(stored).toContain(OPERATION_ID);
-    expect(stored).toContain(EVENT_ID);
+    expect(stored).toContain(TEST_OPERATION_ID);
+    expect(stored).toContain(TEST_EVENT_ID);
     expect(stored).toContain("booked");
     expect(stored).not.toContain("Ada Lovelace");
     expect(stored).not.toContain("15551239876");

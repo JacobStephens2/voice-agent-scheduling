@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { extractE164 } from "./phone.js";
 
 export interface IncomingCallAdmissionOptions {
   readonly webhookSecret: string;
@@ -95,24 +96,6 @@ function sipHeader(headers: readonly SipHeader[] | undefined, name: string): str
     (header) => typeof header.name === "string" && header.name.toLowerCase() === name,
   );
   return typeof match?.value === "string" ? match.value : "";
-}
-
-export function extractE164(value: string): string {
-  const plusMatch = value.match(/\+\d{8,15}/);
-  if (plusMatch) {
-    return plusMatch[0];
-  }
-  const digits = value.replace(/\D/g, "");
-  if (digits.length === 10) {
-    return `+1${digits}`;
-  }
-  if (digits.length === 11 && digits.startsWith("1")) {
-    return `+${digits}`;
-  }
-  if (digits.length >= 8 && digits.length <= 15) {
-    return `+${digits}`;
-  }
-  return value.trim();
 }
 
 export function createIncomingCallAdmission(
