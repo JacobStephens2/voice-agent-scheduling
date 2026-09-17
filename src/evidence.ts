@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { appendJsonl, loadJsonl } from "./jsonl.js";
+import { DIRECT_SIP_MICRO_USD_PER_MINUTE } from "./budget.js";
 
 export const DIRECT_SIP_ROUTE = "direct_sip";
 
@@ -14,13 +15,14 @@ export interface StructuredCallEvidence {
   readonly reasoningVerified?: string;
   readonly toolRoundTrips: number;
   readonly estimatedCostMicroUsd: number;
+  readonly durationWarningSent?: boolean;
   readonly error?: string;
   readonly recordedAt: string;
 }
 
-const GROK_VOICE_USD_PER_MINUTE = 0.08;
-const MICRO_USD_PER_MILLISECOND =
-  (GROK_VOICE_USD_PER_MINUTE * 1_000_000) / 60_000;
+// Per-call estimates use the combined direct-SIP rate (voice model plus
+// carrier): an operating target for admission control, not a promise about
+// any carrier's bill.
 
 export function maskPhoneNumber(number: string): string {
   const digits = number.replace(/\D/g, "");
@@ -32,8 +34,14 @@ export function maskPhoneNumber(number: string): string {
   return `+${country}***${lastFour}`;
 }
 
-export function estimateCostMicroUsd(durationMs: number): number {
-  return Math.round(durationMs * MICRO_USD_PER_MILLISECOND);
+export function estimateCostMicroUsd(
+  durationMs: number,
+  perMinuteMicroUsd: number = DIRECT_SIP_MICRO_USD_PER_MINUTE,
+): number {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return 0;
+  }
+  return Math.round((durationMs * perMinuteMicroUsd) / 60_000);
 }
 
 function evidenceFile(dataDir: string): string {

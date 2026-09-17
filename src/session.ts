@@ -53,6 +53,7 @@ export interface SessionOutcome {
   readonly reasoningVerified?: string;
   readonly toolRoundTrips: number;
   readonly durationMs: number;
+  readonly durationWarningSent: boolean;
   readonly error?: string;
 }
 
@@ -65,6 +66,20 @@ const MODEL_ALIASES: Readonly<Record<string, string>> = {
 };
 
 const DEFAULT_MAX_DURATION_MS = 10 * 60 * 1000;
+const DEFAULT_WARNING_LEAD_MS = 60 * 1000;
+
+export const DURATION_CUTOFF_STATUS = "duration_cutoff";
+
+function callLimitLabel(maxDurationMs: number): string {
+  return `${Math.max(1, Math.round(maxDurationMs / 60_000))}-minute`;
+}
+
+function durationLimitInstructions(maxDurationMs: number): string {
+  return (
+    `Scheduling calls end after ${callLimitLabel(maxDurationMs)}. Give the caller a brief warning ` +
+    "shortly beforehand, wrap up the current point, and do not start a new booking confirmation after the cutoff."
+  );
+}
 
 const AVAILABILITY_INSTRUCTIONS = [
   "You are Jacob's scheduling assistant.",
@@ -92,11 +107,15 @@ const BOOKING_INSTRUCTIONS = [
   "Never say the appointment is booked unless confirm_appointment reported that the calendar event exists.",
 ].join(" ");
 
-function sessionInstructions(booking: BookingTool | undefined): string {
+function sessionInstructions(
+  booking: BookingTool | undefined,
+  maxDurationMs: number,
+): string {
+  const durationInstructions = durationLimitInstructions(maxDurationMs);
   if (!booking) {
-    return `${AVAILABILITY_INSTRUCTIONS} Do not claim that an appointment has been booked or written to a calendar.`;
+    return `${AVAILABILITY_INSTRUCTIONS} ${durationInstructions} Do not claim that an appointment has been booked or written to a calendar.`;
   }
-  return `${AVAILABILITY_INSTRUCTIONS} ${BOOKING_INSTRUCTIONS}`;
+  return `${AVAILABILITY_INSTRUCTIONS} ${BOOKING_INSTRUCTIONS} ${durationInstructions}`;
 }
 
 export function resolveVoiceModel(reported: unknown): string | undefined {
@@ -120,6 +139,7 @@ function unexpectedModelError(reported: unknown): string {
 function sessionUpdatePayload(
   availabilityTool: AvailabilityTool,
   booking: BookingTool | undefined,
+  maxDurationMs: number,
 ): string {
   return JSON.stringify({
     type: "session.update",
@@ -132,7 +152,7 @@ function sessionUpdatePayload(
         prefix_padding_ms: 300,
         silence_duration_ms: 200,
       },
-      instructions: sessionInstructions(booking),
+      instructions: sessionInstructions(booking, maxDurationMs),
       tools: [availabilityTool.definition(), ...(booking?.definitions() ?? [])],
     },
   });
@@ -171,10 +191,18 @@ async function toolOutputMessages(
     booking?: BookingTool;
     callId: string;
     referenceTime: Date | undefined;
+    isCutoffReached: () => boolean;
+    callLimitLabel: string;
   },
 ): Promise<string[] | undefined> {
   if (typeof event.call_id !== "string" || typeof event.name !== "string") {
     return undefined;
+  }
+  if (options.isCutoffReached() && event.name === "confirm_appointment") {
+    return functionOutputMessages(event.call_id, {
+      status: DURATION_CUTOFF_STATUS,
+      message: `The ${options.callLimitLabel} scheduling-call limit was reached. Do not create the appointment and do not claim it is booked. Invite the caller to call again.`,
+    });
   }
   const args = parseToolArgs(event.arguments);
   if (event.name === "check_availability") {
@@ -215,6 +243,17 @@ function eventText(data: unknown): string | undefined {
   return undefined;
 }
 
+function durationNoticePayload(text: string): string {
+  return JSON.stringify({
+    type: "conversation.item.create",
+    item: {
+      type: "message",
+      role: "system",
+      content: [{ type: "input_text", text }],
+    },
+  });
+}
+
 export function createTelephoneSession(options: {
   callId: string;
   apiKey: string;
@@ -224,6 +263,7 @@ export function createTelephoneSession(options: {
   hangupCall?: (callId: string) => Promise<void>;
   referenceTime?: Date;
   maxDurationMs?: number;
+  warningLeadMs?: number;
 }): { start(): Promise<SessionOutcome> } {
   let socket: RealtimeSocket | undefined;
 
@@ -235,7 +275,12 @@ export function createTelephoneSession(options: {
         let reasoningVerified: string | undefined;
         let toolRoundTrips = 0;
         let finished = false;
+        let warningSent = false;
+        let cutoffReached = false;
         let timeout: NodeJS.Timeout | undefined;
+        let warningTimeout: NodeJS.Timeout | undefined;
+        const maxDurationMs = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS;
+        const warningLeadMs = options.warningLeadMs ?? DEFAULT_WARNING_LEAD_MS;
 
         const finish = (status: "completed" | "failed", error?: string) => {
           if (finished) {
@@ -244,6 +289,9 @@ export function createTelephoneSession(options: {
           finished = true;
           if (timeout) {
             clearTimeout(timeout);
+          }
+          if (warningTimeout) {
+            clearTimeout(warningTimeout);
           }
           void options.hangupCall?.(options.callId);
           try {
@@ -258,13 +306,38 @@ export function createTelephoneSession(options: {
             reasoningVerified,
             toolRoundTrips,
             durationMs: Date.now() - startedAt,
+            durationWarningSent: warningSent,
             error,
           });
         };
 
+        const limitLabel = callLimitLabel(maxDurationMs);
+
+        warningTimeout = setTimeout(() => {
+          if (finished) {
+            return;
+          }
+          warningSent = true;
+          socket?.send(
+            durationNoticePayload(
+              `The ${limitLabel} scheduling-call limit approaches. Briefly warn the caller, wrap up the current point, and do not start a new booking confirmation.`,
+            ),
+          );
+          socket?.send(JSON.stringify({ type: "response.create" }));
+        }, Math.max(0, maxDurationMs - warningLeadMs));
+
         timeout = setTimeout(() => {
+          if (finished) {
+            return;
+          }
+          cutoffReached = true;
+          socket?.send(
+            durationNoticePayload(
+              `The ${limitLabel} scheduling-call limit is reached. Do not accept a new booking confirmation; politely close the scheduling call.`,
+            ),
+          );
           finish("completed", "duration_limit_reached");
-        }, options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS);
+        }, maxDurationMs);
 
         try {
           socket = options.connectWebSocket(sipRealtimeUrl(options.callId), {
@@ -304,7 +377,13 @@ export function createTelephoneSession(options: {
                 }
                 modelVerified = resolved;
               }
-              socket?.send(sessionUpdatePayload(options.availabilityTool, options.booking));
+              socket?.send(
+                sessionUpdatePayload(
+                  options.availabilityTool,
+                  options.booking,
+                  maxDurationMs,
+                ),
+              );
               break;
             }
             case "session.updated": {
@@ -349,6 +428,8 @@ export function createTelephoneSession(options: {
                   booking: options.booking,
                   callId: options.callId,
                   referenceTime: options.referenceTime,
+                  isCutoffReached: () => cutoffReached,
+                  callLimitLabel: limitLabel,
                 },
               )
                 .then((messages) => {

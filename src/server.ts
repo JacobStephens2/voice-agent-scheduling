@@ -21,6 +21,11 @@ export interface ServerConfig {
   readonly maxConcurrentCalls?: number;
   readonly allowedCallerNumbers?: readonly string[];
   readonly maxCallDurationMs?: number;
+  readonly warningLeadMs?: number;
+  readonly monthlyTargetMicroUsd?: number;
+  readonly fixedMonthlyMicroUsd?: number;
+  readonly perMinuteMicroUsd?: number;
+  readonly reserveMargin?: number;
   readonly dataDir?: string;
   readonly availabilityTool?: AvailabilityTool;
   readonly booking?: BookingTool;
@@ -98,6 +103,11 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
     maxConcurrentCalls: config.maxConcurrentCalls ?? 1,
     allowedCallerNumbers: config.allowedCallerNumbers,
     maxCallDurationMs: config.maxCallDurationMs,
+    warningLeadMs: config.warningLeadMs,
+    monthlyTargetMicroUsd: config.monthlyTargetMicroUsd,
+    fixedMonthlyMicroUsd: config.fixedMonthlyMicroUsd,
+    perMinuteMicroUsd: config.perMinuteMicroUsd,
+    reserveMargin: config.reserveMargin,
     dataDir: config.dataDir,
     connectWebSocket: config.connectWebSocket,
     hangupCall: config.hangupCall,
@@ -150,6 +160,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
       json(res, 200, {
         status: "healthy",
         activeCalls: lifecycleManager.activeCallCount(),
+        admissionsPaused: lifecycleManager.budgetSnapshot().admissionsPaused,
         timestamp: new Date().toISOString(),
       });
       return;
