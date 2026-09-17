@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import WebSocket from "ws";
 import {
   createIncomingCallAdmission,
@@ -5,6 +7,15 @@ import {
   type IncomingCallAdmission,
   type SignedWebhook,
 } from "./admission.js";
+import {
+  DIRECT_SIP_MICRO_USD_PER_MINUTE,
+  DURATION_WARNING_LEAD_MS_DEFAULT,
+  MAX_CALL_DURATION_MS_DEFAULT,
+  createBudgetLedger,
+  type BudgetBlockReason,
+  type BudgetLedger,
+  type BudgetSnapshot,
+} from "./budget.js";
 import {
   DIRECT_SIP_ROUTE,
   estimateCostMicroUsd,
@@ -27,10 +38,14 @@ export interface WebhookResponse {
   readonly body: string;
 }
 
+export type WebhookRejectionReason = AdmissionRejectionReason | BudgetBlockReason;
+
 export interface CallLifecycleManager {
   handleWebhook(input: SignedWebhook): Promise<WebhookResponse>;
   listEvidence(): readonly StructuredCallEvidence[];
   activeCallCount(): number;
+  budgetSnapshot(): BudgetSnapshot;
+  recoveredStaleAdmissions(): readonly string[];
 }
 
 export interface CallLifecycleManagerOptions {
@@ -43,18 +58,73 @@ export interface CallLifecycleManagerOptions {
   readonly connectWebSocket?: ConnectWebSocket;
   readonly hangupCall?: (callId: string) => Promise<void>;
   readonly maxCallDurationMs?: number;
+  readonly warningLeadMs?: number;
   readonly dataDir?: string;
   readonly referenceTime?: Date;
+  readonly monthlyTargetMicroUsd?: number;
+  readonly fixedMonthlyMicroUsd?: number;
+  readonly perMinuteMicroUsd?: number;
+  readonly reserveMargin?: number;
 }
 
-const REJECTION_STATUS: Record<AdmissionRejectionReason, number> = {
+const REJECTION_STATUS: Record<WebhookRejectionReason, number> = {
   invalid_signature: 401,
   timestamp_out_of_range: 401,
   unauthorized_caller: 403,
   duplicate_delivery: 409,
   concurrency_limit_reached: 429,
   invalid_payload: 400,
+  budget_exhausted: 503,
+  budget_unavailable: 503,
 };
+
+const ACTIVE_CALL_FILE = "active-call.json";
+
+function activeCallPath(dataDir: string): string {
+  return join(dataDir, ACTIVE_CALL_FILE);
+}
+
+/** Durable one-caller claim so a restart can detect a stale admission. */
+function writeActiveCallClaim(dataDir: string, callId: string): void {
+  try {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(
+      activeCallPath(dataDir),
+      JSON.stringify({ callId, admittedAt: new Date().toISOString() }),
+    );
+  } catch {
+    // Admission stays in memory when the claim cannot be persisted.
+  }
+}
+
+function clearActiveCallClaim(dataDir: string, callId: string): void {
+  try {
+    const raw = readFileSync(activeCallPath(dataDir), "utf8");
+    const parsed = JSON.parse(raw) as { callId?: unknown };
+    if (parsed.callId !== callId) {
+      return;
+    }
+    unlinkSync(activeCallPath(dataDir));
+  } catch {
+    // Absent or unreadable claim means nothing to release.
+  }
+}
+
+/**
+ * Recover a claim left by a process that died mid-call. The previous media
+ * session is gone with its process, so the slot is freed; the budget ledger
+ * conservatively counts its reservation as spent (see createBudgetLedger).
+ */
+function recoverStaleActiveCallClaim(dataDir: string): string | undefined {
+  try {
+    const raw = readFileSync(activeCallPath(dataDir), "utf8");
+    const parsed = JSON.parse(raw) as { callId?: unknown };
+    unlinkSync(activeCallPath(dataDir));
+    return typeof parsed.callId === "string" ? parsed.callId : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function defaultConnectWebSocket(
   url: string,
@@ -97,6 +167,24 @@ export function createCallLifecycleManager(
   });
   const connectWebSocket = options.connectWebSocket ?? defaultConnectWebSocket;
   const hangupCall = options.hangupCall ?? defaultHangupCall(options.apiKey);
+  const maxCallDurationMs = options.maxCallDurationMs ?? MAX_CALL_DURATION_MS_DEFAULT;
+  const warningLeadMs = options.warningLeadMs ?? DURATION_WARNING_LEAD_MS_DEFAULT;
+  const perMinuteMicroUsd = options.perMinuteMicroUsd ?? DIRECT_SIP_MICRO_USD_PER_MINUTE;
+  const budget: BudgetLedger = createBudgetLedger({
+    dataDir: options.dataDir,
+    monthlyTargetMicroUsd: options.monthlyTargetMicroUsd,
+    fixedMonthlyMicroUsd: options.fixedMonthlyMicroUsd,
+    perMinuteMicroUsd: options.perMinuteMicroUsd,
+    reserveMargin: options.reserveMargin,
+    maxCallDurationMs,
+  });
+  const staleAdmissions: string[] = [];
+  if (options.dataDir) {
+    const staleClaim = recoverStaleActiveCallClaim(options.dataDir);
+    if (staleClaim) {
+      staleAdmissions.push(staleClaim);
+    }
+  }
   const evidenceByCall = new Map<string, StructuredCallEvidence>();
   if (options.dataDir) {
     for (const evidence of loadEvidence(options.dataDir)) {
@@ -117,6 +205,10 @@ export function createCallLifecycleManager(
     outcome: SessionOutcome,
   ) => {
     admission.release(callId);
+    if (options.dataDir) {
+      clearActiveCallClaim(options.dataDir, callId);
+    }
+    budget.settle(callId, outcome.durationMs);
     record({
       callId,
       connectionRoute: DIRECT_SIP_ROUTE,
@@ -127,7 +219,8 @@ export function createCallLifecycleManager(
       modelVerified: outcome.modelVerified,
       reasoningVerified: outcome.reasoningVerified,
       toolRoundTrips: outcome.toolRoundTrips,
-      estimatedCostMicroUsd: estimateCostMicroUsd(outcome.durationMs),
+      estimatedCostMicroUsd: estimateCostMicroUsd(outcome.durationMs, perMinuteMicroUsd),
+      durationWarningSent: outcome.durationWarningSent,
       error: outcome.error,
       recordedAt: new Date().toISOString(),
     });
@@ -150,6 +243,19 @@ export function createCallLifecycleManager(
         };
       }
 
+      const reservation = budget.tryReserve(result.callId);
+      if (!reservation.admitted) {
+        admission.release(result.callId);
+        void hangupCall(result.callId);
+        return {
+          statusCode: REJECTION_STATUS[reservation.reason],
+          body: JSON.stringify({ error: reservation.reason }),
+        };
+      }
+      if (options.dataDir) {
+        writeActiveCallClaim(options.dataDir, result.callId);
+      }
+
       const session = createTelephoneSession({
         callId: result.callId,
         apiKey: options.apiKey,
@@ -157,7 +263,8 @@ export function createCallLifecycleManager(
         booking: options.booking,
         connectWebSocket,
         hangupCall,
-        maxDurationMs: options.maxCallDurationMs,
+        maxDurationMs: maxCallDurationMs,
+        warningLeadMs,
         referenceTime: options.referenceTime,
       });
 
@@ -172,6 +279,7 @@ export function createCallLifecycleManager(
             status: "failed",
             toolRoundTrips: 0,
             durationMs: 0,
+            durationWarningSent: false,
             error: `Coordinator unhandled error: ${error instanceof Error ? error.message : String(error)}`,
           });
         });
@@ -188,6 +296,14 @@ export function createCallLifecycleManager(
 
     activeCallCount() {
       return admission.activeCallCount();
+    },
+
+    budgetSnapshot() {
+      return budget.snapshot();
+    },
+
+    recoveredStaleAdmissions() {
+      return [...staleAdmissions];
     },
   };
 }
