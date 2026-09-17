@@ -24,7 +24,7 @@ export interface AvailableStart {
   readonly isSynthetic: false;
 }
 
-function endTimeOf(startTime: string): string {
+export function endTimeOf(startTime: string): string {
   const hour = Number(startTime.slice(0, 2));
   const minute = Number(startTime.slice(3));
   if (minute === 0) {

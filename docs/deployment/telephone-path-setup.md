@@ -30,7 +30,7 @@ If a live call reports a different model, Direct SIP is unsuitable and the accep
 
 ## Public admission
 
-Public callers remain disabled until later tickets complete. `ALLOWED_CALLER_NUMBERS` must contain the authorized smoke-call number. Primary-calendar writes are not implemented in this slice; availability is real Google Calendar availability for Jacob's selected calendars (see [calendar setup](calendar-setup.md)).
+Public callers remain disabled until later tickets complete. `ALLOWED_CALLER_NUMBERS` must contain the authorized smoke-call number. Calendar event writes stay off unless `SCHEDULING_ALLOW_CALENDAR_WRITES=true`; keep the selected destination on a test calendar until the final release (see [calendar setup](calendar-setup.md)).
 
 ## Privacy and retention
 
@@ -57,4 +57,4 @@ SMOKE_TIMEOUT_MS=300000 \
 npm run smoke:pstn
 ```
 
-During the smoke run, dial the dedicated number from the allowlisted caller, confirm the agent identifies itself as Jacob's scheduling assistant, ask for next Friday availability, hang up, and keep the structured pass/fail output.
+During an availability smoke run, dial the dedicated number from the allowlisted caller, confirm the agent identifies itself as Jacob's scheduling assistant, ask for next Friday availability, hang up, and keep the structured pass/fail output. For a booking smoke run, continue through name, confirmed callback number, readback, and explicit confirmation, then check the test calendar for one matching event.

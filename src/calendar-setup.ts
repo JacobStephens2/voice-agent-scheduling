@@ -1,5 +1,5 @@
 /**
- * Operator setup for Google Calendar availability (issue #3).
+ * Operator setup for Google Calendar authorization and selection.
  *
  * Human steps (also see docs/deployment/calendar-setup.md):
  *   1. Create a Desktop-app OAuth client for jacob@stephens.page.
@@ -13,10 +13,14 @@
  *         (the minimal scopes cannot browse by name) and report reachability.
  *   5. npm run calendars:select -- --primary <id> --conflicts <id,...>
  *      -> persist Jacob's explicit selection.
+ *   6. npm run calendars:verify-booking -- --calendar <test-id>
+ *      -> insert, GET notification fields, delete. Refuses `primary`
+ *         unless --allow-primary.
  *
  * Refresh credentials never print to stdout and stay out of source control.
  */
 
+import { randomBytes } from "node:crypto";
 import {
   buildConsentUrl,
   createTokenProvider,
@@ -25,7 +29,13 @@ import {
   saveClientConfig,
   saveRefreshToken,
 } from "./calendar/auth.js";
-import { validateCalendars } from "./calendar/client.js";
+import {
+  appointmentNotificationProof,
+  createAppointmentEvent,
+  deleteAppointmentEvent,
+  validateCalendars,
+} from "./calendar/client.js";
+import { computeAvailableStarts, SCHEDULING_TIMEZONE } from "./calendar/policy.js";
 import { saveSelection } from "./calendar/selection.js";
 
 const DEFAULT_REDIRECT_URI = "http://localhost:1/callback";
@@ -141,6 +151,87 @@ async function select(): Promise<void> {
   );
 }
 
+function easternDate(instant: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: SCHEDULING_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(instant);
+}
+
+function firstPermittedSlot(now: Date): { date: string; startTime: string } {
+  for (let offset = 3; offset <= 14; offset += 1) {
+    const date = easternDate(new Date(now.getTime() + offset * 24 * 60 * 60 * 1000));
+    const slot = computeAvailableStarts({ date, now, busy: [] })[0];
+    if (slot) {
+      return { date: slot.date, startTime: slot.startTime };
+    }
+  }
+  throw new Error("No permitted weekday slot in the booking window.");
+}
+
+async function verifyBooking(): Promise<void> {
+  const calendarId = flagValue("--calendar");
+  if (!calendarId) {
+    throw new Error(
+      "Pass a test calendar: npm run calendars:verify-booking -- --calendar <id>",
+    );
+  }
+  if (calendarId === "primary" && process.argv.includes("--allow-primary") === false) {
+    throw new Error(
+      "Refusing to write the Google primary calendar. Pass a test calendar id, or --allow-primary.",
+    );
+  }
+  const credentials = loadCredentials({ dataDir: dataDir() });
+  if (!credentials) {
+    throw new Error("Calendar authorization is incomplete. Run calendars:auth first.");
+  }
+  const slot = firstPermittedSlot(new Date());
+  const eventId = randomBytes(16).toString("hex");
+  const token = await createTokenProvider(credentials, fetch).getAccessToken();
+  let stored;
+  try {
+    stored = await createAppointmentEvent(fetch, token, {
+      calendarId,
+      eventId,
+      callerName: "Live verification",
+      callbackNumber: "+15555550100",
+      purpose: "Notification proof",
+      date: slot.date,
+      startTime: slot.startTime,
+    });
+  } catch (error) {
+    try {
+      await deleteAppointmentEvent(fetch, token, calendarId, eventId);
+    } catch {
+      // Best-effort cleanup if insert's GET rejected the stored shape.
+    }
+    throw error;
+  }
+  const proof = appointmentNotificationProof(stored);
+  process.stdout.write(
+    [
+      `GET stored event ${stored.id} on ${calendarId}`,
+      `summary starts Appointment with: ${stored.summary?.startsWith("Appointment with ") ? "yes" : "no"}`,
+      `attendees: ${proof.hasAttendees ? "present" : "none"}`,
+      `hangoutLink: ${proof.hasHangoutLink ? "present" : "none"}`,
+      `conferenceData: ${proof.hasConferenceData ? "present" : "none"}`,
+      `emailReminder: ${proof.hasEmailReminder ? "present" : "none"}`,
+      `popupMinutes: ${proof.popupReminderMinutes.join(",") || "none"}`,
+      "",
+    ].join("\n"),
+  );
+  await deleteAppointmentEvent(fetch, token, calendarId, eventId);
+  process.stdout.write("Deleted the verification event (sendUpdates=none).\n");
+  if (!proof.matchesApprovedShape) {
+    throw new Error(
+      "Stored event did not match the approved notification shape (no attendees, Meet, or email reminder; popup 10 only).",
+    );
+  }
+  process.stdout.write("Notification proof passed on the authorized account.\n");
+}
+
 const command = process.argv[2];
 try {
   if (command === "auth-url") {
@@ -151,8 +242,12 @@ try {
     await list();
   } else if (command === "select") {
     await select();
+  } else if (command === "verify-booking") {
+    await verifyBooking();
   } else {
-    process.stderr.write("Usage: calendar-setup.ts <auth-url|auth|list|select>\n");
+    process.stderr.write(
+      "Usage: calendar-setup.ts <auth-url|auth|list|select|verify-booking>\n",
+    );
     process.exit(1);
   }
 } catch (error) {
