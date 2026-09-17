@@ -4,12 +4,12 @@ import { createCallLifecycleManager } from "../src/lifecycle.js";
 import { FakeRealtimeSocket } from "./fake-socket.js";
 import {
   WEBHOOK_SECRET,
-  incomingCallPayload,
+  openTelephoneSession,
   recordedEvidence,
-  signedHeaders,
+  toolOutputs,
+  toolRoundTrip,
 } from "./helpers.js";
 
-const REQUIRED_MODEL = "grok-voice-think-fast-2.0";
 const REFERENCE_TIME = new Date("2026-09-07T14:00:00-04:00");
 const SELECTION = {
   primaryCalendarId: "primary",
@@ -68,46 +68,9 @@ async function driveAvailabilityCall(
   manager: ReturnType<typeof createCallLifecycleManager>,
   toolArgs: unknown,
 ): Promise<void> {
-  const payload = incomingCallPayload({ callId });
-  const response = await manager.handleWebhook(signedHeaders(payload, { webhookId }));
-  expect(response.statusCode).toBe(200);
-
-  const socket = sockets[0]!;
-  socket.receive({ type: "session.created", session: { model: REQUIRED_MODEL } });
-  socket.receive({
-    type: "session.updated",
-    session: { model: REQUIRED_MODEL, reasoning: { effort: "high" } },
-  });
-  socket.receive({
-    type: "response.function_call_arguments.done",
-    call_id: "tool-1",
-    name: "check_availability",
-    arguments: JSON.stringify(toolArgs),
-  });
-  await new Promise((resolve) => setTimeout(resolve, 25));
+  const socket = await openTelephoneSession(sockets, manager, { callId, webhookId });
+  await toolRoundTrip(socket, "tool-1", "check_availability", toolArgs);
   socket.close();
-}
-
-function toolOutput(socket: FakeRealtimeSocket): {
-  status: string;
-  isSynthetic: boolean;
-  reason?: string;
-  message: string;
-} {
-  const message = socket.sent.find(
-    (entry): entry is { type: string; item: { type: string; call_id: string; output: string } } =>
-      typeof entry === "object" &&
-      entry !== null &&
-      "type" in entry &&
-      entry.type === "conversation.item.create",
-  );
-  expect(message).toBeDefined();
-  return JSON.parse(message!.item.output) as {
-    status: string;
-    isSynthetic: boolean;
-    reason?: string;
-    message: string;
-  };
 }
 
 describe("controlled inbound call with real availability", () => {
@@ -124,7 +87,11 @@ describe("controlled inbound call with real availability", () => {
       date: "2026-09-11",
     });
 
-    const output = toolOutput(sockets[0]!);
+    const output = toolOutputs(sockets[0]!)[0] as {
+      status: string;
+      isSynthetic: boolean;
+      message: string;
+    };
     expect(output.status).toBe("available");
     expect(output.isSynthetic).toBe(false);
     expect(output.message).toContain("Eastern");
@@ -152,7 +119,11 @@ describe("controlled inbound call with real availability", () => {
       date: "2026-09-11",
     });
 
-    const output = toolOutput(sockets[0]!);
+    const output = toolOutputs(sockets[0]!)[0] as {
+      status: string;
+      reason?: string;
+      message: string;
+    };
     expect(output.status).toBe("unavailable");
     expect(output.reason).toBe("calendar_unavailable");
     expect(output.message).not.toContain("10:00");
@@ -167,45 +138,22 @@ describe("controlled inbound call with real availability", () => {
       calendars: { primary: { busy: [] }, team: { busy: [] } },
     });
 
-    const payload = incomingCallPayload({ callId: "call-real-3" });
-    await manager.handleWebhook(signedHeaders(payload, { webhookId: "evt_real_3" }));
-    const socket = sockets[0]!;
-    socket.receive({ type: "session.created", session: { model: REQUIRED_MODEL } });
-    socket.receive({
-      type: "session.updated",
-      session: { model: REQUIRED_MODEL, reasoning: { effort: "high" } },
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-real-3",
+      webhookId: "evt_real_3",
     });
-    socket.receive({
-      type: "response.function_call_arguments.done",
-      call_id: "tool-1",
-      name: "check_availability",
-      arguments: JSON.stringify({ date: "sometime next week" }),
-    });
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await toolRoundTrip(socket, "tool-1", "check_availability", { date: "sometime next week" });
 
-    const first = toolOutput(socket);
+    const first = toolOutputs(socket)[0] as { status: string; reason?: string };
     expect(first.status).toBe("unavailable");
     expect(first.reason).toBe("invalid_date");
 
-    socket.receive({
-      type: "response.function_call_arguments.done",
-      call_id: "tool-2",
-      name: "check_availability",
-      arguments: JSON.stringify({ date: "2026-09-11" }),
-    });
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await toolRoundTrip(socket, "tool-2", "check_availability", { date: "2026-09-11" });
     socket.close();
 
-    const outputs = socket.sent.filter(
-      (entry): entry is { type: string; item: { output: string } } =>
-        typeof entry === "object" &&
-        entry !== null &&
-        "type" in entry &&
-        entry.type === "conversation.item.create",
-    );
+    const outputs = toolOutputs(socket);
     expect(outputs).toHaveLength(2);
-    const second = JSON.parse(outputs[1]!.item.output) as { status: string };
-    expect(second.status).toBe("available");
+    expect(outputs[1]).toMatchObject({ status: "available" });
 
     const evidence = await recordedEvidence(() => manager.listEvidence(), "call-real-3");
     expect(evidence.toolRoundTrips).toBe(2);

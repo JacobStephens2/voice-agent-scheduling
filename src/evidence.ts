@@ -1,5 +1,5 @@
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { appendJsonl, loadJsonl } from "./jsonl.js";
 
 export const DIRECT_SIP_ROUTE = "direct_sip";
 
@@ -41,22 +41,9 @@ function evidenceFile(dataDir: string): string {
 }
 
 export function persistEvidence(dataDir: string, evidence: StructuredCallEvidence): void {
-  mkdirSync(dataDir, { recursive: true });
-  appendFileSync(evidenceFile(dataDir), `${JSON.stringify(evidence)}\n`, "utf8");
+  appendJsonl(evidenceFile(dataDir), evidence);
 }
 
 export function loadEvidence(dataDir: string): StructuredCallEvidence[] {
-  try {
-    const text = readFileSync(evidenceFile(dataDir), "utf8");
-    const records: StructuredCallEvidence[] = [];
-    for (const line of text.split("\n")) {
-      if (!line.trim()) {
-        continue;
-      }
-      records.push(JSON.parse(line) as StructuredCallEvidence);
-    }
-    return records;
-  } catch {
-    return [];
-  }
+  return loadJsonl<StructuredCallEvidence>(evidenceFile(dataDir));
 }

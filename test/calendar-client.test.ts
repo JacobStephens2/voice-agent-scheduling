@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   CalendarQueryError,
+  appointmentNotificationProof,
   createAppointmentEvent,
+  deleteAppointmentEvent,
   queryBusyIntervals,
   validateCalendars,
 } from "../src/calendar/client.js";
@@ -214,6 +216,31 @@ describe("calendar client", () => {
     expect(event.conferenceData).toBeUndefined();
     expect(event.reminders?.overrides).toEqual([{ method: "popup", minutes: 10 }]);
     expect(event.reminders?.useDefault).toBe(false);
+    expect(appointmentNotificationProof(event)).toMatchObject({
+      hasAttendees: false,
+      hasHangoutLink: false,
+      hasConferenceData: false,
+      hasEmailReminder: false,
+      popupReminderMinutes: [10],
+      matchesApprovedShape: true,
+    });
+  });
+
+  it("deletes a leftover live-verification event without sending updates", async () => {
+    const eventId = "0123456789abcdef0123456789abcdef";
+    const requests: Array<{ method?: string; url: string }> = [];
+    const fetchFn = cannedFetch((url, init) => {
+      const method = init?.method ?? "GET";
+      requests.push({ method, url });
+      if (method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    });
+    await deleteAppointmentEvent(fetchFn, "token", "test-calendar", eventId);
+    expect(requests[0]?.method).toBe("DELETE");
+    expect(requests[0]?.url).toContain("/calendars/test-calendar/events/");
+    expect(requests[0]?.url).toContain("sendUpdates=none");
   });
 
   it("does not treat a stored event with a Meet link or email reminder as a successful appointment", async () => {

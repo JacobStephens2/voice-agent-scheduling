@@ -1,5 +1,5 @@
 import { zonedDateTime } from "../time.js";
-import { SCHEDULING_TIMEZONE, type BusyInterval } from "./policy.js";
+import { endTimeOf, SCHEDULING_TIMEZONE, type BusyInterval } from "./policy.js";
 import { CalendarAuthError } from "./auth.js";
 
 type FetchFn = typeof fetch;
@@ -233,40 +233,45 @@ function appointmentDescription(callbackNumber: string, purpose?: string): strin
   return `Callback number: ${callbackNumber}`;
 }
 
-function endTimeOf(startTime: string): string {
-  const hour = Number(startTime.slice(0, 2));
-  const minute = Number(startTime.slice(3));
-  if (minute === 0) {
-    return `${String(hour).padStart(2, "0")}:30`;
-  }
-  return `${String(hour + 1).padStart(2, "0")}:00`;
+/** Account-level notification fields from GET, not from the insert request. */
+export function appointmentNotificationProof(event: StoredCalendarEvent): {
+  readonly hasAttendees: boolean;
+  readonly hasHangoutLink: boolean;
+  readonly hasConferenceData: boolean;
+  readonly hasEmailReminder: boolean;
+  readonly popupReminderMinutes: readonly number[];
+  readonly matchesApprovedShape: boolean;
+} {
+  const overrides = event.reminders?.overrides ?? [];
+  const hasEmailReminder = overrides.some((item) => item.method === "email");
+  const popupReminderMinutes = overrides
+    .filter((item) => item.method === "popup")
+    .map((item) => item.minutes ?? 0);
+  const hasAttendees = event.attendees.length > 0;
+  const hasHangoutLink = Boolean(event.hangoutLink);
+  const hasConferenceData = event.conferenceData !== undefined && event.conferenceData !== null;
+  return {
+    hasAttendees,
+    hasHangoutLink,
+    hasConferenceData,
+    hasEmailReminder,
+    popupReminderMinutes,
+    matchesApprovedShape:
+      !hasAttendees &&
+      !hasHangoutLink &&
+      !hasConferenceData &&
+      !hasEmailReminder &&
+      event.reminders?.useDefault === false &&
+      overrides.length === 1 &&
+      popupReminderMinutes.length === 1 &&
+      popupReminderMinutes[0] === 10 &&
+      (!event.transparency || event.transparency === "opaque") &&
+      Boolean(event.summary?.startsWith("Appointment with ")),
+  };
 }
 
 function storedAppointmentMatchesPolicy(event: StoredCalendarEvent): boolean {
-  if (event.hangoutLink) {
-    return false;
-  }
-  if (event.attendees.length > 0) {
-    return false;
-  }
-  if (event.conferenceData !== undefined && event.conferenceData !== null) {
-    return false;
-  }
-  if (event.transparency && event.transparency !== "opaque") {
-    return false;
-  }
-  if (!event.summary?.startsWith("Appointment with ")) {
-    return false;
-  }
-  if (event.reminders?.useDefault !== false) {
-    return false;
-  }
-  const overrides = event.reminders.overrides ?? [];
-  if (overrides.length !== 1) {
-    return false;
-  }
-  const reminder = overrides[0];
-  return reminder?.method === "popup" && reminder.minutes === 10;
+  return appointmentNotificationProof(event).matchesApprovedShape;
 }
 
 function asStoredEvent(payload: { [key: string]: unknown }): StoredCalendarEvent {
@@ -399,4 +404,25 @@ async function readMatchingAppointment(
     );
   }
   return stored;
+}
+
+export async function deleteAppointmentEvent(
+  fetchFn: FetchFn,
+  accessToken: string,
+  calendarId: string,
+  eventId: string,
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetchFn(`${eventsUrl(calendarId, eventId)}?sendUpdates=none`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+  } catch (error) {
+    throw toAuthOrTransport(error);
+  }
+  if (response.status === 404 || response.status === 410) {
+    return;
+  }
+  throwForHttpStatus(response);
 }

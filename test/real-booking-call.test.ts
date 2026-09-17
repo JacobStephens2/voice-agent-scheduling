@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,123 +8,44 @@ import { createCallLifecycleManager } from "../src/lifecycle.js";
 import { FakeRealtimeSocket } from "./fake-socket.js";
 import {
   WEBHOOK_SECRET,
-  incomingCallPayload,
+  fakeGoogleCalendar,
+  openTelephoneSession,
   recordedEvidence,
-  signedHeaders,
+  TEST_EVENT_ID,
+  TEST_OPERATION_ID,
+  toolOutputs,
+  toolRoundTrip,
 } from "./helpers.js";
 
-const REQUIRED_MODEL = "grok-voice-think-fast-2.0";
 const REFERENCE_TIME = new Date("2026-09-07T14:00:00-04:00");
 const SELECTION = {
   primaryCalendarId: "primary",
   conflictCalendarIds: ["team"],
   updatedAt: "2026-09-07T00:00:00.000Z",
 };
-const EVENT_ID = "0123456789abcdef0123456789abcdef";
-const OPERATION_ID = "fedcba9876543210fedcba9876543210";
 
-function googleCalendar(freeBusy: unknown = {
-  calendars: { primary: { busy: [] }, team: { busy: [] } },
-}) {
-  const writes: Array<{ url: string; body: { [key: string]: unknown } }> = [];
-  const fetchFn = (async (url: unknown, init?: unknown) => {
-    const target = String(url);
-    const method = (init as RequestInit | undefined)?.method ?? "GET";
-    if (target.includes("/freeBusy")) {
-      return new Response(JSON.stringify(freeBusy), { status: 200 });
-    }
-    if (target.includes("/events") && method === "POST") {
-      writes.push({
-        url: target,
-        body: JSON.parse(String((init as RequestInit).body)) as { [key: string]: unknown },
-      });
-      return new Response(JSON.stringify({ id: EVENT_ID, summary: "insert-response-not-proof" }), {
-        status: 200,
-      });
-    }
-    if (target.includes(`/events/${EVENT_ID}`) && method === "GET") {
-      const inserted = writes[0]?.body ?? {};
-      return new Response(
-        JSON.stringify({
-          id: EVENT_ID,
-          status: "confirmed",
-          summary: inserted.summary,
-          description: inserted.description,
-          start: inserted.start,
-          end: inserted.end,
-          transparency: inserted.transparency,
-          reminders: inserted.reminders,
-        }),
-        { status: 200 },
-      );
-    }
-    throw new Error(`unexpected request ${method} ${target}`);
-  }) as typeof fetch;
-  return { fetchFn, writes };
-}
-
-async function openCall(
+function createBookingManager(
   sockets: FakeRealtimeSocket[],
-  manager: ReturnType<typeof createCallLifecycleManager>,
-  callId: string,
-  webhookId: string,
-): Promise<FakeRealtimeSocket> {
-  const payload = incomingCallPayload({ callId, callerNumber: "+15550001111" });
-  const response = await manager.handleWebhook(signedHeaders(payload, { webhookId }));
-  expect(response.statusCode).toBe(200);
-  const socket = sockets[0]!;
-  socket.receive({ type: "session.created", session: { model: REQUIRED_MODEL } });
-  socket.receive({
-    type: "session.updated",
-    session: { model: REQUIRED_MODEL, reasoning: { effort: "high" } },
-  });
-  return socket;
-}
-
-function toolOutputs(socket: FakeRealtimeSocket): Array<{ [key: string]: unknown }> {
-  return socket.sent
-    .filter(
-      (entry): entry is { type: string; item: { output: string } } =>
-        typeof entry === "object" &&
-        entry !== null &&
-        "type" in entry &&
-        entry.type === "conversation.item.create",
-    )
-    .map((entry) => JSON.parse(entry.item.output) as { [key: string]: unknown });
-}
-
-async function toolRoundTrip(
-  socket: FakeRealtimeSocket,
-  callId: string,
-  name: string,
-  args: unknown,
-): Promise<void> {
-  socket.receive({
-    type: "response.function_call_arguments.done",
-    call_id: callId,
-    name,
-    arguments: JSON.stringify(args),
-  });
-  await new Promise((resolve) => setTimeout(resolve, 25));
-}
-
-function createBookingManager(sockets: FakeRealtimeSocket[], google: ReturnType<typeof googleCalendar>) {
+  google: ReturnType<typeof fakeGoogleCalendar>,
+  fetchFn: typeof fetch = google.fetchFn,
+) {
   const dataDir = mkdtempSync(join(tmpdir(), "scheduling-booking-call-"));
   const tokenProvider = { getAccessToken: async () => "test-access-token" };
   const booking = createAppointmentBooking({
-    fetchFn: google.fetchFn,
+    fetchFn,
     tokenProvider,
     selection: SELECTION,
     now: () => REFERENCE_TIME,
     dataDir,
-    createIds: () => ({ operationId: OPERATION_ID, eventId: EVENT_ID }),
+    createIds: () => ({ operationId: TEST_OPERATION_ID, eventId: TEST_EVENT_ID }),
+    allowWrites: true,
   });
   const manager = createCallLifecycleManager({
     webhookSecret: WEBHOOK_SECRET,
     apiKey: "test-xai-key",
     maxConcurrentCalls: 1,
     availabilityTool: createCalendarAvailabilityTool({
-      fetchFn: google.fetchFn,
+      fetchFn,
       tokenProvider,
       selection: SELECTION,
       now: () => REFERENCE_TIME,
@@ -138,16 +59,20 @@ function createBookingManager(sockets: FakeRealtimeSocket[], google: ReturnType<
     hangupCall: async () => undefined,
     referenceTime: REFERENCE_TIME,
   });
-  return { manager, booking };
+  return { manager, booking, dataDir };
 }
 
 describe("controlled inbound call with appointment booking", () => {
   it("books one appointment through the telephone flow after explicit confirmation", async () => {
     const sockets: FakeRealtimeSocket[] = [];
-    const google = googleCalendar();
+    const google = fakeGoogleCalendar({});
     const { manager } = createBookingManager(sockets, google);
 
-    const socket = await openCall(sockets, manager, "call-book-1", "evt_book_1");
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-1",
+      webhookId: "evt_book_1",
+      callerNumber: "+15550001111",
+    });
     const update = socket.messageOfType("session.update") as {
       session: { tools: Array<{ name: string }>; instructions: string };
     };
@@ -179,7 +104,11 @@ describe("controlled inbound call with appointment booking", () => {
     expect(proposed.readback.startTime).toBe("10:00");
     expect(proposed.readback.endTime).toBe("10:30");
 
-    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", { confirmed: true });
+    socket.receive({ type: "response.done" });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: (proposed as { proposalId?: string }).proposalId,
+    });
     socket.close();
 
     const confirmed = toolOutputs(socket)[1] as {
@@ -208,10 +137,13 @@ describe("controlled inbound call with appointment booking", () => {
 
   it("creates no event when the caller disconnects before explicit confirmation", async () => {
     const sockets: FakeRealtimeSocket[] = [];
-    const google = googleCalendar();
+    const google = fakeGoogleCalendar({});
     const { manager } = createBookingManager(sockets, google);
 
-    const socket = await openCall(sockets, manager, "call-book-2", "evt_book_2");
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-2",
+      webhookId: "evt_book_2",
+    });
     await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
       callerName: "Ada Lovelace",
       callbackNumber: "+15551239876",
@@ -226,12 +158,42 @@ describe("controlled inbound call with appointment booking", () => {
     expect(evidence.status).toBe("completed");
   });
 
-  it("requires a fresh readback after a material correction before writing", async () => {
+  it("creates no event when confirmation arrives before the readback turn finishes", async () => {
     const sockets: FakeRealtimeSocket[] = [];
-    const google = googleCalendar();
+    const google = fakeGoogleCalendar({});
     const { manager } = createBookingManager(sockets, google);
 
-    const socket = await openCall(sockets, manager, "call-book-3", "evt_book_3");
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-interrupt",
+      webhookId: "evt_book_interrupt",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
+  it("requires a fresh readback after a material correction before writing", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-3",
+      webhookId: "evt_book_3",
+    });
     await toolRoundTrip(socket, "tool-1", "propose_appointment", {
       callerName: "Ada Lovelace",
       callbackNumber: "+15551239876",
@@ -246,7 +208,12 @@ describe("controlled inbound call with appointment booking", () => {
       date: "2026-09-11",
       startTime: "14:00",
     });
-    await toolRoundTrip(socket, "tool-3", "confirm_appointment", { confirmed: true });
+    const corrected = toolOutputs(socket)[1] as { proposalId?: string };
+    socket.receive({ type: "response.done" });
+    await toolRoundTrip(socket, "tool-3", "confirm_appointment", {
+      confirmed: true,
+      proposalId: corrected.proposalId,
+    });
     socket.close();
 
     const outputs = toolOutputs(socket);
@@ -262,12 +229,29 @@ describe("controlled inbound call with appointment booking", () => {
     });
   });
 
-  it("returns the same completed operation when the confirmation is repeated", async () => {
+  it("completes an accepted write even if the call disconnects mid-insert", async () => {
     const sockets: FakeRealtimeSocket[] = [];
-    const google = googleCalendar();
-    const { manager } = createBookingManager(sockets, google);
+    const google = fakeGoogleCalendar({});
+    let insertStarted = false;
+    let releaseInsert!: () => void;
+    const insertGate = new Promise<void>((resolve) => {
+      releaseInsert = resolve;
+    });
+    const gatedFetch = (async (url: unknown, init?: unknown) => {
+      const target = String(url);
+      const method = (init as RequestInit | undefined)?.method ?? "GET";
+      if (target.includes("/events") && method === "POST") {
+        insertStarted = true;
+        await insertGate;
+      }
+      return google.fetchFn(target, init as RequestInit);
+    }) as typeof fetch;
+    const { manager, dataDir } = createBookingManager(sockets, google, gatedFetch);
 
-    const socket = await openCall(sockets, manager, "call-book-4", "evt_book_4");
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-disconnect",
+      webhookId: "evt_book_disconnect",
+    });
     await toolRoundTrip(socket, "tool-1", "propose_appointment", {
       callerName: "Ada Lovelace",
       callbackNumber: "+15551239876",
@@ -275,21 +259,82 @@ describe("controlled inbound call with appointment booking", () => {
       date: "2026-09-11",
       startTime: "10:00",
     });
-    await toolRoundTrip(socket, "tool-2", "confirm_appointment", { confirmed: true });
-    await toolRoundTrip(socket, "tool-3", "confirm_appointment", { confirmed: true });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    socket.receive({ type: "response.done" });
+    socket.receive({
+      type: "response.function_call_arguments.done",
+      call_id: "tool-2",
+      name: "confirm_appointment",
+      arguments: JSON.stringify({ confirmed: true, proposalId: proposed.proposalId }),
+    });
+    const deadline = Date.now() + 1000;
+    while (!insertStarted && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(insertStarted).toBe(true);
+
+    const pendingLog = readFileSync(join(dataDir, "bookings.jsonl"), "utf8");
+    expect(pendingLog).toContain(TEST_OPERATION_ID);
+    expect(pendingLog).toContain("pending");
+
+    socket.close();
+    releaseInsert();
+
+    const outputsDeadline = Date.now() + 2000;
+    while (toolOutputs(socket).length < 2 && Date.now() < outputsDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(toolOutputs(socket)[1]).toMatchObject({
+      status: "booked",
+      operationId: TEST_OPERATION_ID,
+      eventId: TEST_EVENT_ID,
+      eventExists: true,
+    });
+    expect(google.writes).toHaveLength(1);
+
+    const evidence = await recordedEvidence(() => manager.listEvidence(), "call-book-disconnect");
+    expect(evidence.status).toBe("completed");
+  });
+
+  it("returns the same completed operation when the confirmation is repeated", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-4",
+      webhookId: "evt_book_4",
+    });
+    await toolRoundTrip(socket, "tool-1", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    socket.receive({ type: "response.done" });
+    await toolRoundTrip(socket, "tool-2", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    await toolRoundTrip(socket, "tool-3", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
     socket.close();
 
     const outputs = toolOutputs(socket);
     expect(outputs[1]).toMatchObject({
       status: "booked",
-      operationId: OPERATION_ID,
-      eventId: EVENT_ID,
+      operationId: TEST_OPERATION_ID,
+      eventId: TEST_EVENT_ID,
       eventExists: true,
     });
     expect(outputs[2]).toMatchObject({
       status: "booked",
-      operationId: OPERATION_ID,
-      eventId: EVENT_ID,
+      operationId: TEST_OPERATION_ID,
+      eventId: TEST_EVENT_ID,
       eventExists: true,
     });
     expect(google.writes).toHaveLength(1);

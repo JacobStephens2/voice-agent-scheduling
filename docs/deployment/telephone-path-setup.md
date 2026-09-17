@@ -30,7 +30,7 @@ If a live call reports a different model, Direct SIP is unsuitable and the accep
 
 ## Public admission
 
-Public callers remain disabled until later tickets complete. `ALLOWED_CALLER_NUMBERS` must contain the authorized smoke-call number. Confirmed bookings write to the selected destination calendar; keep that destination on a test calendar until the final release (see [calendar setup](calendar-setup.md)).
+Public callers remain disabled until later tickets complete. `ALLOWED_CALLER_NUMBERS` must contain the authorized smoke-call number. Calendar event writes stay off unless `SCHEDULING_ALLOW_CALENDAR_WRITES=true`; keep the selected destination on a test calendar until the final release (see [calendar setup](calendar-setup.md)).
 
 ## Privacy and retention
 

@@ -45,6 +45,7 @@ const app = createSchedulingServer({
   allowedCallerNumbers,
   maxCallDurationMs: Number.parseInt(process.env.MAX_CALL_DURATION_MS || "600000", 10),
   dataDir: process.env.SCHEDULING_DATA_DIR,
+  allowCalendarWrites: process.env.SCHEDULING_ALLOW_CALENDAR_WRITES === "true",
 });
 
 await app.start();
