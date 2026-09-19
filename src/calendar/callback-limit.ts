@@ -19,46 +19,50 @@ export function normalizeCallbackNumber(value: unknown): string | undefined {
 
 export type CallbackNumberHasher = (normalizedNumber: string) => string;
 
+export const CALLBACK_SALT_FILE = "callback-salt";
+
+/** Not a stored salt; hashing with it cannot match existing number hashes. */
+const UNMATCHABLE_CALLBACK_SALT = "restored-state-without-original-salt";
+
 function saltFile(dataDir: string): string {
-  return join(dataDir, "callback-salt");
+  return join(dataDir, CALLBACK_SALT_FILE);
 }
 
 function validSalt(value: string): boolean {
   return /^[0-9a-f]{32}$/.test(value);
 }
 
-function loadOrCreateSalt(dataDir: string): string {
-  const path = saltFile(dataDir);
+export function loadCallbackSalt(dataDir: string): string | undefined {
   try {
-    const raw = readFileSync(path, "utf8").trim();
+    const raw = readFileSync(saltFile(dataDir), "utf8").trim();
     if (validSalt(raw)) {
       return raw;
     }
   } catch {
-    // Missing or unreadable below; create a fresh salt unless hashed
-    // booking records already exist — a replacement cannot match them.
+    // Missing or unreadable salt is treated as absent.
   }
-  const hashedBookings = loadBookingRecords(dataDir).some(
-    (record) => typeof record.numberHash === "string",
-  );
-  if (hashedBookings) {
-    return randomBytes(16).toString("hex");
+  return undefined;
+}
+
+export function bookingsHaveCallbackHashes(dataDir: string): boolean {
+  return loadBookingRecords(dataDir).some((record) => typeof record.numberHash === "string");
+}
+
+function loadOrCreateSalt(dataDir: string): string {
+  const existing = loadCallbackSalt(dataDir);
+  if (existing) {
+    return existing;
+  }
+  if (bookingsHaveCallbackHashes(dataDir)) {
+    return UNMATCHABLE_CALLBACK_SALT;
   }
   mkdirSync(dataDir, { recursive: true });
   const salt = randomBytes(16).toString("hex");
   try {
-    writeFileSync(path, `${salt}\n`, { mode: 0o600, flag: "wx" });
+    writeFileSync(saltFile(dataDir), `${salt}\n`, { mode: 0o600, flag: "wx" });
     return salt;
   } catch {
-    try {
-      const raw = readFileSync(path, "utf8").trim();
-      if (validSalt(raw)) {
-        return raw;
-      }
-    } catch {
-      // Fall through to the ephemeral salt below.
-    }
-    return salt;
+    return loadCallbackSalt(dataDir) ?? salt;
   }
 }
 

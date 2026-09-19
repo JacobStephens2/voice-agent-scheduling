@@ -11,6 +11,7 @@ import { createCalendarAvailabilityTool } from "./calendar/availability-tool.js"
 import { createAppointmentBooking } from "./calendar/booking-tool.js";
 import { createOAuthRouter } from "./calendar/oauth-routes.js";
 import { loadSelection } from "./calendar/selection.js";
+import { runRetentionCleanup } from "./maintenance.js";
 import type { AvailabilityTool, BookingTool, ConnectWebSocket } from "./session.js";
 
 export interface ServerConfig {
@@ -186,7 +187,16 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         json(res, 401, { error: "unauthorized" });
         return;
       }
-      json(res, 200, lifecycleManager.runRetentionCleanup());
+      const result = config.dataDir
+        ? runRetentionCleanup({ dataDir: config.dataDir })
+        : {
+            operationalRecordsRemoved: 0,
+            operationalRecordsKept: lifecycleManager.listEvidence().length,
+            bookingRecordsRemoved: 0,
+            bookingRecordsKept: 0,
+          };
+      lifecycleManager.reloadDurableViews();
+      json(res, 200, result);
       return;
     }
 

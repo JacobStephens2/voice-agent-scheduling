@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   isRelevantBookingRecord,
@@ -7,15 +7,19 @@ import {
   replaceBookingRecords,
 } from "./calendar/booking-store.js";
 import {
+  CALLBACK_SALT_FILE,
+  bookingsHaveCallbackHashes,
+  loadCallbackSalt,
+} from "./calendar/callback-limit.js";
+import {
   OPERATIONAL_RETENTION_MS,
   isRetainedOperationalRecord,
   loadEvidence,
   replaceEvidence,
 } from "./evidence.js";
 
-export { OPERATIONAL_RETENTION_MS };
+export { CALLBACK_SALT_FILE, OPERATIONAL_RETENTION_MS };
 
-export const CALLBACK_SALT_FILE = "callback-salt";
 export const BUDGET_LEDGER_FILE = "budget-ledger.json";
 
 export type RecoveryBlockReason = "recovery_pending" | "restored_state_incomplete";
@@ -25,7 +29,6 @@ export interface RetentionCleanupResult {
   readonly operationalRecordsKept: number;
   readonly bookingRecordsRemoved: number;
   readonly bookingRecordsKept: number;
-  readonly calendarDeletesAttempted: 0;
 }
 
 export interface DurableIntegrity {
@@ -40,20 +43,10 @@ export interface RecoveryAssessment {
   readonly reconciliation: readonly { readonly status: string }[];
 }
 
-function usableCallbackSalt(dataDir: string): boolean {
-  try {
-    const raw = readFileSync(join(dataDir, CALLBACK_SALT_FILE), "utf8").trim();
-    return /^[0-9a-f]{32}$/.test(raw);
-  } catch {
-    return false;
-  }
-}
-
 export function inspectDurableIntegrity(dataDir: string): DurableIntegrity {
   const missing: string[] = [];
   const bookings = loadBookingRecords(dataDir);
-  const hasHashes = bookings.some((record) => typeof record.numberHash === "string");
-  if (hasHashes && !usableCallbackSalt(dataDir)) {
+  if (bookingsHaveCallbackHashes(dataDir) && !loadCallbackSalt(dataDir)) {
     missing.push(CALLBACK_SALT_FILE);
   }
   const evidence = loadEvidence(dataDir);
@@ -83,7 +76,6 @@ export function runRetentionCleanup(options: {
     operationalRecordsKept: keptOperational.length,
     bookingRecordsRemoved: bookings.length - keptBookings.length,
     bookingRecordsKept: keptBookings.length,
-    calendarDeletesAttempted: 0,
   };
 }
 
