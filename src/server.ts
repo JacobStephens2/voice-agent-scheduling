@@ -92,7 +92,6 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
   // background so each one settles to a single matching event or a bounded
   // unresolved outcome. Reconciliation only reads by stored event identity;
   // it never re-inserts, so it cannot create a duplicate event.
-  void booking.reconcileUnresolvedOperations?.().catch(() => undefined);
   const lifecycleManager = createCallLifecycleManager({
     webhookSecret: config.webhookSecret,
     apiKey: config.apiKey,
@@ -157,10 +156,17 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
     }
 
     if (req.method === "GET" && url.pathname === "/health") {
+      const snapshot = lifecycleManager.budgetSnapshot();
+      const recovery = lifecycleManager.recoveryStatus();
       json(res, 200, {
         status: "healthy",
         activeCalls: lifecycleManager.activeCallCount(),
-        admissionsPaused: lifecycleManager.budgetSnapshot().admissionsPaused,
+        admissionsPaused: snapshot.admissionsPaused || !recovery.admissionAvailable,
+        ...(recovery.admissionAvailable
+          ? snapshot.pauseReason
+            ? { pauseReason: snapshot.pauseReason }
+            : {}
+          : { pauseReason: recovery.reason }),
         timestamp: new Date().toISOString(),
       });
       return;
@@ -172,6 +178,15 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         return;
       }
       json(res, 200, lifecycleManager.listEvidence());
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/maintenance/cleanup") {
+      if (!evidenceAuthorized(req, config.evidenceToken)) {
+        json(res, 401, { error: "unauthorized" });
+        return;
+      }
+      json(res, 200, lifecycleManager.runRetentionCleanup());
       return;
     }
 

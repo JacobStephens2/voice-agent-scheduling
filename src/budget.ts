@@ -16,7 +16,7 @@
  * cannot be made (unconfigured or invalid rates), admissions pause with a
  * bounded unavailable outcome instead of guessing.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const MICRO_USD_PER_USD = 1_000_000;
@@ -150,7 +150,9 @@ export function createBudgetLedger(options: BudgetLedgerOptions = {}): BudgetLed
     }
     try {
       mkdirSync(options.dataDir, { recursive: true });
-      writeFileSync(ledgerPath(options.dataDir), JSON.stringify(state));
+      const path = ledgerPath(options.dataDir);
+      writeFileSync(path, JSON.stringify(state), { encoding: "utf8", mode: 0o600 });
+      chmodSync(path, 0o600);
     } catch {
       // Accounting stays in memory when the ledger cannot be persisted.
     }

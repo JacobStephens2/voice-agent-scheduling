@@ -1,5 +1,6 @@
 import { join } from "node:path";
-import { appendJsonl, loadJsonl } from "../jsonl.js";
+import { appendJsonl, loadJsonl, rewriteJsonl } from "../jsonl.js";
+import { APPOINTMENT_MINUTES } from "./policy.js";
 
 export type BookingRecordStatus = "pending" | "booked" | "unavailable" | "failed" | "inconclusive";
 
@@ -45,6 +46,36 @@ export function loadBookingRecords(dataDir: string): BookingRecord[] {
 
 export function appendBookingRecord(dataDir: string, record: BookingRecord): void {
   appendJsonl(bookingFile(dataDir), record, 0o600);
+}
+
+export function replaceBookingRecords(
+  dataDir: string,
+  records: readonly BookingRecord[],
+): void {
+  rewriteJsonl(bookingFile(dataDir), records, 0o600);
+}
+
+export function latestByOperation(records: readonly BookingRecord[]): BookingRecord[] {
+  const latest = new Map<string, BookingRecord>();
+  for (const record of records) {
+    latest.set(record.operationId, record);
+  }
+  return [...latest.values()];
+}
+
+/** Keep unresolved work and still-upcoming booked appointments; drop settled history. */
+export function isRelevantBookingRecord(record: BookingRecord, now: Date): boolean {
+  if (isUnresolvedBookingStatus(record.status)) {
+    return true;
+  }
+  if (record.status !== "booked") {
+    return false;
+  }
+  const endMs = Date.parse(record.startUtc) + APPOINTMENT_MINUTES * 60_000;
+  if (Number.isNaN(endMs)) {
+    return true;
+  }
+  return endMs > now.getTime();
 }
 
 export function bookingRecord(
