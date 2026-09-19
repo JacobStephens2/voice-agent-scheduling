@@ -35,6 +35,7 @@ export interface BookingTool {
   ): unknown | Promise<unknown>;
   markReadbackFinished?(callId: string): void;
   reconcileUnresolvedOperations?(): Promise<readonly BookingReconciliation[]>;
+  reloadDurableRecords?(): void;
 }
 
 export interface RealtimeSocket {
@@ -180,6 +181,9 @@ function sessionUpdatePayload(
         prefix_padding_ms: 300,
         silence_duration_ms: 200,
       },
+      // Omit audio.input.transcription. xAI emits live input transcripts
+      // only when audio.input.transcription.model is set; this service
+      // never stores speech, transcripts, or recordings.
       instructions: sessionInstructions(booking, maxDurationMs, now),
       tools: [availabilityTool.definition(), ...(booking?.definitions() ?? [])],
     },

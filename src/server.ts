@@ -11,6 +11,7 @@ import { createCalendarAvailabilityTool } from "./calendar/availability-tool.js"
 import { createAppointmentBooking } from "./calendar/booking-tool.js";
 import { createOAuthRouter } from "./calendar/oauth-routes.js";
 import { loadSelection } from "./calendar/selection.js";
+import { runRetentionCleanup } from "./maintenance.js";
 import type { AvailabilityTool, BookingTool, ConnectWebSocket } from "./session.js";
 
 export interface ServerConfig {
@@ -92,7 +93,6 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
   // background so each one settles to a single matching event or a bounded
   // unresolved outcome. Reconciliation only reads by stored event identity;
   // it never re-inserts, so it cannot create a duplicate event.
-  void booking.reconcileUnresolvedOperations?.().catch(() => undefined);
   const lifecycleManager = createCallLifecycleManager({
     webhookSecret: config.webhookSecret,
     apiKey: config.apiKey,
@@ -157,10 +157,17 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
     }
 
     if (req.method === "GET" && url.pathname === "/health") {
+      const snapshot = lifecycleManager.budgetSnapshot();
+      const recovery = lifecycleManager.recoveryStatus();
       json(res, 200, {
         status: "healthy",
         activeCalls: lifecycleManager.activeCallCount(),
-        admissionsPaused: lifecycleManager.budgetSnapshot().admissionsPaused,
+        admissionsPaused: snapshot.admissionsPaused || !recovery.admissionAvailable,
+        ...(recovery.admissionAvailable
+          ? snapshot.pauseReason
+            ? { pauseReason: snapshot.pauseReason }
+            : {}
+          : { pauseReason: recovery.reason }),
         timestamp: new Date().toISOString(),
       });
       return;
@@ -172,6 +179,24 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         return;
       }
       json(res, 200, lifecycleManager.listEvidence());
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/maintenance/cleanup") {
+      if (!evidenceAuthorized(req, config.evidenceToken)) {
+        json(res, 401, { error: "unauthorized" });
+        return;
+      }
+      const result = config.dataDir
+        ? runRetentionCleanup({ dataDir: config.dataDir })
+        : {
+            operationalRecordsRemoved: 0,
+            operationalRecordsKept: lifecycleManager.listEvidence().length,
+            bookingRecordsRemoved: 0,
+            bookingRecordsKept: 0,
+          };
+      lifecycleManager.reloadDurableViews();
+      json(res, 200, result);
       return;
     }
 
