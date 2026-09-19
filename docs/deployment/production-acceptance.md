@@ -7,7 +7,7 @@ issue #1 from this work.
 ## Seams
 
 - Synthetic/contract: the Vitest suite at the scheduling application's public
-  call-and-booking seam (normalized webhooks, tools, confirmation, disconnects,
+  call-and-appointment seam (normalized webhooks, tools, confirmation, disconnects,
   timeouts, Calendar test adapters).
 - Live telephone: inbound PSTN on Direct SIP, observed through caller-facing
   outcomes, Calendar GET of the stored event, the authorized account inbox, and
@@ -33,8 +33,8 @@ Parent-spec coverage already in the suite:
 | Corrections, missing confirmation, interrupted readback | `test/booking-tool.test.ts`, `test/real-booking-call.test.ts` |
 | Disconnect after confirmation, repeated delivery, restart around a write | `test/real-booking-call.test.ts`, `test/booking-reconciliation.test.ts` |
 | One upcoming appointment per callback number; cancellation reconciled | `test/booking-limit.test.ts` |
-| Cutoff, one caller, budget pause; confirmed booking survives cutoff | `test/call-bounds.test.ts` |
-| Operator pause does not discard a confirmed booking | `test/admission-pause.test.ts` |
+| Cutoff, one caller, budget pause; confirmed appointment survives cutoff | `test/call-bounds.test.ts` |
+| Operator pause does not discard a confirmed appointment | `test/admission-pause.test.ts` |
 | Records exclude audio/transcripts; cleanup does not delete Calendar events | `test/maintenance.test.ts` |
 
 Record the run with Vitest JSON and fold it into a bounded report:
@@ -57,16 +57,16 @@ recordings or transcripts.
 
 | id | What to verify live |
 | --- | --- |
-| ordinary-booking | One `Appointment with <name>` event, 30 minutes, busy, callback in the description, agent says Jacob will call |
+| ordinary-appointment | One `Appointment with <name>` event, 30 minutes, busy, callback in the description, agent says Jacob will call |
 | corrections | Date, callback number, and timezone corrections appear in the readback and the event |
 | interruptions | Talk-over or unclear "yes" during readback creates no event |
 | no-confirmation | Hang up before agreeing; no event |
 | changed-availability | After a conflicting event is added, the agent offers other times instead of claiming success |
-| callback-limit | Second booking for the same spoken callback number is refused; changes go through Jacob |
+| callback-limit | A second appointment for the same spoken callback number is refused; changes go through Jacob |
 | dropped-call | Confirm, then hang up immediately; the event still lands |
 | ambiguous-write / provider-failure | Calendar outage or uncertain insert is spoken as inconclusive, not booked |
 | call-budget-limits | Second simultaneous caller hears unavailable; a long call is warned and cut off |
-| lifetime-pause | Pause admissions during an in-flight confirmation; the booking still completes |
+| lifetime-pause | Pause admissions during an in-flight confirmation; the appointment still completes |
 | restart-write | Restart `scheduling-agent` around a confirmation; one matching event remains |
 | notifications | GET the stored event: no attendees, no Meet, no email reminder, popup 10 only (`npm run calendars:verify-booking -- --calendar <test-id>`) |
 | inbox-notifications | Check the authorized account inbox: no invitation, update, or reminder email. API configuration alone is not enough |
@@ -92,7 +92,7 @@ Only after the test-calendar campaign passes:
 ## Residual limitations to report
 
 - External Calendar writers can still race with an insert. The service
-  serializes its own bookings; it does not claim a transactional calendar.
+  serializes its own appointment writes; it does not claim a transactional calendar.
 - Provider-side retention (xAI logs, Telnyx CDRs) is independent of
   application storage.
 - Monthly budget enforcement is an application estimate against a $25 target,

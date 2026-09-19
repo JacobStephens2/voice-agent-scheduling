@@ -125,7 +125,7 @@ describe("operator admission pause", () => {
     });
   });
 
-  it("finishes an already-confirmed booking after admissions pause", async () => {
+  it("finishes an already-confirmed appointment after admissions pause", async () => {
     const sockets: FakeRealtimeSocket[] = [];
     const hangups: string[] = [];
     let resolveConfirm!: (value: unknown) => void;
@@ -204,7 +204,7 @@ describe("operator pause HTTP", () => {
       evidenceToken: EVIDENCE_TOKEN,
       dataDir,
       allowCalendarWrites: true,
-      publicAdmission: false,
+      admissionMode: { kind: "allowlist", allowedCallerNumbers: ["+15551234567"] },
       allowedCallerNumbers: ["+15551234567"],
       connectWebSocket: (url, headers) => new FakeRealtimeSocket(url, headers),
       hangupCall: async () => undefined,

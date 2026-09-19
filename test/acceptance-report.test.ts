@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PARENT_SPEC_SCENARIOS, buildAcceptanceReport } from "../src/acceptance.js";
+import { ACCEPTANCE_SCENARIOS, buildAcceptanceReport } from "../src/acceptance.js";
 import type { StructuredCallEvidence } from "../src/evidence.js";
 
 const SAMPLE_EVIDENCE: StructuredCallEvidence = {
@@ -29,17 +29,19 @@ describe("structured acceptance report", () => {
       evidence: [SAMPLE_EVIDENCE],
       syntheticSuite: { passed: 120, failed: 0 },
       scenarios: [
-        { id: "ordinary-booking", result: "pass" },
+        { id: "ordinary-appointment", result: "pass" },
         { id: "inbox-notifications", result: "pending" },
       ],
       limitations: [
-        "External calendar writes by Jacob can still race with a booking insert.",
+        "External calendar writes by Jacob can still race with an appointment insert.",
       ],
     });
 
-    expect(report.publicAdmission).toBe(false);
-    expect(report.calendarWrites).toBe(true);
-    expect(report.calendarSelected).toBe(true);
+    expect(report.production).toEqual({
+      publicAdmission: false,
+      calendarWrites: true,
+      calendarSelected: true,
+    });
     expect(report.syntheticSuite).toEqual({ passed: 120, failed: 0 });
     expect(report.observed).toEqual({
       connectionRoute: "direct_sip",
@@ -56,10 +58,10 @@ describe("structured acceptance report", () => {
       estimatedCostMicroUsd: 36825,
     });
     expect(report.scenarios).toEqual([
-      { id: "ordinary-booking", result: "pass" },
+      { id: "ordinary-appointment", result: "pass" },
       { id: "inbox-notifications", result: "pending" },
     ]);
-    expect(PARENT_SPEC_SCENARIOS.some((scenario) => scenario.id === "ordinary-booking")).toBe(
+    expect(ACCEPTANCE_SCENARIOS.some((scenario) => scenario.id === "ordinary-appointment")).toBe(
       true,
     );
 

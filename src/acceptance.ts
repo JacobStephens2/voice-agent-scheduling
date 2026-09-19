@@ -1,9 +1,10 @@
+import type { ProductionReadiness } from "./admission-policy.js";
 import type { StructuredCallEvidence } from "./evidence.js";
 
 const MASKED_CALLER = /^\+\d{1,3}\*\*\*\d{4}$/;
 
-export const PARENT_SPEC_SCENARIOS = [
-  { id: "ordinary-booking", title: "An ordinary call creates one matching 30-minute busy appointment" },
+export const ACCEPTANCE_SCENARIOS = [
+  { id: "ordinary-appointment", title: "An ordinary call creates one matching 30-minute busy appointment" },
   { id: "corrections", title: "Date, number, and timezone corrections appear in the final readback" },
   { id: "interruptions", title: "Interrupted or unclear assent does not write an appointment" },
   { id: "no-confirmation", title: "No explicit confirmation produces no calendar write" },
@@ -13,14 +14,14 @@ export const PARENT_SPEC_SCENARIOS = [
   { id: "ambiguous-write", title: "Uncertain Calendar writes stay inconclusive without a second event" },
   { id: "provider-failure", title: "Calendar or provider failure does not announce success" },
   { id: "call-budget-limits", title: "One caller, 10-minute cutoff, and monthly budget pause hold" },
-  { id: "lifetime-pause", title: "Cutoff or admission pause does not discard a confirmed booking" },
+  { id: "lifetime-pause", title: "Cutoff or admission pause does not discard a confirmed appointment" },
   { id: "restart-write", title: "Restart around a Calendar write converges on one matching event" },
   { id: "notifications", title: "Stored event has no attendees, Meet link, or email reminder" },
   { id: "inbox-notifications", title: "Authorized account inbox received no invitation or reminder email" },
   { id: "jacob-will-call", title: "Caller hears that Jacob will call the confirmed callback number" },
 ] as const;
 
-export type AcceptanceScenarioId = (typeof PARENT_SPEC_SCENARIOS)[number]["id"];
+export type AcceptanceScenarioId = (typeof ACCEPTANCE_SCENARIOS)[number]["id"];
 
 export interface AcceptanceScenarioResult {
   readonly id: string;
@@ -28,10 +29,7 @@ export interface AcceptanceScenarioResult {
   readonly notes?: string;
 }
 
-export interface AcceptanceHealth {
-  readonly publicAdmission: boolean;
-  readonly calendarWrites: boolean;
-  readonly calendarSelected: boolean;
+export interface AcceptanceHealth extends ProductionReadiness {
   readonly admissionsPaused: boolean;
   readonly pauseReason?: string;
 }
@@ -43,9 +41,7 @@ export interface SyntheticSuiteSummary {
 
 export interface AcceptanceReport {
   readonly recordedAt: string;
-  readonly publicAdmission: boolean;
-  readonly calendarWrites: boolean;
-  readonly calendarSelected: boolean;
+  readonly production: ProductionReadiness;
   readonly admissionsPaused: boolean;
   readonly pauseReason?: string;
   readonly syntheticSuite: SyntheticSuiteSummary;
@@ -104,13 +100,13 @@ export function buildAcceptanceReport(input: {
 }): AcceptanceReport {
   const calls = input.evidence.filter(isSafeEvidence).map(projectEvidence);
   const latest = [...calls].reverse().find((entry) => entry.status === "completed") ?? calls.at(-1);
+  const { publicAdmission, calendarWrites, calendarSelected, admissionsPaused, pauseReason } =
+    input.health;
   return {
     recordedAt: input.recordedAt,
-    publicAdmission: input.health.publicAdmission,
-    calendarWrites: input.health.calendarWrites,
-    calendarSelected: input.health.calendarSelected,
-    admissionsPaused: input.health.admissionsPaused,
-    ...(input.health.pauseReason ? { pauseReason: input.health.pauseReason } : {}),
+    production: { publicAdmission, calendarWrites, calendarSelected },
+    admissionsPaused,
+    ...(pauseReason ? { pauseReason } : {}),
     syntheticSuite: input.syntheticSuite,
     observed: {
       connectionRoute: latest?.connectionRoute,

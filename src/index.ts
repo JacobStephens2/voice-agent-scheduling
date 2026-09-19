@@ -1,4 +1,4 @@
-import { resolveCallerAdmissionMode } from "./admission.js";
+import { resolveCallerAdmissionMode } from "./admission-policy.js";
 import { createSchedulingServer } from "./server.js";
 import {
   DURATION_WARNING_LEAD_MS_DEFAULT,
@@ -50,12 +50,14 @@ function optionalList(name: string): string[] | undefined {
 }
 
 const allowCalendarWrites = process.env.SCHEDULING_ALLOW_CALENDAR_WRITES === "true";
-const admissionMode = resolveCallerAdmissionMode({
-  publicAdmission: process.env.SCHEDULING_PUBLIC_ADMISSION === "true",
-  allowedCallerNumbers: optionalList("ALLOWED_CALLER_NUMBERS"),
-  allowCalendarWrites,
-  calendarSelected: loadSelection({ dataDir: process.env.SCHEDULING_DATA_DIR }) !== undefined,
-});
+const admissionMode = resolveCallerAdmissionMode(
+  {
+    publicAdmission: process.env.SCHEDULING_PUBLIC_ADMISSION === "true",
+    calendarWrites: allowCalendarWrites,
+    calendarSelected: loadSelection({ dataDir: process.env.SCHEDULING_DATA_DIR }) !== undefined,
+  },
+  optionalList("ALLOWED_CALLER_NUMBERS"),
+);
 const allowedCallerNumbers =
   admissionMode.kind === "allowlist" ? [...admissionMode.allowedCallerNumbers] : undefined;
 
@@ -75,7 +77,7 @@ const app = createSchedulingServer({
   publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() || undefined,
   maxConcurrentCalls: Number.parseInt(process.env.MAX_CONCURRENT_CALLS || "1", 10),
   allowedCallerNumbers,
-  publicAdmission: admissionMode.kind === "public",
+  admissionMode,
   pauseAdmissions: process.env.SCHEDULING_PAUSE_ADMISSIONS === "true",
   maxCallDurationMs: optionalEnvNumber(
     "MAX_CALL_DURATION_MS",

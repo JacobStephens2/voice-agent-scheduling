@@ -4,7 +4,7 @@
  */
 
 import {
-  PARENT_SPEC_SCENARIOS,
+  ACCEPTANCE_SCENARIOS,
   buildAcceptanceReport,
   type AcceptanceScenarioResult,
 } from "./acceptance.js";
@@ -67,7 +67,7 @@ if (syntheticPath) {
   };
 }
 
-let scenarios: AcceptanceScenarioResult[] = PARENT_SPEC_SCENARIOS.map((scenario) => ({
+let scenarios: AcceptanceScenarioResult[] = ACCEPTANCE_SCENARIOS.map((scenario) => ({
   id: scenario.id,
   result: "pending",
 }));
@@ -89,14 +89,14 @@ const report = buildAcceptanceReport({
   syntheticSuite,
   scenarios,
   limitations: [
-    "A simultaneous direct Calendar edit by Jacob or another app can still race with a booking insert.",
+    "A simultaneous direct Calendar edit by Jacob or another app can still race with an appointment insert.",
     "Application storage never records audio or transcripts; xAI and Telnyx retain provider-side data under their own policies.",
     "The $25/month figure is an operating target, not a guarantee against every carrier charge after cutoff.",
   ],
 });
 
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-if (report.publicAdmission) {
+if (report.production.publicAdmission) {
   process.stderr.write(
     "[acceptance:report] Public admission is enabled. Confirm the campaign passed before leaving it on.\n",
   );
