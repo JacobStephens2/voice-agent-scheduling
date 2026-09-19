@@ -2,6 +2,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { OPERATIONAL_RECORDS_FILE } from "../src/evidence.js";
 import { createCallLifecycleManager } from "../src/lifecycle.js";
 import { createSyntheticAvailabilityTool } from "../src/synthetic-calendar.js";
 import { FakeRealtimeSocket } from "./fake-socket.js";
@@ -135,7 +136,7 @@ describe("scheduling call lifecycle", () => {
     expect(evidence).not.toHaveProperty("recording");
     expect(manager.activeCallCount()).toBe(0);
 
-    const stored = (await readFile(join(dataDir, "smoke-evidence.jsonl"), "utf8"))
+    const stored = (await readFile(join(dataDir, OPERATIONAL_RECORDS_FILE), "utf8"))
       .trim()
       .split("\n");
     expect(JSON.parse(stored[0]!)).toMatchObject({ callId: "call-life-1" });

@@ -32,7 +32,6 @@ import {
   runRetentionCleanup,
   type RecoveryAssessment,
   type RecoveryBlockReason,
-  type RetentionCleanupResult,
 } from "./maintenance.js";
 import { loadBookingRecords, unresolvedOperations } from "./calendar/booking-store.js";
 import {
@@ -61,7 +60,7 @@ export interface CallLifecycleManager {
   budgetSnapshot(): BudgetSnapshot;
   recoveredStaleAdmissions(): readonly string[];
   recoveryStatus(): RecoveryAssessment;
-  runRetentionCleanup(options?: { now?: Date }): RetentionCleanupResult;
+  reloadDurableViews(): void;
 }
 
 export interface CallLifecycleManagerOptions {
@@ -394,23 +393,9 @@ export function createCallLifecycleManager(
       return recovery;
     },
 
-    runRetentionCleanup(cleanupOptions) {
-      if (!options.dataDir) {
-        return {
-          operationalRecordsRemoved: 0,
-          operationalRecordsKept: evidenceByCall.size,
-          bookingRecordsRemoved: 0,
-          bookingRecordsKept: 0,
-          calendarDeletesAttempted: 0,
-        };
-      }
-      const result = runRetentionCleanup({
-        dataDir: options.dataDir,
-        now: cleanupOptions?.now ?? options.now?.(),
-      });
+    reloadDurableViews() {
       reloadEvidence();
       options.booking?.reloadDurableRecords?.();
-      return result;
     },
   };
 }

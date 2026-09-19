@@ -1,9 +1,12 @@
+import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { appendJsonl, loadJsonl, rewriteJsonl } from "./jsonl.js";
 import { DIRECT_SIP_MICRO_USD_PER_MINUTE } from "./budget.js";
 
 export const DIRECT_SIP_ROUTE = "direct_sip";
-export const OPERATIONAL_RECORDS_FILE = "smoke-evidence.jsonl";
+export const OPERATIONAL_RECORDS_FILE = "operational-records.jsonl";
+/** Pre-maintenance filename; still read so existing data directories keep their records. */
+const LEGACY_OPERATIONAL_RECORDS_FILE = "smoke-evidence.jsonl";
 export const OPERATIONAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const OPERATIONAL_ERROR_CATEGORIES = [
@@ -61,12 +64,21 @@ function evidenceFile(dataDir: string): string {
   return join(dataDir, OPERATIONAL_RECORDS_FILE);
 }
 
+function legacyEvidenceFile(dataDir: string): string {
+  return join(dataDir, LEGACY_OPERATIONAL_RECORDS_FILE);
+}
+
 export function persistEvidence(dataDir: string, evidence: StructuredCallEvidence): void {
   appendJsonl(evidenceFile(dataDir), evidence, 0o600);
 }
 
 export function loadEvidence(dataDir: string): StructuredCallEvidence[] {
-  return loadJsonl<StructuredCallEvidence>(evidenceFile(dataDir));
+  const current = loadJsonl<StructuredCallEvidence>(evidenceFile(dataDir));
+  const legacy = loadJsonl<StructuredCallEvidence>(legacyEvidenceFile(dataDir));
+  if (legacy.length === 0) {
+    return current;
+  }
+  return [...legacy, ...current];
 }
 
 export function replaceEvidence(
@@ -74,6 +86,10 @@ export function replaceEvidence(
   records: readonly StructuredCallEvidence[],
 ): void {
   rewriteJsonl(evidenceFile(dataDir), records, 0o600);
+  const legacyPath = legacyEvidenceFile(dataDir);
+  if (existsSync(legacyPath)) {
+    unlinkSync(legacyPath);
+  }
 }
 
 export function isRetainedOperationalRecord(

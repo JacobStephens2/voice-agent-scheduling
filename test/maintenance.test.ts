@@ -10,7 +10,11 @@ import {
   estimateCallCostMicroUsd,
   fullCallReservationMicroUsd,
 } from "../src/budget.js";
-import { persistEvidence, type StructuredCallEvidence } from "../src/evidence.js";
+import {
+  OPERATIONAL_RECORDS_FILE,
+  persistEvidence,
+  type StructuredCallEvidence,
+} from "../src/evidence.js";
 import { createCallLifecycleManager } from "../src/lifecycle.js";
 import {
   OPERATIONAL_RETENTION_MS,
@@ -238,7 +242,7 @@ function latestBookings(dataDir: string) {
 }
 
 function operationalLines(dataDir: string): StructuredCallEvidence[] {
-  const path = join(dataDir, "smoke-evidence.jsonl");
+  const path = join(dataDir, OPERATIONAL_RECORDS_FILE);
   if (!existsSync(path)) {
     return [];
   }
@@ -291,13 +295,37 @@ describe("retention cleanup and recovery", () => {
     const result = runRetentionCleanup({ dataDir, now });
     expect(result.operationalRecordsRemoved).toBe(1);
     expect(result.operationalRecordsKept).toBe(1);
-    expect(result.calendarDeletesAttempted).toBe(0);
 
     const kept = operationalLines(dataDir);
     expect(kept).toHaveLength(1);
     expect(kept[0]?.callId).toBe("call-recent");
     expect(kept[0]?.error).toBe("provider_error");
     assertSafeOperationalPayload(kept);
+  });
+
+  it("reads operational records left in the previous filename and writes them to the current one", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-legacy-ops-"));
+    const now = new Date("2026-10-08T14:00:00-04:00");
+    writeFileSync(
+      join(dataDir, "smoke-evidence.jsonl"),
+      `${JSON.stringify({
+        callId: "call-legacy",
+        connectionRoute: "direct_sip",
+        callerNumberMasked: "+1***9876",
+        calledNumber: "+18005550199",
+        status: "completed",
+        durationMs: 8_000,
+        toolRoundTrips: 0,
+        estimatedCostMicroUsd: 11,
+        recordedAt: now.toISOString(),
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    const result = runRetentionCleanup({ dataDir, now });
+    expect(result.operationalRecordsKept).toBe(1);
+    expect(existsSync(join(dataDir, "smoke-evidence.jsonl"))).toBe(false);
+    expect(operationalLines(dataDir)[0]?.callId).toBe("call-legacy");
   });
 
   it("keeps an uncertain booking through cleanup so restart can still reconcile it", async () => {
@@ -312,7 +340,6 @@ describe("retention cleanup and recovery", () => {
 
     const cleanup = runRetentionCleanup({ dataDir, now: MONDAY_14H });
     expect(cleanup.bookingRecordsKept).toBeGreaterThan(0);
-    expect(cleanup.calendarDeletesAttempted).toBe(0);
     expect(calendar.writes.filter((row) => row.method === "DELETE")).toHaveLength(0);
 
     calendar.landEvent("ev-maint-1", {
@@ -405,8 +432,8 @@ describe("retention cleanup and recovery", () => {
     expect(reserved.reservedMicroUsd).toBe(reservation);
     expect(reserved.spentMicroUsd).toBe(0);
 
-    const cleanup = manager.runRetentionCleanup({ now: MONDAY_14H });
-    expect(cleanup.calendarDeletesAttempted).toBe(0);
+    runRetentionCleanup({ dataDir, now: MONDAY_14H });
+    manager.reloadDurableViews();
     expect(manager.budgetSnapshot()).toMatchObject({
       reservedMicroUsd: reservation,
       spentMicroUsd: 0,
@@ -617,7 +644,7 @@ describe("retention cleanup and recovery", () => {
     assertSafeOperationalPayload(evidence);
     expect(evidence.error).toBeUndefined();
 
-    manager.runRetentionCleanup({ now: MONDAY_14H });
+    runRetentionCleanup({ dataDir, now: MONDAY_14H });
 
     const afterSockets: FakeRealtimeSocket[] = [];
     const afterBooking = bookingWith(calendar, dataDir, createIds);
@@ -708,7 +735,7 @@ describe("operator maintenance HTTP", () => {
     expect(body.some((row) => row.callId === "call-http-recent")).toBe(true);
   });
 
-  it("runs retention cleanup and reports health without claiming calendar deletes", async () => {
+  it("runs retention cleanup and reports health", async () => {
     persistEvidence(dataDir, {
       callId: "call-http-old",
       connectionRoute: "direct_sip",
@@ -732,10 +759,8 @@ describe("operator maintenance HTTP", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
       operationalRecordsRemoved: number;
-      calendarDeletesAttempted: number;
     };
     expect(body.operationalRecordsRemoved).toBeGreaterThanOrEqual(1);
-    expect(body.calendarDeletesAttempted).toBe(0);
 
     const evidence = await fetch(`http://127.0.0.1:${HTTP_PORT}/evidence`, {
       headers: { authorization: `Bearer ${EVIDENCE_TOKEN}` },
