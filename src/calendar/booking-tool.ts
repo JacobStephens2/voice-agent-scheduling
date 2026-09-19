@@ -639,6 +639,7 @@ async function reconcileUnresolved(ctx: {
         calendarId: latest.calendarId,
         startUtc: latest.startUtc,
         status: "booked",
+        numberHash: latest.numberHash,
       });
       ctx.persist(booked);
       outcomes.push({ ...identity, status: "booked", eventExists: true });
@@ -658,6 +659,7 @@ async function reconcileUnresolved(ctx: {
           calendarId: latest.calendarId,
           startUtc: latest.startUtc,
           status: "inconclusive",
+          numberHash: latest.numberHash,
         }),
       );
     }

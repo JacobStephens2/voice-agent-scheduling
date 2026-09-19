@@ -20,8 +20,11 @@ type EventBody = Record<string, unknown>;
 
 function controllableCalendar() {
   const events = new Map<string, EventBody>();
+  const cancelled = new Set<string>();
   const writes: Array<{ url: string; body: EventBody }> = [];
   let eventReadStatus: number | "throw" = 200;
+  let failPostOnce = false;
+  let suppressReads = false;
   const fetchFn = (async (url: unknown, init?: unknown) => {
     const target = String(url);
     const method = (init as RequestInit | undefined)?.method ?? "GET";
@@ -37,6 +40,10 @@ function controllableCalendar() {
         events.set(body.id, body);
       }
       writes.push({ url: target, body });
+      if (failPostOnce) {
+        failPostOnce = false;
+        throw new Error("timeout after accept");
+      }
       return new Response(JSON.stringify({ id: body.id }), { status: 200 });
     }
     const getMatch = target.match(/\/events\/([^/?]+)/);
@@ -47,6 +54,9 @@ function controllableCalendar() {
       if (eventReadStatus !== 200) {
         return new Response("{}", { status: eventReadStatus });
       }
+      if (suppressReads) {
+        return new Response("{}", { status: 404 });
+      }
       const body = events.get(getMatch[1]);
       if (!body) {
         return new Response("{}", { status: 404 });
@@ -54,7 +64,7 @@ function controllableCalendar() {
       return new Response(
         JSON.stringify({
           id: getMatch[1],
-          status: "confirmed",
+          status: cancelled.has(getMatch[1]) ? "cancelled" : "confirmed",
           summary: body.summary,
           description: body.description,
           start: body.start,
@@ -73,8 +83,17 @@ function controllableCalendar() {
     deleteEvent: (eventId: string) => {
       events.delete(eventId);
     },
+    cancelEvent: (eventId: string) => {
+      cancelled.add(eventId);
+    },
     setEventReadStatus: (status: number | "throw") => {
       eventReadStatus = status;
+    },
+    failNextPost: () => {
+      failPostOnce = true;
+    },
+    setSuppressReads: (value: boolean) => {
+      suppressReads = value;
     },
   };
 }
@@ -266,6 +285,77 @@ describe("one upcoming appointment per callback number", () => {
     expect(second.status).toBe("booked");
     expect(second).toMatchObject({ eventId: "ev-limit-2", eventExists: true });
     expect(calendar.writes).toHaveLength(2);
+  });
+
+  it("books again after Jacob cancels the appointment on the calendar", async () => {
+    const calendar = controllableCalendar();
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-limit-"));
+    const booking = bookingWith(calendar, dataDir, sequencedIds());
+
+    const first = await proposeAndConfirm(booking, { callId: "call-limit-cancel-1" });
+    expect(first.status).toBe("booked");
+    expect(first).toMatchObject({ eventId: "ev-limit-1" });
+
+    calendar.cancelEvent("ev-limit-1");
+
+    const second = await proposeAndConfirm(booking, {
+      callId: "call-limit-cancel-2",
+      startTime: "14:00",
+    });
+    expect(second.status).toBe("booked");
+    expect(second).toMatchObject({ eventId: "ev-limit-2", eventExists: true });
+    expect(calendar.writes).toHaveLength(2);
+  });
+
+  it("keeps enforcing the limit for an appointment recovered after a restart", async () => {
+    const calendar = controllableCalendar();
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-limit-"));
+    const createIds = sequencedIds();
+
+    const before = bookingWith(calendar, dataDir, createIds);
+    calendar.failNextPost();
+    calendar.setSuppressReads(true);
+    const uncertain = await proposeAndConfirm(before, { callId: "call-limit-recover-1" });
+    expect(uncertain.status).toBe("inconclusive");
+
+    // Google accepted the write late: the event is now readable under the
+    // original identity even though the first process never saw it.
+    calendar.setSuppressReads(false);
+    const after = bookingWith(calendar, dataDir, createIds);
+    const outcomes = await after.reconcileUnresolvedOperations();
+    expect(outcomes).toEqual([
+      {
+        operationId: "op-limit-1",
+        eventId: "ev-limit-1",
+        status: "booked",
+        eventExists: true,
+      },
+    ]);
+
+    // The recovered durable rows keep the number association, so the limit
+    // does not depend on earlier superseded rows surviving alongside them.
+    const hashes = readFileSync(join(dataDir, "bookings.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { operationId?: unknown; numberHash?: unknown })
+      .filter((row) => row.operationId === "op-limit-1")
+      .map((row) => row.numberHash);
+    expect(hashes.length).toBeGreaterThan(0);
+    for (const hash of hashes) {
+      expect(typeof hash).toBe("string");
+    }
+    expect(new Set(hashes).size).toBe(1);
+
+    const second = await proposeAndConfirm(after, {
+      callId: "call-limit-recover-2",
+      startTime: "14:00",
+    });
+    expect(second.status).toBe("unavailable");
+    expect(second.message).toMatch(/already has an upcoming appointment/i);
+    expect(second.message).toMatch(/contact Jacob directly/i);
+    expect(second.message).not.toContain(FRIDAY_DATE);
+    expect(calendar.writes).toHaveLength(1);
   });
 
   it("books again after the earlier appointment has passed", async () => {
