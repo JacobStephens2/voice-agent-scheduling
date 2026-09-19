@@ -18,12 +18,22 @@ import {
 } from "./budget.js";
 import {
   DIRECT_SIP_ROUTE,
+  boundedErrorCategory,
   estimateCostMicroUsd,
   loadEvidence,
   maskPhoneNumber,
   persistEvidence,
   type StructuredCallEvidence,
 } from "./evidence.js";
+import {
+  BUDGET_LEDGER_FILE,
+  assessRecovery,
+  inspectDurableIntegrity,
+  runRetentionCleanup,
+  type RecoveryAssessment,
+  type RecoveryBlockReason,
+} from "./maintenance.js";
+import { loadBookingRecords, unresolvedOperations } from "./calendar/booking-store.js";
 import {
   createTelephoneSession,
   type AvailabilityTool,
@@ -38,7 +48,10 @@ export interface WebhookResponse {
   readonly body: string;
 }
 
-export type WebhookRejectionReason = AdmissionRejectionReason | BudgetBlockReason;
+export type WebhookRejectionReason =
+  | AdmissionRejectionReason
+  | BudgetBlockReason
+  | RecoveryBlockReason;
 
 export interface CallLifecycleManager {
   handleWebhook(input: SignedWebhook): Promise<WebhookResponse>;
@@ -46,6 +59,8 @@ export interface CallLifecycleManager {
   activeCallCount(): number;
   budgetSnapshot(): BudgetSnapshot;
   recoveredStaleAdmissions(): readonly string[];
+  recoveryStatus(): RecoveryAssessment;
+  reloadDurableViews(): void;
 }
 
 export interface CallLifecycleManagerOptions {
@@ -65,6 +80,7 @@ export interface CallLifecycleManagerOptions {
   readonly fixedMonthlyMicroUsd?: number;
   readonly perMinuteMicroUsd?: number;
   readonly reserveMargin?: number;
+  readonly now?: () => Date;
 }
 
 const REJECTION_STATUS: Record<WebhookRejectionReason, number> = {
@@ -76,6 +92,8 @@ const REJECTION_STATUS: Record<WebhookRejectionReason, number> = {
   invalid_payload: 400,
   budget_exhausted: 503,
   budget_unavailable: 503,
+  recovery_pending: 503,
+  restored_state_incomplete: 503,
 };
 
 const ACTIVE_CALL_FILE = "active-call.json";
@@ -170,13 +188,20 @@ export function createCallLifecycleManager(
   const maxCallDurationMs = options.maxCallDurationMs ?? MAX_CALL_DURATION_MS_DEFAULT;
   const warningLeadMs = options.warningLeadMs ?? DURATION_WARNING_LEAD_MS_DEFAULT;
   const perMinuteMicroUsd = options.perMinuteMicroUsd ?? DIRECT_SIP_MICRO_USD_PER_MINUTE;
+  const integrity = options.dataDir
+    ? inspectDurableIntegrity(options.dataDir)
+    : { complete: true, missing: [] as const };
+  const persistBudget =
+    Boolean(options.dataDir) &&
+    (integrity.complete || !integrity.missing.includes(BUDGET_LEDGER_FILE));
   const budget: BudgetLedger = createBudgetLedger({
-    dataDir: options.dataDir,
+    dataDir: persistBudget ? options.dataDir : undefined,
     monthlyTargetMicroUsd: options.monthlyTargetMicroUsd,
     fixedMonthlyMicroUsd: options.fixedMonthlyMicroUsd,
     perMinuteMicroUsd: options.perMinuteMicroUsd,
     reserveMargin: options.reserveMargin,
     maxCallDurationMs,
+    now: options.now,
   });
   const staleAdmissions: string[] = [];
   if (options.dataDir) {
@@ -184,11 +209,55 @@ export function createCallLifecycleManager(
     if (staleClaim) {
       staleAdmissions.push(staleClaim);
     }
+    if (integrity.complete) {
+      runRetentionCleanup({ dataDir: options.dataDir, now: options.now?.() });
+    }
   }
   const evidenceByCall = new Map<string, StructuredCallEvidence>();
-  if (options.dataDir) {
+  const reloadEvidence = () => {
+    evidenceByCall.clear();
+    if (!options.dataDir) {
+      return;
+    }
     for (const evidence of loadEvidence(options.dataDir)) {
       evidenceByCall.set(evidence.callId, evidence);
+    }
+  };
+  reloadEvidence();
+  const availableRecovery = (): RecoveryAssessment => ({
+    admissionAvailable: true,
+    missing: [],
+    reconciliation: [],
+  });
+  const runAssess = () =>
+    options.dataDir
+      ? assessRecovery({
+          dataDir: options.dataDir,
+          reconcile: options.booking?.reconcileUnresolvedOperations
+            ? () => options.booking!.reconcileUnresolvedOperations!()
+            : undefined,
+        })
+      : Promise.resolve(availableRecovery());
+  let recovery: RecoveryAssessment = availableRecovery();
+  let recoveryReady = Promise.resolve();
+  if (options.dataDir) {
+    if (!integrity.complete) {
+      recovery = {
+        admissionAvailable: false,
+        reason: "restored_state_incomplete",
+        missing: integrity.missing,
+        reconciliation: [],
+      };
+    } else if (unresolvedOperations(loadBookingRecords(options.dataDir)).length > 0) {
+      recovery = {
+        admissionAvailable: false,
+        reason: "recovery_pending",
+        missing: [],
+        reconciliation: [],
+      };
+      recoveryReady = runAssess().then((result) => {
+        recovery = result;
+      });
     }
   }
   const record = (evidence: StructuredCallEvidence) => {
@@ -209,6 +278,7 @@ export function createCallLifecycleManager(
       clearActiveCallClaim(options.dataDir, callId);
     }
     budget.settle(callId, outcome.durationMs);
+    const error = boundedErrorCategory(outcome.error);
     record({
       callId,
       connectionRoute: DIRECT_SIP_ROUTE,
@@ -221,7 +291,7 @@ export function createCallLifecycleManager(
       toolRoundTrips: outcome.toolRoundTrips,
       estimatedCostMicroUsd: estimateCostMicroUsd(outcome.durationMs, perMinuteMicroUsd),
       durationWarningSent: outcome.durationWarningSent,
-      error: outcome.error,
+      ...(error ? { error } : {}),
       recordedAt: new Date().toISOString(),
     });
   };
@@ -240,6 +310,19 @@ export function createCallLifecycleManager(
         return {
           statusCode: REJECTION_STATUS[result.reason],
           body: JSON.stringify({ error: result.reason }),
+        };
+      }
+
+      await recoveryReady;
+      if (!recovery.admissionAvailable && recovery.reason === "recovery_pending") {
+        recovery = await runAssess();
+      }
+      if (!recovery.admissionAvailable && recovery.reason) {
+        admission.release(result.callId);
+        void hangupCall(result.callId);
+        return {
+          statusCode: REJECTION_STATUS[recovery.reason],
+          body: JSON.stringify({ error: recovery.reason }),
         };
       }
 
@@ -304,6 +387,15 @@ export function createCallLifecycleManager(
 
     recoveredStaleAdmissions() {
       return [...staleAdmissions];
+    },
+
+    recoveryStatus() {
+      return recovery;
+    },
+
+    reloadDurableViews() {
+      reloadEvidence();
+      options.booking?.reloadDurableRecords?.();
     },
   };
 }

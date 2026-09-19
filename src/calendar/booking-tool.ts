@@ -103,6 +103,7 @@ export interface AppointmentBooking {
    * success for an event that could not be read back.
    */
   reconcileUnresolvedOperations(): Promise<readonly ReconcileResult[]>;
+  reloadDurableRecords(): void;
 }
 
 export interface BookingToolOptions {
@@ -268,6 +269,14 @@ export function createAppointmentBooking(
           selection: explicitSelection,
         }),
       );
+    },
+
+    reloadDurableRecords() {
+      if (!options.dataDir) {
+        return;
+      }
+      const loaded = loadBookingRecords(options.dataDir);
+      records.splice(0, records.length, ...loaded);
     },
   };
 }
