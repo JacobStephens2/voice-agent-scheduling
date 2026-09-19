@@ -163,7 +163,7 @@ describe("scheduling call lifecycle", () => {
 
     const evidence = await recordedEvidence(() => manager.listEvidence(), "call-life-2");
     expect(evidence?.status).toBe("failed");
-    expect(evidence?.error).toContain("Simulated upstream provider outage");
+    expect(evidence?.error).toBe("provider_error");
     expect(evidence?.callerNumberMasked).toBe("+1***6543");
     expect(manager.activeCallCount()).toBe(0);
   });
@@ -257,7 +257,7 @@ describe("scheduling call lifecycle", () => {
 
     const evidence = await recordedEvidence(() => manager.listEvidence(), "call-wrong-model");
     expect(evidence?.status).toBe("failed");
-    expect(evidence?.error).toContain(REQUIRED_MODEL);
+    expect(evidence?.error).toBe("model_mismatch");
     expect(manager.activeCallCount()).toBe(0);
   });
 

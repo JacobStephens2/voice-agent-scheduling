@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { extractE164, isE164 } from "../phone.js";
 import { CalendarQueryError, getAppointmentEvent } from "./client.js";
-import type { BookingRecord } from "./booking-store.js";
+import { loadBookingRecords, type BookingRecord } from "./booking-store.js";
 import { APPOINTMENT_MINUTES } from "./policy.js";
 
 export type CallbackLimitOutcome = "clear" | "blocked" | "unknown";
@@ -35,7 +35,14 @@ function loadOrCreateSalt(dataDir: string): string {
       return raw;
     }
   } catch {
-    // Missing or unreadable below; create a fresh salt.
+    // Missing or unreadable below; create a fresh salt unless hashed
+    // booking records already exist — a replacement cannot match them.
+  }
+  const hashedBookings = loadBookingRecords(dataDir).some(
+    (record) => typeof record.numberHash === "string",
+  );
+  if (hashedBookings) {
+    return randomBytes(16).toString("hex");
   }
   mkdirSync(dataDir, { recursive: true });
   const salt = randomBytes(16).toString("hex");

@@ -96,12 +96,14 @@ reports `admissionsPaused` for budget monitoring.
 
 ## Privacy and retention
 
-Application storage keeps structured smoke evidence only: call id, masked caller number, called number, status, duration, verified model/reasoning, tool round-trip count, and estimated micro-USD. It does not persist live audio, transcripts, recordings, or raw caller contact data.
+Application storage keeps structured operational records for 30 days: call id, masked caller number, called number, status, duration, verified model/reasoning, tool round-trip count, estimated micro-USD, and bounded error categories. It does not persist live audio, transcripts, recordings, names, or raw caller contact data. Durable booking identities and the usage ledger are kept only while they are needed for unresolved work, upcoming appointments, and accurate limits. Log cleanup never deletes Calendar appointments.
 
-Provider-side retention is separate:
+The process does not set `audio.input.transcription.model` on the xAI session, so it does not request live input transcripts. That application setting does not change provider-side retention:
 
 - xAI: realtime audio is session-scoped; account retention settings in the xAI console govern provider logs.
 - Telnyx: carrier CDRs are retained for billing. Call recording must stay disabled on the SIP connection and voice profile.
+
+Restart, backup, restore, and cleanup procedures are in [maintenance.md](maintenance.md).
 
 ## Commands
 
