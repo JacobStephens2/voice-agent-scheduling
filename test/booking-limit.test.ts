@@ -354,6 +354,7 @@ describe("one upcoming appointment per callback number", () => {
     expect(second.status).toBe("unavailable");
     expect(second.message).toMatch(/already has an upcoming appointment/i);
     expect(second.message).toMatch(/contact Jacob directly/i);
+    expect(second.message).not.toContain(FRIDAY_DATE);
     expect(calendar.writes).toHaveLength(1);
   });
 
