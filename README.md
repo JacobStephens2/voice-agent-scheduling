@@ -64,7 +64,8 @@ Configuration is environment-driven; [`.env.example`](.env.example) lists every 
 | Path | Contents |
 | --- | --- |
 | `src/server.ts` | HTTP routes and service wiring |
-| `src/lifecycle.ts`, `src/admission.ts` | Webhook verification, caller admission, call lifecycle |
+| `src/lifecycle.ts`, `src/admission.ts` | Webhook verification, inbound-call admission, call lifecycle |
+| `src/admission-policy.ts` | Public vs allowlist startup gate and production readiness |
 | `src/session.ts` | Realtime voice session, instructions, and tool dispatch |
 | `src/budget.ts` | Call duration limits and the monthly usage ledger |
 | `src/calendar/` | Google OAuth, free/busy availability, booking policy, proposals, durable booking store, callback-number limit |

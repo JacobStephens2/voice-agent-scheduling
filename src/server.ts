@@ -10,6 +10,7 @@ import {
 import { createCalendarAvailabilityTool } from "./calendar/availability-tool.js";
 import { createAppointmentBooking } from "./calendar/booking-tool.js";
 import { createOAuthRouter } from "./calendar/oauth-routes.js";
+import { productionReadiness, type CallerAdmissionMode } from "./admission-policy.js";
 import { loadSelection } from "./calendar/selection.js";
 import { runRetentionCleanup } from "./maintenance.js";
 import type { AvailabilityTool, BookingTool, ConnectWebSocket } from "./session.js";
@@ -36,7 +37,7 @@ export interface ServerConfig {
   readonly connectWebSocket?: ConnectWebSocket;
   readonly hangupCall?: (callId: string) => Promise<void>;
   readonly allowCalendarWrites?: boolean;
-  readonly publicAdmission?: boolean;
+  readonly admissionMode?: CallerAdmissionMode;
   readonly pauseAdmissions?: boolean;
 }
 
@@ -166,9 +167,11 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         activeCalls: lifecycleManager.activeCallCount(),
         admissionsPaused: admissions.paused,
         ...(admissions.reason ? { pauseReason: admissions.reason } : {}),
-        publicAdmission: config.publicAdmission === true,
-        calendarWrites: config.allowCalendarWrites === true,
-        calendarSelected: loadSelection({ dataDir: config.dataDir }) !== undefined,
+        ...productionReadiness({
+          admissionMode: config.admissionMode,
+          calendarWrites: config.allowCalendarWrites === true,
+          calendarSelected: loadSelection({ dataDir: config.dataDir }) !== undefined,
+        }),
         timestamp: new Date().toISOString(),
       });
       return;
