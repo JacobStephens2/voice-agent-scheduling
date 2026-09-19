@@ -39,8 +39,17 @@ curl -fsS -H "Authorization: Bearer $EVIDENCE_TOKEN" \
 ```
 
 `GET /health` reports `admissionsPaused` and, when paused, `pauseReason`
-(`budget_exhausted`, `budget_unavailable`, `recovery_pending`, or
-`restored_state_incomplete`).
+(`budget_exhausted`, `budget_unavailable`, `recovery_pending`,
+`restored_state_incomplete`, or `operator_paused`). It also reports
+`publicAdmission`, `calendarWrites`, and `calendarSelected`. Operator pause
+and resume:
+
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $EVIDENCE_TOKEN" \
+  https://scheduler.stephens.page/maintenance/pause
+curl -fsS -X POST -H "Authorization: Bearer $EVIDENCE_TOKEN" \
+  https://scheduler.stephens.page/maintenance/resume
+```
 
 ## Retention cleanup
 

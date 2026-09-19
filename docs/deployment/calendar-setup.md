@@ -69,9 +69,13 @@ after explicit booking confirmation. No audio or transcripts are retained.
    EVIDENCE_TOKEN=... \
    npm run smoke:pstn
    ```
-   Until public release, keep `ALLOWED_CALLER_NUMBERS` set. Calendar writes
-   stay off until `SCHEDULING_ALLOW_CALENDAR_WRITES=true` is set; use a test
-   calendar as the selected primary destination, not Google's `primary` alias.
+   Until the [production campaign](production-acceptance.md) passes, keep
+   `ALLOWED_CALLER_NUMBERS` set. Calendar writes stay off until
+   `SCHEDULING_ALLOW_CALENDAR_WRITES=true` is set; use a test calendar as the
+   selected primary destination until event-shape and inbox checks pass, then
+   switch to Google's `primary` alias for the controlled production
+   appointment. Opening the number to the public is a separate cutover
+   (`SCHEDULING_PUBLIC_ADMISSION=true`); see [operations](operations.md).
 
 7. **Prove stored notification fields on the authorized account** (GET, not
    insert parameters). This writes one throwaway event on a test calendar,

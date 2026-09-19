@@ -30,7 +30,7 @@ If a live call reports a different model, Direct SIP is unsuitable and the accep
 
 ## Public admission
 
-Public callers remain disabled until later tickets complete. `ALLOWED_CALLER_NUMBERS` must contain the authorized smoke-call number. Calendar event writes stay off unless `SCHEDULING_ALLOW_CALENDAR_WRITES=true`; keep the selected destination on a test calendar until the final release (see [calendar setup](calendar-setup.md)).
+Public callers stay off until the [production acceptance campaign](production-acceptance.md) passes. `ALLOWED_CALLER_NUMBERS` must contain the authorized smoke-call number unless `SCHEDULING_PUBLIC_ADMISSION=true`. Public start also requires calendar writes and Jacob's explicit calendar selection. Calendar event writes stay off unless `SCHEDULING_ALLOW_CALENDAR_WRITES=true`; keep the selected destination on a test calendar until that campaign's event-shape and inbox checks pass (see [calendar setup](calendar-setup.md) and [operations](operations.md)).
 
 ## Call bounds and monthly usage (issue #7)
 
