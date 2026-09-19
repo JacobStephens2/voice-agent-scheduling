@@ -48,10 +48,23 @@ export interface WebhookResponse {
   readonly body: string;
 }
 
+export type OperatorPauseReason = "operator_paused";
+
+export type AdmissionsPauseReason =
+  | BudgetBlockReason
+  | RecoveryBlockReason
+  | OperatorPauseReason;
+
 export type WebhookRejectionReason =
   | AdmissionRejectionReason
   | BudgetBlockReason
-  | RecoveryBlockReason;
+  | RecoveryBlockReason
+  | OperatorPauseReason;
+
+export interface AdmissionsStatus {
+  readonly paused: boolean;
+  readonly reason?: AdmissionsPauseReason;
+}
 
 export interface CallLifecycleManager {
   handleWebhook(input: SignedWebhook): Promise<WebhookResponse>;
@@ -61,6 +74,9 @@ export interface CallLifecycleManager {
   recoveredStaleAdmissions(): readonly string[];
   recoveryStatus(): RecoveryAssessment;
   reloadDurableViews(): void;
+  pauseAdmissions(): AdmissionsStatus;
+  resumeAdmissions(): AdmissionsStatus;
+  admissionsStatus(): AdmissionsStatus;
 }
 
 export interface CallLifecycleManagerOptions {
@@ -81,6 +97,7 @@ export interface CallLifecycleManagerOptions {
   readonly perMinuteMicroUsd?: number;
   readonly reserveMargin?: number;
   readonly now?: () => Date;
+  readonly pauseAdmissions?: boolean;
 }
 
 const REJECTION_STATUS: Record<WebhookRejectionReason, number> = {
@@ -94,9 +111,11 @@ const REJECTION_STATUS: Record<WebhookRejectionReason, number> = {
   budget_unavailable: 503,
   recovery_pending: 503,
   restored_state_incomplete: 503,
+  operator_paused: 503,
 };
 
 const ACTIVE_CALL_FILE = "active-call.json";
+const ADMISSION_PAUSE_FILE = "admission-pause.json";
 
 function activeCallPath(dataDir: string): string {
   return join(dataDir, ACTIVE_CALL_FILE);
@@ -125,6 +144,40 @@ function clearActiveCallClaim(dataDir: string, callId: string): void {
     unlinkSync(activeCallPath(dataDir));
   } catch {
     // Absent or unreadable claim means nothing to release.
+  }
+}
+
+function admissionPausePath(dataDir: string): string {
+  return join(dataDir, ADMISSION_PAUSE_FILE);
+}
+
+function loadOperatorPause(dataDir: string | undefined): boolean {
+  if (!dataDir) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(admissionPausePath(dataDir), "utf8")) as {
+      paused?: unknown;
+    };
+    return parsed.paused === true;
+  } catch {
+    return false;
+  }
+}
+
+function persistOperatorPause(dataDir: string | undefined, paused: boolean): void {
+  if (!dataDir) {
+    return;
+  }
+  try {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(
+      admissionPausePath(dataDir),
+      `${JSON.stringify({ paused, updatedAt: new Date().toISOString() })}\n`,
+      { mode: 0o600 },
+    );
+  } catch {
+    // In-memory pause still applies when the file cannot be written.
   }
 }
 
@@ -203,6 +256,11 @@ export function createCallLifecycleManager(
     maxCallDurationMs,
     now: options.now,
   });
+  let operatorPaused = loadOperatorPause(options.dataDir);
+  if (options.pauseAdmissions === true) {
+    operatorPaused = true;
+    persistOperatorPause(options.dataDir, true);
+  }
   const staleAdmissions: string[] = [];
   if (options.dataDir) {
     const staleClaim = recoverStaleActiveCallClaim(options.dataDir);
@@ -296,6 +354,20 @@ export function createCallLifecycleManager(
     });
   };
 
+  const admissionsStatus = (): AdmissionsStatus => {
+    if (!recovery.admissionAvailable && recovery.reason) {
+      return { paused: true, reason: recovery.reason };
+    }
+    if (operatorPaused) {
+      return { paused: true, reason: "operator_paused" };
+    }
+    const snapshot = budget.snapshot();
+    if (snapshot.admissionsPaused) {
+      return { paused: true, reason: snapshot.pauseReason };
+    }
+    return { paused: false };
+  };
+
   return {
     async handleWebhook(input: SignedWebhook): Promise<WebhookResponse> {
       const result = admission.admit(input);
@@ -306,6 +378,12 @@ export function createCallLifecycleManager(
             result.reason === "concurrency_limit_reached")
         ) {
           void hangupCall(result.callId);
+        }
+        if (operatorPaused && result.reason === "concurrency_limit_reached") {
+          return {
+            statusCode: REJECTION_STATUS.operator_paused,
+            body: JSON.stringify({ error: "operator_paused" }),
+          };
         }
         return {
           statusCode: REJECTION_STATUS[result.reason],
@@ -323,6 +401,15 @@ export function createCallLifecycleManager(
         return {
           statusCode: REJECTION_STATUS[recovery.reason],
           body: JSON.stringify({ error: recovery.reason }),
+        };
+      }
+
+      if (operatorPaused) {
+        admission.release(result.callId);
+        void hangupCall(result.callId);
+        return {
+          statusCode: REJECTION_STATUS.operator_paused,
+          body: JSON.stringify({ error: "operator_paused" }),
         };
       }
 
@@ -396,6 +483,23 @@ export function createCallLifecycleManager(
     reloadDurableViews() {
       reloadEvidence();
       options.booking?.reloadDurableRecords?.();
+      if (options.dataDir) {
+        operatorPaused = loadOperatorPause(options.dataDir);
+      }
     },
+
+    pauseAdmissions() {
+      operatorPaused = true;
+      persistOperatorPause(options.dataDir, true);
+      return admissionsStatus();
+    },
+
+    resumeAdmissions() {
+      operatorPaused = false;
+      persistOperatorPause(options.dataDir, false);
+      return admissionsStatus();
+    },
+
+    admissionsStatus,
   };
 }

@@ -1,3 +1,4 @@
+import { resolveCallerAdmissionMode } from "./admission-policy.js";
 import { createSchedulingServer } from "./server.js";
 import {
   DURATION_WARNING_LEAD_MS_DEFAULT,
@@ -6,6 +7,7 @@ import {
   MONTHLY_TARGET_MICRO_USD_DEFAULT,
   RESERVE_MARGIN_DEFAULT,
 } from "./budget.js";
+import { loadSelection } from "./calendar/selection.js";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -47,12 +49,17 @@ function optionalList(name: string): string[] | undefined {
   return items.length > 0 ? items : undefined;
 }
 
-const allowedCallerNumbers = optionalList("ALLOWED_CALLER_NUMBERS");
-if (!allowedCallerNumbers || allowedCallerNumbers.length === 0) {
-  throw new Error(
-    "Public admission is disabled. Set ALLOWED_CALLER_NUMBERS to the authorized smoke-call numbers.",
-  );
-}
+const allowCalendarWrites = process.env.SCHEDULING_ALLOW_CALENDAR_WRITES === "true";
+const admissionMode = resolveCallerAdmissionMode(
+  {
+    publicAdmission: process.env.SCHEDULING_PUBLIC_ADMISSION === "true",
+    calendarWrites: allowCalendarWrites,
+    calendarSelected: loadSelection({ dataDir: process.env.SCHEDULING_DATA_DIR }) !== undefined,
+  },
+  optionalList("ALLOWED_CALLER_NUMBERS"),
+);
+const allowedCallerNumbers =
+  admissionMode.kind === "allowlist" ? [...admissionMode.allowedCallerNumbers] : undefined;
 
 const operatorToken = process.env.OPERATOR_TOKEN?.trim() || undefined;
 if (!operatorToken) {
@@ -70,6 +77,8 @@ const app = createSchedulingServer({
   publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() || undefined,
   maxConcurrentCalls: Number.parseInt(process.env.MAX_CONCURRENT_CALLS || "1", 10),
   allowedCallerNumbers,
+  admissionMode,
+  pauseAdmissions: process.env.SCHEDULING_PAUSE_ADMISSIONS === "true",
   maxCallDurationMs: optionalEnvNumber(
     "MAX_CALL_DURATION_MS",
     (raw) => Number.parseInt(raw, 10),
@@ -101,7 +110,7 @@ const app = createSchedulingServer({
     RESERVE_MARGIN_DEFAULT,
   ),
   dataDir: process.env.SCHEDULING_DATA_DIR,
-  allowCalendarWrites: process.env.SCHEDULING_ALLOW_CALENDAR_WRITES === "true",
+  allowCalendarWrites,
 });
 
 await app.start();

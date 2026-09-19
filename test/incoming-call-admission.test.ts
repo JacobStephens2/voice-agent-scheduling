@@ -147,5 +147,22 @@ describe("incoming call admission", () => {
       callId: "call-unauth",
     });
   });
+
+  it("admits any caller when no allowlist is configured", () => {
+    const admission = createIncomingCallAdmission({
+      webhookSecret: WEBHOOK_SECRET,
+      maxConcurrentCalls: 1,
+    });
+    const payload = incomingCallPayload({
+      callId: "call-public",
+      callerNumber: "+15559876543",
+    });
+    expect(admission.admit(signedHeaders(payload, { webhookId: "msg_public" }))).toEqual({
+      admitted: true,
+      callId: "call-public",
+      callerNumber: "+15559876543",
+      calledNumber: "+18005550199",
+    });
+  });
 });
 
