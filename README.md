@@ -30,7 +30,7 @@ Availability never describes Jacob's existing events; callers only hear the open
 - One active scheduling call at a time (`MAX_CONCURRENT_CALLS`).
 - Each call ends after 10 minutes, with a spoken warning one minute before the cutoff.
 - A $25/month target for additional provider charges. Each admitted call reserves a full-length estimate plus a 25% margin, and admissions pause when the remaining budget cannot cover a new call or when rates cannot be estimated safely.
-- Public admission stays allowlisted (`ALLOWED_CALLER_NUMBERS`); the service refuses to start without it. Calendar writes stay off until `SCHEDULING_ALLOW_CALENDAR_WRITES=true`.
+- Public admission stays allowlisted (`ALLOWED_CALLER_NUMBERS`) until `SCHEDULING_PUBLIC_ADMISSION=true` is set after the production campaign. Public start also requires calendar writes and an explicit calendar selection. `POST /maintenance/pause` stops new callers without discarding an appointment the caller already confirmed.
 
 ## HTTP endpoints
 
@@ -39,8 +39,10 @@ The service listens on `127.0.0.1:3531` behind the `https://scheduler.stephens.p
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /xai/sip-webhook` | Signed incoming-call webhook from xAI |
-| `GET /health` | Status, active call count, and whether admissions are paused |
+| `GET /health` | Status, active call count, admission pause, public/writes/selection flags |
 | `GET /evidence` | Structured per-call evidence with masked caller numbers (`EVIDENCE_TOKEN` bearer) |
+| `POST /maintenance/pause` | Stop new admissions (`EVIDENCE_TOKEN` bearer) |
+| `POST /maintenance/resume` | Resume admissions after an operator pause (`EVIDENCE_TOKEN` bearer) |
 | `POST /maintenance/cleanup` | Purge operational records older than 30 days without deleting Calendar events (`EVIDENCE_TOKEN` bearer) |
 | `/calendar/auth/*` | Operator consent pages for Google Calendar authorization (`OPERATOR_TOKEN`) |
 
@@ -54,6 +56,7 @@ npm test
 npm run typecheck
 npm run build
 SCHEDULER_URL=https://scheduler.stephens.page EVIDENCE_TOKEN=... npm run smoke:pstn
+SCHEDULER_URL=https://scheduler.stephens.page EVIDENCE_TOKEN=... npm run acceptance:report
 ```
 
 Configuration is environment-driven; [`.env.example`](.env.example) lists every variable. Calendar authorization and selection use the `calendars:*` scripts described in the [calendar setup guide](docs/deployment/calendar-setup.md).
@@ -66,6 +69,7 @@ Configuration is environment-driven; [`.env.example`](.env.example) lists every 
 | `src/budget.ts` | Call duration limits and the monthly usage ledger |
 | `src/calendar/` | Google OAuth, free/busy availability, booking policy, proposals, durable booking store, callback-number limit |
 | `src/evidence.ts` | Structured call evidence |
+| `src/acceptance.ts` | Bounded production-acceptance report |
 | `src/maintenance.ts` | 30-day operational retention, booking compact, restore, and recovery gate |
 | `ops/` | systemd unit, Apache virtual host, server setup, release deploy, and state backup/restore |
 | `test/` | Vitest suites covering admission, availability, booking, reconciliation, call bounds, and maintenance |
@@ -79,6 +83,8 @@ The scheduler is deliberately isolated from Jacob's existing voice agent, with i
 ## Documentation
 
 - [Implementation specification and sub-issues](https://github.com/JacobStephens2/voice-agent-scheduling/issues/1)
+- [Operating procedure](docs/deployment/operations.md)
+- [Production acceptance campaign](docs/deployment/production-acceptance.md)
 - [Telephone path setup](docs/deployment/telephone-path-setup.md)
 - [Maintenance, restart, backup, and retention](docs/deployment/maintenance.md)
 - [Google Calendar authorization and calendar selection](docs/deployment/calendar-setup.md)

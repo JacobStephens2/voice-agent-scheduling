@@ -36,6 +36,8 @@ export interface ServerConfig {
   readonly connectWebSocket?: ConnectWebSocket;
   readonly hangupCall?: (callId: string) => Promise<void>;
   readonly allowCalendarWrites?: boolean;
+  readonly publicAdmission?: boolean;
+  readonly pauseAdmissions?: boolean;
 }
 
 export interface SchedulingServer {
@@ -111,6 +113,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
     dataDir: config.dataDir,
     connectWebSocket: config.connectWebSocket,
     hangupCall: config.hangupCall,
+    pauseAdmissions: config.pauseAdmissions,
   });
 
   const oauthRouter = config.operatorToken
@@ -157,17 +160,15 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
     }
 
     if (req.method === "GET" && url.pathname === "/health") {
-      const snapshot = lifecycleManager.budgetSnapshot();
-      const recovery = lifecycleManager.recoveryStatus();
+      const admissions = lifecycleManager.admissionsStatus();
       json(res, 200, {
         status: "healthy",
         activeCalls: lifecycleManager.activeCallCount(),
-        admissionsPaused: snapshot.admissionsPaused || !recovery.admissionAvailable,
-        ...(recovery.admissionAvailable
-          ? snapshot.pauseReason
-            ? { pauseReason: snapshot.pauseReason }
-            : {}
-          : { pauseReason: recovery.reason }),
+        admissionsPaused: admissions.paused,
+        ...(admissions.reason ? { pauseReason: admissions.reason } : {}),
+        publicAdmission: config.publicAdmission === true,
+        calendarWrites: config.allowCalendarWrites === true,
+        calendarSelected: loadSelection({ dataDir: config.dataDir }) !== undefined,
         timestamp: new Date().toISOString(),
       });
       return;
@@ -179,6 +180,25 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         return;
       }
       json(res, 200, lifecycleManager.listEvidence());
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      (url.pathname === "/maintenance/pause" || url.pathname === "/maintenance/resume")
+    ) {
+      if (!evidenceAuthorized(req, config.evidenceToken)) {
+        json(res, 401, { error: "unauthorized" });
+        return;
+      }
+      const admissions =
+        url.pathname === "/maintenance/pause"
+          ? lifecycleManager.pauseAdmissions()
+          : lifecycleManager.resumeAdmissions();
+      json(res, 200, {
+        admissionsPaused: admissions.paused,
+        ...(admissions.reason ? { pauseReason: admissions.reason } : {}),
+      });
       return;
     }
 
