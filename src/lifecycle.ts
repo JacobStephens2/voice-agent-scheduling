@@ -33,7 +33,7 @@ import {
   type RecoveryAssessment,
   type RecoveryBlockReason,
 } from "./maintenance.js";
-import { loadBookingRecords, unresolvedOperations } from "./calendar/booking-store.js";
+import { createAppointmentLedger, type AppointmentLedger } from "./calendar/appointment-ledger.js";
 import {
   createTelephoneSession,
   type AvailabilityTool,
@@ -84,6 +84,11 @@ export interface CallLifecycleManagerOptions {
   readonly apiKey: string;
   readonly availabilityTool: AvailabilityTool;
   readonly booking?: BookingTool;
+  /**
+   * The process's shared appointment ledger, the same instance the booking
+   * tool writes. Built from `dataDir` when absent.
+   */
+  readonly ledger?: AppointmentLedger;
   readonly maxConcurrentCalls?: number;
   readonly allowedCallerNumbers?: readonly string[];
   readonly connectWebSocket?: ConnectWebSocket;
@@ -241,8 +246,9 @@ export function createCallLifecycleManager(
   const maxCallDurationMs = options.maxCallDurationMs ?? MAX_CALL_DURATION_MS_DEFAULT;
   const warningLeadMs = options.warningLeadMs ?? DURATION_WARNING_LEAD_MS_DEFAULT;
   const perMinuteMicroUsd = options.perMinuteMicroUsd ?? DIRECT_SIP_MICRO_USD_PER_MINUTE;
+  const ledger = options.ledger ?? createAppointmentLedger({ dataDir: options.dataDir });
   const integrity = options.dataDir
-    ? inspectDurableIntegrity(options.dataDir)
+    ? inspectDurableIntegrity({ dataDir: options.dataDir, ledger })
     : { complete: true, missing: [] as const };
   const persistBudget =
     Boolean(options.dataDir) &&
@@ -268,7 +274,7 @@ export function createCallLifecycleManager(
       staleAdmissions.push(staleClaim);
     }
     if (integrity.complete) {
-      runRetentionCleanup({ dataDir: options.dataDir, now: options.now?.() });
+      runRetentionCleanup({ dataDir: options.dataDir, ledger, now: options.now?.() });
     }
   }
   const evidenceByCall = new Map<string, StructuredCallEvidence>();
@@ -291,6 +297,7 @@ export function createCallLifecycleManager(
     options.dataDir
       ? assessRecovery({
           dataDir: options.dataDir,
+          ledger,
           reconcile: options.booking?.reconcileUnresolvedOperations
             ? () => options.booking!.reconcileUnresolvedOperations!()
             : undefined,
@@ -306,7 +313,7 @@ export function createCallLifecycleManager(
         missing: integrity.missing,
         reconciliation: [],
       };
-    } else if (unresolvedOperations(loadBookingRecords(options.dataDir)).length > 0) {
+    } else if (ledger.unresolvedOperations().length > 0) {
       recovery = {
         admissionAvailable: false,
         reason: "recovery_pending",
@@ -482,7 +489,6 @@ export function createCallLifecycleManager(
 
     reloadDurableViews() {
       reloadEvidence();
-      options.booking?.reloadDurableRecords?.();
       if (options.dataDir) {
         operatorPaused = loadOperatorPause(options.dataDir);
       }
