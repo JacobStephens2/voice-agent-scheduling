@@ -97,8 +97,8 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
       ledger,
       allowWrites: config.allowCalendarWrites === true,
     });
-  // A restarted process loads durable booking records when the ledger
-  // opens. Reconcile pending/uncertain operations in the
+  // A restarted process loads the appointment ledger's durable records
+  // when the ledger opens. Reconcile pending/uncertain operations in the
   // background so each one settles to a single matching event or a bounded
   // unresolved outcome. Reconciliation only reads by stored event identity;
   // it never re-inserts, so it cannot create a duplicate event.

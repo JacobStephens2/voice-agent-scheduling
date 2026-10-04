@@ -45,7 +45,7 @@ export type BookingRecordFields = Omit<BookingRecord, "recordedAt" | "status"> &
 };
 
 export function bookingRecord(
-  fields: Omit<BookingRecord, "recordedAt"> & { recordedAt?: string },
+  fields: BookingRecordFields & { readonly status: BookingRecordStatus },
 ): BookingRecord {
   return {
     operationId: fields.operationId,
@@ -98,7 +98,7 @@ export interface AppointmentLedger {
    * Latest record of every operation that may hold an appointment for a
    * callback-number hash, excluding the committing operation's own records.
    */
-  appointmentCandidates(numberHash: string, excludeOperationId?: string): BookingRecord[];
+  operationsHoldingAppointment(numberHash: string, excludeOperationId?: string): BookingRecord[];
   /** True when the ledger holds any record at all. */
   hasRecords(): boolean;
   /** Hash a normalized callback number with the data directory's salt. */
@@ -137,7 +137,7 @@ function findLatest(
   return undefined;
 }
 
-function appointmentEndMs(startUtc: string): number {
+export function appointmentEndMs(startUtc: string): number {
   return Date.parse(startUtc) + APPOINTMENT_MINUTES * 60_000;
 }
 
@@ -238,7 +238,7 @@ export function createAppointmentLedger(options: { readonly dataDir?: string } =
       return latestByOperation(records).filter((record) => isUnresolvedBookingStatus(record.status));
     },
 
-    appointmentCandidates(numberHash, excludeOperationId) {
+    operationsHoldingAppointment(numberHash, excludeOperationId) {
       return latestByOperation(
         records.filter(
           (record) => record.numberHash === numberHash && record.operationId !== excludeOperationId,

@@ -1,7 +1,6 @@
 import { extractE164, isE164 } from "../phone.js";
-import type { AppointmentLedger } from "./appointment-ledger.js";
+import { appointmentEndMs, type AppointmentLedger } from "./appointment-ledger.js";
 import { CalendarQueryError, getAppointmentEvent } from "./client.js";
-import { APPOINTMENT_MINUTES } from "./policy.js";
 
 export type CallbackLimitOutcome = "clear" | "blocked" | "unknown";
 
@@ -12,10 +11,6 @@ export function normalizeCallbackNumber(value: unknown): string | undefined {
   }
   const normalized = extractE164(value);
   return isE164(normalized) ? normalized : undefined;
-}
-
-function appointmentEndMs(startUtc: string): number {
-  return Date.parse(startUtc) + APPOINTMENT_MINUTES * 60_000;
 }
 
 /**
@@ -37,7 +32,7 @@ export async function evaluateCallbackLimit(options: {
    */
   readonly excludeOperationId?: string;
 }): Promise<CallbackLimitOutcome> {
-  const candidates = options.ledger.appointmentCandidates(
+  const candidates = options.ledger.operationsHoldingAppointment(
     options.numberHash,
     options.excludeOperationId,
   );

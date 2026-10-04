@@ -442,7 +442,7 @@ async function confirm(
       return bookedResult(booked, proposal.callbackNumber);
     }
     if (own === undefined) {
-      return persistInconclusive(ctx, identities);
+      return recordInconclusive(ctx, identities);
     }
     ctx.ledger.record(bookingRecord({ ...identities, status: "unavailable" }));
     ctx.proposals.drop(execOptions.callId);
@@ -499,7 +499,7 @@ async function confirm(
       ctx.ledger.record(booked);
       return bookedResult(booked, proposal.callbackNumber);
     }
-    return persistInconclusive(ctx, identities);
+    return recordInconclusive(ctx, identities);
   }
 }
 
@@ -526,7 +526,7 @@ const INCONCLUSIVE_MESSAGE =
   "Do not tell the caller the appointment is booked. " +
   "The caller may confirm the same proposal again or choose another time.";
 
-function persistInconclusive(
+function recordInconclusive(
   ctx: {
     ledger: AppointmentLedger;
   },

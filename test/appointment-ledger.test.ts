@@ -94,7 +94,7 @@ describe("appointment ledger", () => {
     ledger.record(row("op-self", "booked", { numberHash: "hash-a" }));
 
     expect(
-      ledger.appointmentCandidates("hash-a", "op-self").map((record) => record.operationId),
+      ledger.operationsHoldingAppointment("hash-a", "op-self").map((record) => record.operationId),
     ).toEqual(["op-booked", "op-pending"]);
   });
 
@@ -162,75 +162,81 @@ describe("appointment ledger", () => {
 });
 
 describe("booking retries through the appointment ledger", () => {
-  it("records pending under the reused identity before retrying a failed attempt's Calendar insert", async () => {
-    const dataDir = tempDir();
-    const ledger = createAppointmentLedger({ dataDir });
-    let tokenFails = true;
-    const statusesAtInsert: Array<string | undefined> = [];
-    const google = fakeGoogleCalendar({});
-    const fetchFn = (async (url: unknown, init?: unknown) => {
-      if ((init as RequestInit | undefined)?.method === "POST" && String(url).includes("/events")) {
-        statusesAtInsert.push(ledger.latestForOperation("op-retry")?.status);
-      }
-      return google.fetchFn(url as string, init as RequestInit);
-    }) as typeof fetch;
-    let created = 0;
-    const booking = createAppointmentBooking({
-      fetchFn,
-      tokenProvider: {
-        getAccessToken: async () => {
-          if (tokenFails) {
-            throw new Error("token refresh failed");
-          }
-          return "test-access-token";
+  it.each(["token", "free/busy"] as const)(
+    "records pending under the reused identity before retrying after a %s failure",
+    async (failure) => {
+      const dataDir = tempDir();
+      const ledger = createAppointmentLedger({ dataDir });
+      let failing = true;
+      const statusesAtInsert: Array<string | undefined> = [];
+      const google = fakeGoogleCalendar({});
+      const fetchFn = (async (url: unknown, init?: unknown) => {
+        if (failure === "free/busy" && failing && String(url).includes("/freeBusy")) {
+          return new Response("{}", { status: 500 });
+        }
+        if ((init as RequestInit | undefined)?.method === "POST" && String(url).includes("/events")) {
+          statusesAtInsert.push(ledger.latestForOperation("op-retry")?.status);
+        }
+        return google.fetchFn(url as string, init as RequestInit);
+      }) as typeof fetch;
+      let created = 0;
+      const booking = createAppointmentBooking({
+        fetchFn,
+        tokenProvider: {
+          getAccessToken: async () => {
+            if (failure === "token" && failing) {
+              throw new Error("token refresh failed");
+            }
+            return "test-access-token";
+          },
         },
-      },
-      selection: SELECTION,
-      now: () => MONDAY_14H,
-      ledger,
-      createIds: () => {
-        created += 1;
-        return { operationId: "op-retry", eventId: TEST_EVENT_ID };
-      },
-      allowWrites: true,
-    });
+        selection: SELECTION,
+        now: () => MONDAY_14H,
+        ledger,
+        createIds: () => {
+          created += 1;
+          return { operationId: "op-retry", eventId: TEST_EVENT_ID };
+        },
+        allowWrites: true,
+      });
 
-    const proposed = await booking.execute(
-      "propose_appointment",
-      {
-        callerName: "Ada Lovelace",
-        callbackNumber: "+15551239876",
-        callbackConfirmed: true,
-        date: "2026-09-11",
-        startTime: "10:00",
-      },
-      { callId: "call-retry" },
-    );
-    const proposalId = (proposed as { proposalId: string }).proposalId;
-    booking.markReadbackFinished("call-retry");
+      const proposed = await booking.execute(
+        "propose_appointment",
+        {
+          callerName: "Ada Lovelace",
+          callbackNumber: "+15551239876",
+          callbackConfirmed: true,
+          date: "2026-09-11",
+          startTime: "10:00",
+        },
+        { callId: "call-retry" },
+      );
+      const proposalId = (proposed as { proposalId: string }).proposalId;
+      booking.markReadbackFinished("call-retry");
 
-    const failed = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true, proposalId },
-      { callId: "call-retry" },
-    );
-    expect(failed.status).toBe("failed");
-    expect(ledger.latestForOperation("op-retry")?.status).toBe("failed");
+      const failed = await booking.execute(
+        "confirm_appointment",
+        { confirmed: true, proposalId },
+        { callId: "call-retry" },
+      );
+      expect(failed.status).toBe("failed");
+      expect(ledger.latestForOperation("op-retry")?.status).toBe("failed");
 
-    tokenFails = false;
-    const retried = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true, proposalId },
-      { callId: "call-retry" },
-    );
+      failing = false;
+      const retried = await booking.execute(
+        "confirm_appointment",
+        { confirmed: true, proposalId },
+        { callId: "call-retry" },
+      );
 
-    expect(retried).toMatchObject({
-      status: "booked",
-      operationId: "op-retry",
-      eventId: TEST_EVENT_ID,
-    });
-    expect(statusesAtInsert).toEqual(["pending"]);
-    expect(created).toBe(1);
-    expect(ledger.latestForOperation("op-retry")?.status).toBe("booked");
-  });
+      expect(retried).toMatchObject({
+        status: "booked",
+        operationId: "op-retry",
+        eventId: TEST_EVENT_ID,
+      });
+      expect(statusesAtInsert).toEqual(["pending"]);
+      expect(created).toBe(1);
+      expect(ledger.latestForOperation("op-retry")?.status).toBe("booked");
+    },
+  );
 });
