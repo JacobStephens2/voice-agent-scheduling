@@ -35,7 +35,6 @@ export interface BookingTool {
   ): unknown | Promise<unknown>;
   markReadbackFinished?(callId: string): void;
   reconcileUnresolvedOperations?(): Promise<readonly BookingReconciliation[]>;
-  reloadDurableRecords?(): void;
 }
 
 export interface RealtimeSocket {

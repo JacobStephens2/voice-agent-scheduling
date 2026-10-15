@@ -68,7 +68,7 @@ Configuration is environment-driven; [`.env.example`](.env.example) lists every 
 | `src/admission-policy.ts` | Public vs allowlist startup gate and production readiness |
 | `src/session.ts` | Realtime voice session, instructions, and tool dispatch |
 | `src/budget.ts` | Call duration limits and the monthly usage ledger |
-| `src/calendar/` | Google OAuth, free/busy availability, booking policy, proposals, durable booking store, callback-number limit |
+| `src/calendar/` | Google OAuth, free/busy availability, booking policy, proposals, appointment ledger, callback-number limit |
 | `src/evidence.ts` | Structured call evidence |
 | `src/acceptance.ts` | Bounded production-acceptance report |
 | `src/maintenance.ts` | 30-day operational retention, booking compact, restore, and recovery gate |

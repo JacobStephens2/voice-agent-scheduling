@@ -13,19 +13,12 @@ import {
   type ProposalStore,
 } from "./booking-proposal.js";
 import {
-  appendBookingRecord,
   bookingRecord,
-  latestForProposal,
-  loadBookingRecords,
-  unresolvedOperations,
+  createAppointmentLedger,
+  type AppointmentLedger,
   type BookingRecord,
-} from "./booking-store.js";
-import {
-  createCallbackNumberHasher,
-  evaluateCallbackLimit,
-  normalizeCallbackNumber,
-  type CallbackNumberHasher,
-} from "./callback-limit.js";
+} from "./appointment-ledger.js";
+import { evaluateCallbackLimit, normalizeCallbackNumber } from "./callback-limit.js";
 import {
   appointmentNotificationProof,
   CalendarQueryError,
@@ -103,7 +96,6 @@ export interface AppointmentBooking {
    * success for an event that could not be read back.
    */
   reconcileUnresolvedOperations(): Promise<readonly ReconcileResult[]>;
-  reloadDurableRecords(): void;
 }
 
 export interface BookingToolOptions {
@@ -112,6 +104,11 @@ export interface BookingToolOptions {
   readonly tokenProvider?: AccessTokenProvider;
   readonly selection?: CalendarSelection | null;
   readonly dataDir?: string;
+  /**
+   * The process's shared appointment ledger. Built from `dataDir` when
+   * absent, for callers that construct the booking tool on its own.
+   */
+  readonly ledger?: AppointmentLedger;
   readonly env?: NodeJS.ProcessEnv;
   readonly now?: () => Date;
   readonly createIds?: () => BookingIds;
@@ -140,16 +137,8 @@ export function createAppointmentBooking(
     options.tokenProvider ??
     (explicitCredentials ? createTokenProvider(explicitCredentials, fetchFn) : undefined);
   const proposals = createProposalStore();
-  const records: BookingRecord[] = options.dataDir ? loadBookingRecords(options.dataDir) : [];
-  const callbackHasher = createCallbackNumberHasher(options.dataDir);
+  const ledger = options.ledger ?? createAppointmentLedger({ dataDir: options.dataDir });
   let queue: Promise<unknown> = Promise.resolve();
-
-  const persist = (record: BookingRecord): void => {
-    records.push(record);
-    if (options.dataDir) {
-      appendBookingRecord(options.dataDir, record);
-    }
-  };
 
   const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
     const run = queue.then(work, work);
@@ -237,15 +226,13 @@ export function createAppointmentBooking(
         return enqueue(() =>
           confirm(args, execOptions, {
             proposals,
-            persist,
-            records,
+            ledger,
             fetchFn,
             now,
             createIds,
             tokenProvider,
             selection: explicitSelection,
             allowWrites: options.allowWrites === true,
-            callbackHasher,
           }),
         );
       }
@@ -262,21 +249,12 @@ export function createAppointmentBooking(
     reconcileUnresolvedOperations() {
       return enqueue(() =>
         reconcileUnresolved({
-          persist,
-          records,
+          ledger,
           fetchFn,
           tokenProvider,
           selection: explicitSelection,
         }),
       );
-    },
-
-    reloadDurableRecords() {
-      if (!options.dataDir) {
-        return;
-      }
-      const loaded = loadBookingRecords(options.dataDir);
-      records.splice(0, records.length, ...loaded);
     },
   };
 }
@@ -296,15 +274,13 @@ async function confirm(
   execOptions: { callId: string; referenceTime?: Date },
   ctx: {
     proposals: ProposalStore;
-    persist: (record: BookingRecord) => void;
-    records: BookingRecord[];
+    ledger: AppointmentLedger;
     fetchFn: typeof fetch;
     now: () => Date;
     createIds: () => BookingIds;
     tokenProvider: AccessTokenProvider | undefined;
     selection: CalendarSelection | undefined;
     allowWrites: boolean;
-    callbackHasher: CallbackNumberHasher;
   },
 ): Promise<ConfirmResult> {
   const proposal = ctx.proposals.current(execOptions.callId);
@@ -336,7 +312,7 @@ async function confirm(
     };
   }
 
-  const existing = latestForProposal(ctx.records, proposal.proposalId);
+  const existing = ctx.ledger.latestForProposal(proposal.proposalId);
   if (existing?.status === "booked") {
     return bookedResult(existing, proposal.callbackNumber);
   }
@@ -381,7 +357,7 @@ async function confirm(
         "The callback number could not be understood. Do not claim the appointment is booked.",
     };
   }
-  const numberHash = ctx.callbackHasher(normalizedCallback);
+  const numberHash = ctx.ledger.hashCallbackNumber(normalizedCallback);
 
   const generated = existing
     ? { operationId: existing.operationId, eventId: existing.eventId }
@@ -401,7 +377,7 @@ async function confirm(
   try {
     accessToken = await ctx.tokenProvider.getAccessToken();
   } catch {
-    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    ctx.ledger.record(bookingRecord({ ...identities, status: "failed" }));
     return {
       status: "failed",
       operationId: generated.operationId,
@@ -418,19 +394,17 @@ async function confirm(
   const limit = await evaluateCallbackLimit({
     fetchFn: ctx.fetchFn,
     accessToken,
-    records: ctx.records,
+    ledger: ctx.ledger,
     numberHash,
     now: referenceTime,
     excludeOperationId: generated.operationId,
   });
   if (limit !== "clear") {
-    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    ctx.ledger.record(bookingRecord({ ...identities, status: "failed" }));
     return limitRefusal(limit);
   }
 
-  if (!existing) {
-    ctx.persist(bookingRecord({ ...identities, status: "pending" }));
-  }
+  ctx.ledger.recordPending(identities);
 
   // Recheck policy and availability inside the serialized operation, so a
   // slot taken after the proposal is never knowingly written.
@@ -442,7 +416,7 @@ async function confirm(
       timeMax: dayEnd,
     });
   } catch {
-    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    ctx.ledger.record(bookingRecord({ ...identities, status: "failed" }));
     return {
       status: "failed",
       operationId: generated.operationId,
@@ -464,13 +438,13 @@ async function confirm(
     const own = await readOwnEvent(ctx.fetchFn, accessToken, calendarId, generated.eventId);
     if (own) {
       const booked = bookingRecord({ ...identities, status: "booked" });
-      ctx.persist(booked);
+      ctx.ledger.record(booked);
       return bookedResult(booked, proposal.callbackNumber);
     }
     if (own === undefined) {
-      return persistInconclusive(ctx, identities);
+      return recordInconclusive(ctx, identities);
     }
-    ctx.persist(bookingRecord({ ...identities, status: "unavailable" }));
+    ctx.ledger.record(bookingRecord({ ...identities, status: "unavailable" }));
     ctx.proposals.drop(execOptions.callId);
     return {
       status: "unavailable",
@@ -488,13 +462,13 @@ async function confirm(
   const finalLimit = await evaluateCallbackLimit({
     fetchFn: ctx.fetchFn,
     accessToken,
-    records: ctx.records,
+    ledger: ctx.ledger,
     numberHash,
     now: referenceTime,
     excludeOperationId: generated.operationId,
   });
   if (finalLimit !== "clear") {
-    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    ctx.ledger.record(bookingRecord({ ...identities, status: "failed" }));
     return limitRefusal(finalLimit);
   }
 
@@ -512,7 +486,7 @@ async function confirm(
       throw new Error("missing stored event");
     }
     const booked = bookingRecord({ ...identities, status: "booked" });
-    ctx.persist(booked);
+    ctx.ledger.record(booked);
     return bookedResult(booked, proposal.callbackNumber);
   } catch {
     // A timeout can fire after Google accepted the insertion. Reconcile
@@ -522,10 +496,10 @@ async function confirm(
     const own = await readOwnEvent(ctx.fetchFn, accessToken, calendarId, generated.eventId);
     if (own) {
       const booked = bookingRecord({ ...identities, status: "booked" });
-      ctx.persist(booked);
+      ctx.ledger.record(booked);
       return bookedResult(booked, proposal.callbackNumber);
     }
-    return persistInconclusive(ctx, identities);
+    return recordInconclusive(ctx, identities);
   }
 }
 
@@ -552,9 +526,9 @@ const INCONCLUSIVE_MESSAGE =
   "Do not tell the caller the appointment is booked. " +
   "The caller may confirm the same proposal again or choose another time.";
 
-function persistInconclusive(
+function recordInconclusive(
   ctx: {
-    persist: (record: BookingRecord) => void;
+    ledger: AppointmentLedger;
   },
   identities: {
     operationId: string;
@@ -566,7 +540,7 @@ function persistInconclusive(
     numberHash: string;
   },
 ): ConfirmResult {
-  ctx.persist(bookingRecord({ ...identities, status: "inconclusive" }));
+  ctx.ledger.record(bookingRecord({ ...identities, status: "inconclusive" }));
   return {
     status: "inconclusive",
     operationId: identities.operationId,
@@ -610,14 +584,13 @@ async function readOwnEvent(
  * unresolved. Nothing is re-inserted and no identity is replaced.
  */
 async function reconcileUnresolved(ctx: {
-  persist: (record: BookingRecord) => void;
-  records: BookingRecord[];
+  ledger: AppointmentLedger;
   fetchFn: typeof fetch;
   tokenProvider: AccessTokenProvider | undefined;
   selection: CalendarSelection | undefined;
 }): Promise<readonly ReconcileResult[]> {
   const outcomes: ReconcileResult[] = [];
-  for (const latest of unresolvedOperations(ctx.records)) {
+  for (const latest of ctx.ledger.unresolvedOperations()) {
     const identity = {
       operationId: latest.operationId,
       eventId: latest.eventId,
@@ -650,7 +623,7 @@ async function reconcileUnresolved(ctx: {
         status: "booked",
         numberHash: latest.numberHash,
       });
-      ctx.persist(booked);
+      ctx.ledger.record(booked);
       outcomes.push({ ...identity, status: "booked", eventExists: true });
       continue;
     }
@@ -659,7 +632,7 @@ async function reconcileUnresolved(ctx: {
       continue;
     }
     if (latest.status === "pending") {
-      ctx.persist(
+      ctx.ledger.record(
         bookingRecord({
           operationId: latest.operationId,
           eventId: latest.eventId,

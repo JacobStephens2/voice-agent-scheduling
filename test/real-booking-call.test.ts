@@ -1,7 +1,8 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
 import { createCalendarAvailabilityTool } from "../src/calendar/availability-tool.js";
 import { createCallLifecycleManager } from "../src/lifecycle.js";
@@ -179,16 +180,7 @@ describe("controlled inbound call with appointment booking", () => {
     expect(google.writes).toEqual([]);
     // Work without explicit confirmation never starts a calendar insertion,
     // so no pending or booked operation may survive the disconnect.
-    let rows: unknown[] = [];
-    try {
-      rows = readFileSync(join(dataDir, "bookings.jsonl"), "utf8")
-        .trim()
-        .split("\n")
-        .filter(Boolean);
-    } catch {
-      rows = [];
-    }
-    expect(rows).toEqual([]);
+    expect(createAppointmentLedger({ dataDir }).hasRecords()).toBe(false);
 
     const evidence = await recordedEvidence(
       () => manager.listEvidence(),
@@ -312,9 +304,9 @@ describe("controlled inbound call with appointment booking", () => {
     }
     expect(insertStarted).toBe(true);
 
-    const pendingLog = readFileSync(join(dataDir, "bookings.jsonl"), "utf8");
-    expect(pendingLog).toContain(TEST_OPERATION_ID);
-    expect(pendingLog).toContain("pending");
+    expect(
+      createAppointmentLedger({ dataDir }).latestForOperation(TEST_OPERATION_ID)?.status,
+    ).toBe("pending");
 
     socket.close();
     releaseInsert();
@@ -333,12 +325,7 @@ describe("controlled inbound call with appointment booking", () => {
 
     // Booking completion has its own lifetime: the confirmed write lands in
     // durable storage even though the telephone connection already ended.
-    const rows = readFileSync(join(dataDir, "bookings.jsonl"), "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as { operationId?: string; status?: string });
-    expect(rows.at(-1)).toMatchObject({
-      operationId: TEST_OPERATION_ID,
+    expect(createAppointmentLedger({ dataDir }).latestForOperation(TEST_OPERATION_ID)).toMatchObject({
       eventId: TEST_EVENT_ID,
       status: "booked",
     });

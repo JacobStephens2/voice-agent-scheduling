@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
 import { TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
 
@@ -137,12 +138,8 @@ async function confirm(
   return booking.execute("confirm_appointment", { confirmed: true, proposalId }, { callId });
 }
 
-function bookingRows(dataDir: string): Array<{ [key: string]: unknown }> {
-  return readFileSync(join(dataDir, "bookings.jsonl"), "utf8")
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as { [key: string]: unknown });
+function latestRecord(dataDir: string, operationId: string) {
+  return createAppointmentLedger({ dataDir }).latestForOperation(operationId);
 }
 
 describe("confirmed booking reconciliation", () => {
@@ -212,10 +209,7 @@ describe("confirmed booking reconciliation", () => {
     expect(created).toBe(1);
     expect(calendar.posts).toHaveLength(2);
     expect(calendar.landedCount()).toBe(1);
-    expect(bookingRows(dataDir).at(-1)).toMatchObject({
-      operationId: "op-1",
-      status: "booked",
-    });
+    expect(latestRecord(dataDir, "op-1")).toMatchObject({ status: "booked" });
   });
 
   it("returns inconclusive when the reconciliation read itself fails", async () => {
@@ -302,8 +296,7 @@ describe("confirmed booking reconciliation", () => {
       status: "booked",
       eventExists: true,
     });
-    expect(bookingRows(dataDir).at(-1)).toMatchObject({
-      operationId: TEST_OPERATION_ID,
+    expect(latestRecord(dataDir, TEST_OPERATION_ID)).toMatchObject({
       eventId: TEST_EVENT_ID,
       status: "booked",
     });
@@ -379,6 +372,7 @@ describe("confirmed booking reconciliation", () => {
     });
     const proposalId = await propose(beforeCrash);
     expect((await confirm(beforeCrash, proposalId)).status).toBe("inconclusive");
+    const recordBeforeRestart = latestRecord(dataDir, "op-1");
 
     const attemptsBeforeRestart = calendar.posts.length;
     const afterRestart = bookingWith(calendar, dataDir, () => {
@@ -397,9 +391,8 @@ describe("confirmed booking reconciliation", () => {
     expect(created).toBe(1);
     expect(calendar.posts).toHaveLength(attemptsBeforeRestart);
     expect(calendar.landedCount()).toBe(0);
-    expect(
-      bookingRows(dataDir).filter((row) => row.operationId === "op-1"),
-    ).toHaveLength(2);
+    // Already inconclusive before the restart, so recovery records nothing new.
+    expect(latestRecord(dataDir, "op-1")).toEqual(recordBeforeRestart);
   });
 
   it("reports unresolved when Calendar cannot be reached during restart recovery", async () => {
@@ -412,14 +405,14 @@ describe("confirmed booking reconciliation", () => {
     const beforeCrash = bookingWith(calendar, dataDir);
     const proposalId = await propose(beforeCrash);
     expect((await confirm(beforeCrash, proposalId)).status).toBe("inconclusive");
-    const rowsBefore = bookingRows(dataDir).length;
+    const recordBefore = latestRecord(dataDir, TEST_OPERATION_ID);
 
     const afterRestart = bookingWith(calendar, dataDir);
     const outcomes = await afterRestart.reconcileUnresolvedOperations();
 
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0]).toMatchObject({ status: "unresolved", eventExists: false });
-    expect(bookingRows(dataDir)).toHaveLength(rowsBefore);
+    expect(latestRecord(dataDir, TEST_OPERATION_ID)).toEqual(recordBefore);
     expect(calendar.posts).toHaveLength(1);
   });
 });
