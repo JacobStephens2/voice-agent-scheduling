@@ -79,6 +79,7 @@ const app = createSchedulingServer({
   allowedCallerNumbers,
   admissionMode,
   pauseAdmissions: process.env.SCHEDULING_PAUSE_ADMISSIONS === "true",
+  publicPhoneNumber: process.env.SCHEDULING_PUBLIC_PHONE_NUMBER?.trim() || undefined,
   maxCallDurationMs: optionalEnvNumber(
     "MAX_CALL_DURATION_MS",
     (raw) => Number.parseInt(raw, 10),
