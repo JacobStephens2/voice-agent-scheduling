@@ -114,11 +114,11 @@ On a duplicate-ID `409`, retrieve and compare the intended event rather than bli
 
 ## Reuse from the existing voice-agent repository
 
-Source examined at local HEAD `691cc0f7e9bb2ccab1bf21e1acdb3d9373b2eb15`; deployment health was not tested.
+Source examined at local HEAD `691cc0f7e9bb2ccab1bf21e1acdb3d9373b2eb15` of the private, archived `voice-agent` repository; deployment health was not tested. File references below are to that commit.
 
-- The setup script already describes Telnyx FQDN routing, LiveKit trunks, and dispatch to `voice-agent-telephone`. Reuse that setup knowledge and relevant service patterns. [Setup source](https://github.com/JacobStephens2/voice-agent/blob/691cc0f7e9bb2ccab1bf21e1acdb3d9373b2eb15/ops/setup-agent-host.sh#L258)
-- Its admission path is designed for an owner callback handshake. The scheduling agent needs its own caller-admission policy. [Telephone admission](https://github.com/JacobStephens2/voice-agent/blob/691cc0f7e9bb2ccab1bf21e1acdb3d9373b2eb15/apps/worker/src/telephone-agent.ts#L295), [callback rules](https://github.com/JacobStephens2/voice-agent/blob/691cc0f7e9bb2ccab1bf21e1acdb3d9373b2eb15/packages/runtime/src/callback-handshake.ts#L705)
-- The worker disables independent model replies and uses `openai/gpt-5.4-mini` with a 16-token budget for a narrow turn interpreter. It is not an existing general speech-to-speech function-calling scheduler. Build a small new conversation path. [Voice worker](https://github.com/JacobStephens2/voice-agent/blob/691cc0f7e9bb2ccab1bf21e1acdb3d9373b2eb15/apps/worker/src/livekit-telephone-session.ts#L766)
+- The setup script already describes Telnyx FQDN routing, LiveKit trunks, and dispatch to `voice-agent-telephone`. Reuse that setup knowledge and relevant service patterns. (`ops/setup-agent-host.sh:258`)
+- Its admission path is designed for an owner callback handshake. The scheduling agent needs its own caller-admission policy. (`apps/worker/src/telephone-agent.ts:295`, `packages/runtime/src/callback-handshake.ts:705`)
+- The worker disables independent model replies and uses `openai/gpt-5.4-mini` with a 16-token budget for a narrow turn interpreter. It is not an existing general speech-to-speech function-calling scheduler. Build a small new conversation path. (`apps/worker/src/livekit-telephone-session.ts:766`)
 
 LiveKit's xAI plugin documentation currently lists Think Fast 1.0 as its default even though xAI recommends 2.0. Explicitly configure the model and inspect the installed plugin's support before claiming reuse is complete. [Plugin parameters](https://docs.livekit.io/agents/models/realtime/plugins/spacexai/)
 
