@@ -14,6 +14,7 @@ import { createOAuthRouter } from "./calendar/oauth-routes.js";
 import { productionReadiness, type CallerAdmissionMode } from "./admission-policy.js";
 import { loadSelection } from "./calendar/selection.js";
 import { runRetentionCleanup } from "./maintenance.js";
+import { renderLandingPage } from "./landing-page.js";
 import type { AvailabilityTool, BookingTool, ConnectWebSocket } from "./session.js";
 
 export interface ServerConfig {
@@ -40,6 +41,7 @@ export interface ServerConfig {
   readonly allowCalendarWrites?: boolean;
   readonly admissionMode?: CallerAdmissionMode;
   readonly pauseAdmissions?: boolean;
+  readonly publicPhoneNumber?: string;
 }
 
 export interface SchedulingServer {
@@ -164,6 +166,22 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         .catch(() => {
           json(res, 500, { error: "internal_server_error" });
         });
+      return;
+    }
+
+    if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/") {
+      const body = renderLandingPage({
+        phoneNumber: config.publicPhoneNumber,
+        acceptingCalls:
+          config.admissionMode?.kind === "public" && !lifecycleManager.admissionsStatus().paused,
+      });
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-cache",
+        "content-security-policy":
+          "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      });
+      res.end(req.method === "HEAD" ? undefined : body);
       return;
     }
 

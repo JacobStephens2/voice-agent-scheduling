@@ -1,5 +1,7 @@
 # Voice agent scheduling
 
+**Try it:** call the number on [scheduler.stephens.page](https://scheduler.stephens.page).
+
 A telephone scheduling agent that describes Jacob's availability and creates 30-minute phone appointments on his Google Calendar. Jacob calls the confirmed callback number at appointment time.
 
 Callers dial a dedicated Telnyx number. The agent identifies itself as Jacob's scheduling assistant, offers real Google Calendar availability, reads the appointment details back, and creates one calendar event only after the caller explicitly confirms. No audio or transcripts are retained.
@@ -38,6 +40,7 @@ The service listens on `127.0.0.1:3531` behind the `https://scheduler.stephens.p
 
 | Endpoint | Purpose |
 | --- | --- |
+| `GET /` | Public landing page; shows `SCHEDULING_PUBLIC_PHONE_NUMBER` only while public admission is on and admissions are not paused |
 | `POST /xai/sip-webhook` | Signed incoming-call webhook from xAI |
 | `GET /health` | Status, active call count, admission pause, public/writes/selection flags |
 | `GET /evidence` | Structured per-call evidence with masked caller numbers (`EVIDENCE_TOKEN` bearer) |
@@ -69,6 +72,7 @@ Configuration is environment-driven; [`.env.example`](.env.example) lists every 
 | `src/session.ts` | Realtime voice session, instructions, and tool dispatch |
 | `src/budget.ts` | Call duration limits and the monthly usage ledger |
 | `src/calendar/` | Google OAuth, free/busy availability, booking policy, proposals, appointment ledger, callback-number limit |
+| `src/landing-page.ts` | Public landing page at `/` |
 | `src/evidence.ts` | Structured call evidence |
 | `src/acceptance.ts` | Bounded production-acceptance report |
 | `src/maintenance.ts` | 30-day operational retention, booking compact, restore, and recovery gate |
@@ -93,3 +97,7 @@ The scheduler is deliberately isolated from Jacob's existing voice agent, with i
 - [Provider research and existing voice-agent findings](docs/research/telephone-calendar-scheduling.md)
 - [Domain glossary](CONTEXT.md)
 - [Architecture decision: isolate the scheduling service](docs/adr/0001-isolate-the-scheduling-service.md)
+
+## License
+
+[MIT](LICENSE). The agent skills vendored under `.agents/skills/` come from [mattpocock/skills](https://github.com/mattpocock/skills) and keep their own [MIT license](.agents/skills/LICENSE).
