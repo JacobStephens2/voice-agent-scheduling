@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -82,6 +82,30 @@ describe("appointment ledger", () => {
     ledger.record(row("op-1", "failed"));
     ledger.recordPending(fields);
     expect(ledger.latestForOperation("op-1")?.status).toBe("pending");
+  });
+
+  it("durably records pending after a failed append is repaired", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "issue-29-pending-append-"));
+    try {
+      const ledger = createAppointmentLedger({ dataDir });
+      const fields = {
+        operationId: "retry-operation",
+        eventId: "0123456789abcdef0123456789abcdef",
+        callId: "retry-call",
+        proposalId: "retry-proposal",
+        calendarId: "primary",
+        startUtc: "2026-11-02T15:00:00.000Z",
+      };
+      const recordsPath = join(dataDir, "bookings.jsonl");
+      mkdirSync(recordsPath);
+      expect(() => ledger.recordPending(fields)).toThrow();
+      rmSync(recordsPath, { recursive: true });
+      ledger.recordPending(fields);
+      const reopened = createAppointmentLedger({ dataDir });
+      expect(reopened.latestForOperation(fields.operationId)?.status).toBe("pending");
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   it("lists other operations that may hold an appointment for a number hash", () => {

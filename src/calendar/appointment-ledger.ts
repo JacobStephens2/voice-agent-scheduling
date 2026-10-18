@@ -211,10 +211,10 @@ export function createAppointmentLedger(options: { readonly dataDir?: string } =
     findLatest(records, (record) => record.operationId === operationId);
 
   const append = (record: BookingRecord): void => {
-    records.push(record);
     if (file) {
       appendJsonl(file, record, 0o600);
     }
+    records.push(record);
   };
 
   return {
