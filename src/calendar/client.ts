@@ -301,23 +301,23 @@ function asStoredEvent(payload: { [key: string]: unknown }): StoredCalendarEvent
   };
 }
 
-export type StoredEventKind =
-  | "matching"
-  | "mismatched"
-  | "cancelled"
-  | "missing"
-  | "unreachable";
-
 /**
- * One classification of a stored calendar event. `event` is set only when
- * an event was read: matching, mismatched, or cancelled. Missing and
+ * One classification of a stored calendar event. An event is present only
+ * when one was read: matching, mismatched, or cancelled. Missing and
  * unreachable carry no event. Callers branch on `kind`; the approved-shape
  * predicate stays here, next to the insert.
  */
-export interface StoredEventReading {
-  readonly kind: StoredEventKind;
-  readonly event?: StoredCalendarEvent;
-}
+export type StoredEventReading =
+  | {
+      readonly kind: "matching" | "mismatched" | "cancelled";
+      readonly event: StoredCalendarEvent;
+    }
+  | {
+      readonly kind: "missing" | "unreachable";
+      readonly event?: undefined;
+    };
+
+export type StoredEventKind = StoredEventReading["kind"];
 
 function requireEventId(eventId: string): void {
   if (!eventId) {

@@ -431,34 +431,22 @@ async function confirm(
       calendarId,
       generated.eventId,
     );
-    if (own.kind === "matching") {
-      const booked = ctx.ledger.record({ ...identities, status: "booked" });
-      return bookedResult(booked, proposal.callbackNumber);
+    // Missing is the only kind this path does not share with a commit:
+    // unavailable is how a proven-missing event is hidden. A cancelled event
+    // is stored, so it stays inconclusive rather than unavailable.
+    if (own.kind === "missing") {
+      ctx.ledger.record({ ...identities, status: "unavailable" });
+      ctx.proposals.drop(execOptions.callId);
+      return {
+        status: "unavailable",
+        operationId: generated.operationId,
+        eventId: generated.eventId,
+        eventExists: false,
+        message:
+          "That time is no longer available. Offer fresh alternatives from check_availability and require confirmation of any replacement. Do not claim the appointment is booked.",
+      };
     }
-    if (own.kind === "unreachable") {
-      return recordInconclusiveOutcome(ctx.ledger, identities, INCONCLUSIVE_MESSAGE);
-    }
-    // A stored event that fails the approved shape is still stored. Recording
-    // unavailable would hide it the same way a proven-missing event is hidden.
-    if (own.kind === "mismatched") {
-      return recordInconclusiveOutcome(ctx.ledger, identities, MISMATCHED_SHAPE_MESSAGE, "mismatched");
-    }
-    // A cancelled event is stored, so it is not the unavailable outcome used
-    // to hide a proven-missing event, and it is not booked.
-    if (own.kind === "cancelled") {
-      return recordInconclusiveOutcome(ctx.ledger, identities, INCONCLUSIVE_MESSAGE);
-    }
-    // The remaining kind is missing: nothing is stored under this identity.
-    ctx.ledger.record({ ...identities, status: "unavailable" });
-    ctx.proposals.drop(execOptions.callId);
-    return {
-      status: "unavailable",
-      operationId: generated.operationId,
-      eventId: generated.eventId,
-      eventExists: false,
-      message:
-        "That time is no longer available. Offer fresh alternatives from check_availability and require confirmation of any replacement. Do not claim the appointment is booked.",
-    };
+    return projectCommittedEvent(ctx.ledger, identities, proposal.callbackNumber, own.kind);
   }
 
   // Evaluate the limit again within the committing operation, after the
@@ -607,6 +595,30 @@ function failUnlessUnresolved(
 }
 
 /**
+ * Append the reconciled status for one durable operation, copying the
+ * stored identity and leaving `storedShape` off unless this read was a
+ * shape miss.
+ */
+function recordReconciled(
+  ledger: AppointmentLedger,
+  latest: BookingRecord,
+  status: "booked" | "inconclusive",
+  storedShape?: "mismatched",
+): void {
+  ledger.record({
+    operationId: latest.operationId,
+    eventId: latest.eventId,
+    callId: latest.callId,
+    proposalId: latest.proposalId,
+    calendarId: latest.calendarId,
+    startUtc: latest.startUtc,
+    status,
+    numberHash: latest.numberHash,
+    ...(storedShape === undefined ? {} : { storedShape }),
+  });
+}
+
+/**
  * Project a commit's kind onto confirmation. Matching is the only kind
  * recorded as booked. A shape miss keeps the mismatched-shape mark. Every
  * other kind is an interrupted write, including a cancelled event, and
@@ -713,16 +725,7 @@ async function reconcileUnresolved(ctx: {
       latest.eventId,
     );
     if (own.kind === "matching") {
-      ctx.ledger.record({
-        operationId: latest.operationId,
-        eventId: latest.eventId,
-        callId: latest.callId,
-        proposalId: latest.proposalId,
-        calendarId: latest.calendarId,
-        startUtc: latest.startUtc,
-        status: "booked",
-        numberHash: latest.numberHash,
-      });
+      recordReconciled(ctx.ledger, latest, "booked");
       outcomes.push({ ...identity, status: "booked", eventExists: true });
       continue;
     }
@@ -735,32 +738,18 @@ async function reconcileUnresolved(ctx: {
       // inconclusive without that mark. The event stays stored, so a later
       // limit read can see the cancellation and not block.
       if (latest.status === "pending" || latest.storedShape === "mismatched") {
-        ctx.ledger.record({
-          operationId: latest.operationId,
-          eventId: latest.eventId,
-          callId: latest.callId,
-          proposalId: latest.proposalId,
-          calendarId: latest.calendarId,
-          startUtc: latest.startUtc,
-          status: "inconclusive",
-          numberHash: latest.numberHash,
-        });
+        recordReconciled(ctx.ledger, latest, "inconclusive");
       }
       outcomes.push({ ...identity, status: "inconclusive", eventExists: true });
       continue;
     }
     if (latest.status === "pending") {
-      ctx.ledger.record({
-        operationId: latest.operationId,
-        eventId: latest.eventId,
-        callId: latest.callId,
-        proposalId: latest.proposalId,
-        calendarId: latest.calendarId,
-        startUtc: latest.startUtc,
-        status: "inconclusive",
-        numberHash: latest.numberHash,
-        ...(own.kind === "mismatched" ? { storedShape: "mismatched" as const } : {}),
-      });
+      recordReconciled(
+        ctx.ledger,
+        latest,
+        "inconclusive",
+        own.kind === "mismatched" ? "mismatched" : undefined,
+      );
     }
     outcomes.push({
       ...identity,

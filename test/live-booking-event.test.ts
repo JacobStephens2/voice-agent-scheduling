@@ -58,12 +58,10 @@ describe.skipIf(!live || !calendarId || !credentials)(
           startTime: slot.startTime,
         });
         expect(reading.kind).toBe("matching");
-        const stored = reading.event;
-        expect(stored).toBeDefined();
-        if (!stored) {
+        if (reading.kind !== "matching") {
           return;
         }
-        expect(appointmentNotificationProof(stored)).toMatchObject({
+        expect(appointmentNotificationProof(reading.event)).toMatchObject({
           hasAttendees: false,
           hasHangoutLink: false,
           hasConferenceData: false,
