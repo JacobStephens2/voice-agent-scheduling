@@ -79,10 +79,15 @@ function newToken(): string {
 }
 
 function tokensMatch(expected: string, presented: string | undefined): boolean {
-  if (!presented || presented.length !== expected.length) {
+  if (!presented) {
     return false;
   }
-  return timingSafeEqual(Buffer.from(presented), Buffer.from(expected));
+  const presentedBuf = Buffer.from(presented);
+  const expectedBuf = Buffer.from(expected);
+  return (
+    presentedBuf.length === expectedBuf.length &&
+    timingSafeEqual(presentedBuf, expectedBuf)
+  );
 }
 
 function parseCookies(header: string | undefined): Record<string, string> {
