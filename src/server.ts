@@ -63,10 +63,15 @@ function evidenceAuthorized(req: http.IncomingMessage, token: string): boolean {
   const presented = header?.startsWith("Bearer ")
     ? header.slice("Bearer ".length)
     : undefined;
-  if (!presented || presented.length !== token.length) {
+  if (!presented) {
     return false;
   }
-  return timingSafeEqual(Buffer.from(presented), Buffer.from(token));
+  const presentedBuf = Buffer.from(presented);
+  const tokenBuf = Buffer.from(token);
+  return (
+    presentedBuf.length === tokenBuf.length &&
+    timingSafeEqual(presentedBuf, tokenBuf)
+  );
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {
@@ -146,7 +151,15 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
     : undefined;
 
   const server = http.createServer((req, res) => {
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    // An unparsable Host, such as ::1, makes this constructor throw. Catch it
+    // here so the exception does not leave the listener before routing.
+    let url: URL;
+    try {
+      url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    } catch {
+      json(res, 400, { error: "bad_request" });
+      return;
+    }
 
     if (url.pathname.startsWith("/calendar/auth/")) {
       if (!oauthRouter) {

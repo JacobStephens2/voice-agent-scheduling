@@ -19,7 +19,7 @@ const APPOINTMENT_HOLDING_STATUSES: readonly BookingRecordStatus[] = [
   ...UNRESOLVED_BOOKING_STATUSES,
 ];
 
-function isUnresolvedBookingStatus(status: BookingRecordStatus): boolean {
+export function isUnresolvedBookingStatus(status: BookingRecordStatus): boolean {
   return UNRESOLVED_BOOKING_STATUSES.includes(status);
 }
 
@@ -38,6 +38,13 @@ export interface BookingRecord {
    * no hash; the raw number is never stored. Absent hashes never match.
    */
   readonly numberHash?: string;
+  /**
+   * Set when a stored event did not match the approved shape. The row stays
+   * inconclusive either way; this is how a later retry can tell that outcome
+   * from an inconclusive row whose event was never established. Absent on
+   * older rows.
+   */
+  readonly storedShape?: "mismatched";
 }
 
 export type BookingRecordFields = Omit<BookingRecord, "recordedAt" | "status"> & {
@@ -57,6 +64,7 @@ export function bookingRecord(
     status: fields.status,
     recordedAt: fields.recordedAt ?? new Date().toISOString(),
     ...(fields.numberHash === undefined ? {} : { numberHash: fields.numberHash }),
+    ...(fields.storedShape === undefined ? {} : { storedShape: fields.storedShape }),
   };
 }
 

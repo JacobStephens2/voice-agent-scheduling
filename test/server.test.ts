@@ -1,3 +1,4 @@
+import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createSchedulingServer, type SchedulingServer } from "../src/server.js";
 import { FakeRealtimeSocket } from "./fake-socket.js";
@@ -6,6 +7,41 @@ import {
   incomingCallPayload,
   signedHeaders,
 } from "./helpers.js";
+
+function requestWithHost(
+  port: number,
+  host: string,
+  path: string,
+): Promise<{ statusCode: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const request = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        path,
+        method: "GET",
+        headers: { host, connection: "close" },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+        response.on("end", () => {
+          resolve({
+            statusCode: response.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      },
+    );
+    request.setTimeout(2000, () => {
+      request.destroy(new Error("timed out waiting for the scheduling server"));
+    });
+    request.on("error", reject);
+    request.end();
+  });
+}
 
 const PORT = 3598;
 const EVIDENCE_TOKEN = "test-evidence-token";
@@ -42,6 +78,17 @@ describe("scheduling HTTP boundary", () => {
     expect(response.status).toBe(401);
   });
 
+  it("rejects an evidence token whose UTF-8 byte length differs from the configured token", async () => {
+    // "é" is one UTF-16 code unit and two UTF-8 bytes, so this bearer value
+    // matches the configured token's string length and not its byte length.
+    const presented = `é${"x".repeat(EVIDENCE_TOKEN.length - 1)}`;
+    const response = await fetch(`http://127.0.0.1:${PORT}/evidence`, {
+      headers: { authorization: `Bearer ${presented}` },
+    });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "unauthorized" });
+  });
+
   it("serves GET /evidence with the evidence token", async () => {
     const response = await fetch(`http://127.0.0.1:${PORT}/evidence`, {
       headers: { authorization: `Bearer ${EVIDENCE_TOKEN}` },
@@ -62,6 +109,15 @@ describe("scheduling HTTP boundary", () => {
   it("disables operator setup pages without an operator token", async () => {
     const response = await fetch(`http://127.0.0.1:${PORT}/calendar/auth/start`);
     expect(response.status).toBe(404);
+  });
+
+  it("responds 400 when the request URL cannot be built", async () => {
+    const rejected = await requestWithHost(PORT, "::1", "/health");
+    expect(rejected.statusCode).toBe(400);
+    expect(JSON.parse(rejected.body)).toEqual({ error: "bad_request" });
+
+    const health = await fetch(`http://127.0.0.1:${PORT}/health`);
+    expect(health.status).toBe(200);
   });
 
   it("admits a signed POST /xai/sip-webhook", async () => {
