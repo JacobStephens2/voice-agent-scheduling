@@ -69,6 +69,20 @@ describe("OAuth consent pages", () => {
     expect(google.statusCode).toBe(401);
   });
 
+  it("rejects an operator token whose UTF-8 byte length differs from the configured token", async () => {
+    // "é" is one UTF-16 code unit and two UTF-8 bytes, so this query value
+    // matches the configured token's string length and not its byte length.
+    const presented = `é${"x".repeat(OPERATOR_TOKEN.length - 1)}`;
+    const { router } = createRouter();
+    const response = await router.handle(
+      "GET",
+      new URL(`/calendar/auth/start?token=${encodeURIComponent(presented)}`, BASE_URL),
+      {},
+    );
+    expect(response.statusCode).toBe(401);
+    expect(response.headers["set-cookie"]).toBeUndefined();
+  });
+
   it("establishes a short-lived session, then shows the setup page", async () => {
     const { router } = createRouter();
     const cookie = await establishSession(router);
