@@ -26,6 +26,11 @@ import {
   type StoredEventKind,
 } from "./client.js";
 import {
+  projectStoredKind,
+  settleRecovery,
+  type LedgerCommit,
+} from "./stored-event-projection.js";
+import {
   appointmentEndMs,
   computeAvailableStarts,
   SCHEDULING_TIMEZONE,
@@ -539,22 +544,34 @@ function inconclusiveResult(
 }
 
 /**
- * The durable row stays inconclusive and keeps blocking this callback number.
- * storedShape records a stored event that failed the approved shape so a
- * later retry can repeat that outcome without a new row.
+ * Append the projection's commit from the operation identity alone.
+ * A commit that omits `storedShape` does not copy a previous mark forward.
  */
-function recordInconclusiveOutcome(
+function recordCommit(
   ledger: AppointmentLedger,
-  identities: OperationIdentities,
-  message: string,
-  storedShape?: "mismatched",
-): ConfirmResult {
-  ledger.record({
-    ...identities,
-    status: "inconclusive",
-    ...(storedShape === undefined ? {} : { storedShape }),
+  identity: Pick<
+    BookingRecord,
+    | "operationId"
+    | "eventId"
+    | "callId"
+    | "proposalId"
+    | "calendarId"
+    | "startUtc"
+    | "numberHash"
+  >,
+  commit: LedgerCommit,
+): BookingRecord {
+  return ledger.record({
+    operationId: identity.operationId,
+    eventId: identity.eventId,
+    callId: identity.callId,
+    proposalId: identity.proposalId,
+    calendarId: identity.calendarId,
+    startUtc: identity.startUtc,
+    status: commit.status,
+    ...(identity.numberHash === undefined ? {} : { numberHash: identity.numberHash }),
+    ...(commit.storedShape === undefined ? {} : { storedShape: commit.storedShape }),
   });
-  return inconclusiveResult(identities, message);
 }
 
 /**
@@ -595,34 +612,11 @@ function failUnlessUnresolved(
 }
 
 /**
- * Append the reconciled status for one durable operation, copying the
- * stored identity and leaving `storedShape` off unless this read was a
- * shape miss.
- */
-function recordReconciled(
-  ledger: AppointmentLedger,
-  latest: BookingRecord,
-  status: "booked" | "inconclusive",
-  storedShape?: "mismatched",
-): void {
-  ledger.record({
-    operationId: latest.operationId,
-    eventId: latest.eventId,
-    callId: latest.callId,
-    proposalId: latest.proposalId,
-    calendarId: latest.calendarId,
-    startUtc: latest.startUtc,
-    status,
-    numberHash: latest.numberHash,
-    ...(storedShape === undefined ? {} : { storedShape }),
-  });
-}
-
-/**
- * Project a commit's kind onto confirmation. Matching is the only kind
- * recorded as booked. A shape miss keeps the mismatched-shape mark. Every
- * other kind is an interrupted write, including a cancelled event, and
- * confirmation reports the event as not present.
+ * Append the projection's commit for one confirmation. A shape mark
+ * selects the approved-shape sentence, a booked projection selects the
+ * Jacob-will-call sentence, and every other commit selects the
+ * interrupted-write sentence. The event-exists flag is `announce`.
+ * Confirmation always appends and does not settle recovery.
  */
 function projectCommittedEvent(
   ledger: AppointmentLedger,
@@ -630,21 +624,22 @@ function projectCommittedEvent(
   callbackNumber: string,
   kind: StoredEventKind,
 ): ConfirmResult {
-  if (kind === "matching") {
-    const booked = ledger.record({ ...identities, status: "booked" });
-    return bookedResult(booked, callbackNumber);
+  const projection = projectStoredKind(kind);
+  const recorded = recordCommit(ledger, identities, projection.commit);
+  if (projection.commit.storedShape === "mismatched") {
+    return inconclusiveResult(identities, MISMATCHED_SHAPE_MESSAGE);
   }
-  if (kind === "mismatched") {
-    return recordInconclusiveOutcome(ledger, identities, MISMATCHED_SHAPE_MESSAGE, "mismatched");
+  if (projection.announce) {
+    return bookedResult(recorded, callbackNumber);
   }
-  return recordInconclusiveOutcome(ledger, identities, INCONCLUSIVE_MESSAGE);
+  return inconclusiveResult(identities, INCONCLUSIVE_MESSAGE);
 }
 
 /**
  * Whether another operation already holds an upcoming appointment for this
- * callback number. The upcoming window uses the ledger start and the clock.
- * The stored event's kind decides the rest: matching or mismatched blocks,
- * missing or cancelled does not, and an unreadable calendar is unknown.
+ * callback number. The upcoming window, the excluded operation, and an
+ * unparseable start stay here. The stored event's hold comes from the
+ * projection: held blocks, not held does not, and unknown stops the scan.
  */
 async function evaluateCallbackLimit(options: {
   readonly fetchFn: typeof fetch;
@@ -677,10 +672,11 @@ async function evaluateCallbackLimit(options: {
       record.calendarId,
       record.eventId,
     );
-    if (reading.kind === "missing" || reading.kind === "cancelled") {
+    const hold = projectStoredKind(reading.kind).callbackHold;
+    if (hold === "not_held") {
       continue;
     }
-    if (reading.kind === "unreachable") {
+    if (hold === "unknown") {
       return "unknown";
     }
     return "blocked";
@@ -691,9 +687,9 @@ async function evaluateCallbackLimit(options: {
 /**
  * Reconcile durable pending/inconclusive operations after a restart, using
  * only the stored operation/event identities. No transcript or proposal is
- * needed, and nothing is re-inserted. A matching event becomes booked. A
- * cancelled event is stored but not booked. An absent event stays
- * inconclusive. An unreachable Calendar appends nothing and stays unresolved.
+ * needed, and nothing is re-inserted. The projection says what the stored
+ * event means; recovery settlement says whether to append. The event-exists
+ * flag is `eventStored`, not confirmation's announce flag.
  */
 async function reconcileUnresolved(ctx: {
   ledger: AppointmentLedger;
@@ -724,37 +720,18 @@ async function reconcileUnresolved(ctx: {
       latest.calendarId,
       latest.eventId,
     );
-    if (own.kind === "matching") {
-      recordReconciled(ctx.ledger, latest, "booked");
-      outcomes.push({ ...identity, status: "booked", eventExists: true });
-      continue;
-    }
-    if (own.kind === "unreachable") {
-      outcomes.push({ ...identity, status: "unresolved", eventExists: false });
-      continue;
-    }
-    if (own.kind === "cancelled") {
-      // A pending row, or one still marked as a shape miss, becomes
-      // inconclusive without that mark. The event stays stored, so a later
-      // limit read can see the cancellation and not block.
-      if (latest.status === "pending" || latest.storedShape === "mismatched") {
-        recordReconciled(ctx.ledger, latest, "inconclusive");
-      }
-      outcomes.push({ ...identity, status: "inconclusive", eventExists: true });
-      continue;
-    }
-    if (latest.status === "pending") {
-      recordReconciled(
-        ctx.ledger,
-        latest,
-        "inconclusive",
-        own.kind === "mismatched" ? "mismatched" : undefined,
-      );
+    const projection = projectStoredKind(own.kind);
+    const settlement = settleRecovery(projection, {
+      status: latest.status,
+      ...(latest.storedShape === undefined ? {} : { storedShape: latest.storedShape }),
+    });
+    if (settlement.append) {
+      recordCommit(ctx.ledger, latest, settlement.append);
     }
     outcomes.push({
       ...identity,
-      status: "inconclusive",
-      eventExists: own.kind === "mismatched",
+      status: settlement.status,
+      eventExists: projection.eventStored,
     });
   }
   return outcomes;

@@ -20,7 +20,9 @@ const APPOINTMENT_HOLDING_STATUSES: readonly BookingRecordStatus[] = [
   ...UNRESOLVED_BOOKING_STATUSES,
 ];
 
-export function isUnresolvedBookingStatus(status: BookingRecordStatus): boolean {
+export function isUnresolvedBookingStatus(
+  status: BookingRecordStatus,
+): status is "pending" | "inconclusive" {
   return UNRESOLVED_BOOKING_STATUSES.includes(status);
 }
 
@@ -105,7 +107,7 @@ export interface AppointmentLedger {
   /** The latest record for one operation. */
   latestForOperation(operationId: string): BookingRecord | undefined;
   /** Latest record of every operation that never settled its Calendar write. */
-  unresolvedOperations(): BookingRecord[];
+  unresolvedOperations(): Array<BookingRecord & { readonly status: "pending" | "inconclusive" }>;
   /**
    * Latest record of every operation that may hold an appointment for a
    * callback-number hash, excluding the committing operation's own records.
@@ -260,7 +262,10 @@ export function createAppointmentLedger(options: { readonly dataDir?: string } =
     latestForOperation,
 
     unresolvedOperations() {
-      return latestByOperation(records).filter((record) => isUnresolvedBookingStatus(record.status));
+      return latestByOperation(records).filter(
+        (record): record is BookingRecord & { readonly status: "pending" | "inconclusive" } =>
+          isUnresolvedBookingStatus(record.status),
+      );
     },
 
     operationsHoldingAppointment(numberHash, excludeOperationId) {
