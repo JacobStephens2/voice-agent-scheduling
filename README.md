@@ -75,7 +75,7 @@ Configuration is environment-driven; [`.env.example`](.env.example) lists every 
 | `src/landing-page.ts` | Public landing page at `/` |
 | `src/evidence.ts` | Structured call evidence |
 | `src/acceptance.ts` | Bounded production-acceptance report |
-| `src/maintenance.ts` | 30-day operational retention, booking compact, restore, and recovery gate |
+| `src/maintenance.ts` | 30-day operational retention, appointment ledger compaction, restore, and recovery gate |
 | `ops/` | systemd unit, Apache virtual host, server setup, release deploy, and state backup/restore |
 | `test/` | Vitest suites covering admission, availability, booking, reconciliation, call bounds, and maintenance |
 

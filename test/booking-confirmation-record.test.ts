@@ -113,6 +113,7 @@ function bookingAt(dataDir: string) {
   let created = 0;
   const calendar = createFakeCalendar();
   let tokenMode: "ok" | "throw" = "ok";
+  const ledger = createAppointmentLedger({ dataDir });
   const booking = createAppointmentBooking({
     fetchFn: calendar.fetchFn,
     credentials: null,
@@ -127,6 +128,7 @@ function bookingAt(dataDir: string) {
     selection: SELECTION,
     now: () => REFERENCE,
     dataDir,
+    ledger,
     env: {},
     allowWrites: true,
     createIds: () => {
@@ -137,6 +139,7 @@ function bookingAt(dataDir: string) {
   return {
     calendar,
     booking,
+    ledger,
     setTokenMode(mode: "ok" | "throw") {
       tokenMode = mode;
     },
@@ -244,7 +247,7 @@ describe("booking confirmation records", () => {
 
   it("leaves the inconclusive row in place when a retry cannot refresh the access token", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-token-"));
-    const { calendar, booking, setTokenMode } = bookingAt(dataDir);
+    const { calendar, booking, ledger, setTokenMode } = bookingAt(dataDir);
     calendar.state.getMode = "error";
     const callId = "call-token";
 
@@ -255,12 +258,13 @@ describe("booking confirmation records", () => {
     expect(deletes(calendar.requests)).toHaveLength(0);
 
     calendar.state.getMode = "match";
-    const rowBeforeRetry = latestRow(dataDir, "op-1");
+    const rowBeforeRetry = ledger.latestForOperation("op-1");
     setTokenMode("throw");
     const retry = await confirm(booking, callId, proposalId);
     expect(retry.status).toBe("inconclusive");
     expect(retry.message).toContain("Do not tell the caller the appointment is booked");
-    expect(latestRow(dataDir, "op-1")).toEqual(rowBeforeRetry);
+    // The same record object: the retry appended nothing, not even an identical row.
+    expect(ledger.latestForOperation("op-1")).toBe(rowBeforeRetry);
     expect(latestRow(dataDir, "op-1")?.status).toBe("inconclusive");
     expect(calendar.stored.has("ev-1")).toBe(true);
 
@@ -291,7 +295,7 @@ describe("booking confirmation records", () => {
 
   it("leaves the inconclusive row in place when a retry cannot read free/busy", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-freebusy-"));
-    const { calendar, booking } = bookingAt(dataDir);
+    const { calendar, booking, ledger } = bookingAt(dataDir);
     calendar.state.getMode = "error";
     const callId = "call-freebusy";
 
@@ -302,10 +306,10 @@ describe("booking confirmation records", () => {
 
     calendar.state.getMode = "match";
     calendar.state.freeBusyMode = "throw";
-    const rowBeforeRetry = latestRow(dataDir, "op-1");
+    const rowBeforeRetry = ledger.latestForOperation("op-1");
     const retry = await confirm(booking, callId, proposalId);
     expect(retry.status).toBe("inconclusive");
-    expect(latestRow(dataDir, "op-1")).toEqual(rowBeforeRetry);
+    expect(ledger.latestForOperation("op-1")).toBe(rowBeforeRetry);
     expect(latestRow(dataDir, "op-1")?.status).toBe("inconclusive");
     expect(deletes(calendar.requests)).toHaveLength(0);
 
@@ -329,7 +333,7 @@ describe("booking confirmation records", () => {
 
   it("keeps the mismatched-shape message when a retry cannot refresh the access token", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-shape-token-"));
-    const { calendar, booking, setTokenMode } = bookingAt(dataDir);
+    const { calendar, booking, ledger, setTokenMode } = bookingAt(dataDir);
     calendar.state.getMode = "mismatch";
     const callId = "call-shape-token";
 
@@ -338,10 +342,11 @@ describe("booking confirmation records", () => {
     expect(first.message).toContain("does not match the approved shape");
     expect(first.message).not.toContain("interrupted");
 
-    const rowBeforeRetry = latestRow(dataDir, "op-1");
+    const rowBeforeRetry = ledger.latestForOperation("op-1");
+    expect(rowBeforeRetry?.storedShape).toBe("mismatched");
     setTokenMode("throw");
     const retry = await confirm(booking, callId, proposalId);
-    expect(latestRow(dataDir, "op-1")).toEqual(rowBeforeRetry);
+    expect(ledger.latestForOperation("op-1")).toBe(rowBeforeRetry);
     expect(retry.status).toBe("inconclusive");
     expect(retry.message).toContain("does not match the approved shape");
     expect(retry.message).not.toContain("interrupted");

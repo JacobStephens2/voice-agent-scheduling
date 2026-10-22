@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
+import { createAppointmentLedger, type AppointmentLedger } from "../src/calendar/appointment-ledger.js";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
 import { TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
 
@@ -101,6 +101,7 @@ function bookingWith(
   calendar: ReturnType<typeof controllableCalendar>,
   dataDir: string,
   createIds?: () => { operationId: string; eventId: string },
+  ledger?: AppointmentLedger,
 ) {
   return createAppointmentBooking({
     fetchFn: calendar.fetchFn,
@@ -108,6 +109,7 @@ function bookingWith(
     selection: SELECTION,
     now: () => MONDAY_14H,
     dataDir,
+    ledger,
     createIds: createIds ?? (() => ({ operationId: TEST_OPERATION_ID, eventId: TEST_EVENT_ID })),
     allowWrites: true,
   });
@@ -372,13 +374,20 @@ describe("confirmed booking reconciliation", () => {
     });
     const proposalId = await propose(beforeCrash);
     expect((await confirm(beforeCrash, proposalId)).status).toBe("inconclusive");
-    const recordBeforeRestart = latestRecord(dataDir, "op-1");
 
     const attemptsBeforeRestart = calendar.posts.length;
-    const afterRestart = bookingWith(calendar, dataDir, () => {
-      created += 1;
-      return { operationId: `op-${created}`, eventId: `ev-${created}` };
-    });
+    const restartedLedger = createAppointmentLedger({ dataDir });
+    const recordBeforeRecovery = restartedLedger.latestForOperation("op-1");
+    expect(recordBeforeRecovery?.status).toBe("inconclusive");
+    const afterRestart = bookingWith(
+      calendar,
+      dataDir,
+      () => {
+        created += 1;
+        return { operationId: `op-${created}`, eventId: `ev-${created}` };
+      },
+      restartedLedger,
+    );
     const outcomes = await afterRestart.reconcileUnresolvedOperations();
 
     expect(outcomes).toHaveLength(1);
@@ -391,8 +400,9 @@ describe("confirmed booking reconciliation", () => {
     expect(created).toBe(1);
     expect(calendar.posts).toHaveLength(attemptsBeforeRestart);
     expect(calendar.landedCount()).toBe(0);
-    // Already inconclusive before the restart, so recovery records nothing new.
-    expect(latestRecord(dataDir, "op-1")).toEqual(recordBeforeRestart);
+    // Already inconclusive before the restart, so recovery records nothing
+    // new: the same record object, not even an identical row appended.
+    expect(restartedLedger.latestForOperation("op-1")).toBe(recordBeforeRecovery);
   });
 
   it("reports unresolved when Calendar cannot be reached during restart recovery", async () => {
@@ -405,14 +415,16 @@ describe("confirmed booking reconciliation", () => {
     const beforeCrash = bookingWith(calendar, dataDir);
     const proposalId = await propose(beforeCrash);
     expect((await confirm(beforeCrash, proposalId)).status).toBe("inconclusive");
-    const recordBefore = latestRecord(dataDir, TEST_OPERATION_ID);
 
-    const afterRestart = bookingWith(calendar, dataDir);
+    const restartedLedger = createAppointmentLedger({ dataDir });
+    const recordBefore = restartedLedger.latestForOperation(TEST_OPERATION_ID);
+    expect(recordBefore?.status).toBe("inconclusive");
+    const afterRestart = bookingWith(calendar, dataDir, undefined, restartedLedger);
     const outcomes = await afterRestart.reconcileUnresolvedOperations();
 
     expect(outcomes).toHaveLength(1);
     expect(outcomes[0]).toMatchObject({ status: "unresolved", eventExists: false });
-    expect(latestRecord(dataDir, TEST_OPERATION_ID)).toEqual(recordBefore);
+    expect(restartedLedger.latestForOperation(TEST_OPERATION_ID)).toBe(recordBefore);
     expect(calendar.posts).toHaveLength(1);
   });
 });

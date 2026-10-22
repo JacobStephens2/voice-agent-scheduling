@@ -2,7 +2,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendJsonl, loadJsonl, rewriteJsonl } from "../jsonl.js";
-import { APPOINTMENT_MINUTES } from "./policy.js";
+import { extractE164, isE164 } from "../phone.js";
+import { appointmentEndMs } from "./policy.js";
 
 export type BookingRecordStatus = "pending" | "booked" | "unavailable" | "failed" | "inconclusive";
 
@@ -68,8 +69,8 @@ export function bookingRecord(
   };
 }
 
-export const BOOKING_RECORDS_FILE = "bookings.jsonl";
-export const CALLBACK_SALT_FILE = "callback-salt";
+const BOOKING_RECORDS_FILE = "bookings.jsonl";
+const CALLBACK_SALT_FILE = "callback-salt";
 
 /** Not a stored salt; hashing with it cannot match existing number hashes. */
 const UNMATCHABLE_CALLBACK_SALT = "restored-state-without-original-salt";
@@ -87,8 +88,11 @@ export interface LedgerCompaction {
  * never interleave with a compaction.
  */
 export interface AppointmentLedger {
-  /** Append an outcome for an operation. */
-  record(record: BookingRecord): void;
+  /**
+   * Append an outcome for an operation and return the stored record. Only
+   * the record's own fields are stored, whatever else the caller passes.
+   */
+  record(fields: BookingRecordFields & { readonly status: BookingRecordStatus }): BookingRecord;
   /**
    * Record that a Calendar insert is about to start under these
    * identities. Writes `pending` unless the operation's latest record is
@@ -109,8 +113,12 @@ export interface AppointmentLedger {
   operationsHoldingAppointment(numberHash: string, excludeOperationId?: string): BookingRecord[];
   /** True when the ledger holds any record at all. */
   hasRecords(): boolean;
-  /** Hash a normalized callback number with the data directory's salt. */
-  hashCallbackNumber(normalizedNumber: string): string;
+  /**
+   * Hash a callback number with the data directory's salt. Equivalent
+   * formats normalize to one E.164 number first, so they hash alike.
+   * Undefined when the value is not a usable phone number.
+   */
+  hashCallbackNumber(callbackNumber: string): string | undefined;
   /**
    * Durable files the ledger needs but cannot find. The salt is missing
    * when stored records carry number hashes but no salt file exists.
@@ -145,10 +153,6 @@ function findLatest(
   return undefined;
 }
 
-export function appointmentEndMs(startUtc: string): number {
-  return Date.parse(startUtc) + APPOINTMENT_MINUTES * 60_000;
-}
-
 /** Keep unresolved work and still-upcoming booked appointments; drop settled history. */
 function isRelevantBookingRecord(record: BookingRecord, now: Date): boolean {
   if (isUnresolvedBookingStatus(record.status)) {
@@ -162,6 +166,12 @@ function isRelevantBookingRecord(record: BookingRecord, now: Date): boolean {
     return true;
   }
   return endMs > now.getTime();
+}
+
+/** Normalize a callback number so equivalent formats share one hash. */
+function normalizeCallbackNumber(value: string): string | undefined {
+  const normalized = extractE164(value);
+  return isE164(normalized) ? normalized : undefined;
 }
 
 function validSalt(value: string): boolean {
@@ -181,39 +191,42 @@ function loadCallbackSalt(dataDir: string): string | undefined {
 }
 
 /**
- * Open the appointment ledger for a data directory. Caller speech, names
- * and raw numbers are never stored. Without a data directory the records
- * and salt live only in memory, so the limit still holds for the life of
- * the process.
+ * Reuse the data directory's salt, or write a new one while no stored
+ * record carries a number hash. Hashes without their salt get the
+ * unmatchable salt instead, so a restore that lost the salt never matches.
+ */
+function loadOrCreateSalt(dataDir: string, hashesStored: boolean): string {
+  const existing = loadCallbackSalt(dataDir);
+  if (existing) {
+    return existing;
+  }
+  if (hashesStored) {
+    return UNMATCHABLE_CALLBACK_SALT;
+  }
+  mkdirSync(dataDir, { recursive: true });
+  const created = randomBytes(16).toString("hex");
+  try {
+    writeFileSync(join(dataDir, CALLBACK_SALT_FILE), `${created}\n`, { mode: 0o600, flag: "wx" });
+    return created;
+  } catch {
+    return loadCallbackSalt(dataDir) ?? created;
+  }
+}
+
+/**
+ * Open the appointment ledger for a data directory, settling its
+ * callback-number salt. Caller speech, names and raw numbers are never
+ * stored. Without a data directory the records and salt live only in
+ * memory, so the limit still holds for the life of the process.
  */
 export function createAppointmentLedger(options: { readonly dataDir?: string } = {}): AppointmentLedger {
   const dataDir = options.dataDir;
   const file = dataDir ? join(dataDir, BOOKING_RECORDS_FILE) : undefined;
   let records: BookingRecord[] = file ? loadJsonl<BookingRecord>(file) : [];
-  let salt: string | undefined;
 
   const hasNumberHashes = () => records.some((record) => typeof record.numberHash === "string");
 
-  const loadOrCreateSalt = (): string => {
-    if (!dataDir) {
-      return randomBytes(16).toString("hex");
-    }
-    const existing = loadCallbackSalt(dataDir);
-    if (existing) {
-      return existing;
-    }
-    if (hasNumberHashes()) {
-      return UNMATCHABLE_CALLBACK_SALT;
-    }
-    mkdirSync(dataDir, { recursive: true });
-    const created = randomBytes(16).toString("hex");
-    try {
-      writeFileSync(join(dataDir, CALLBACK_SALT_FILE), `${created}\n`, { mode: 0o600, flag: "wx" });
-      return created;
-    } catch {
-      return loadCallbackSalt(dataDir) ?? created;
-    }
-  };
+  const salt = dataDir ? loadOrCreateSalt(dataDir, hasNumberHashes()) : randomBytes(16).toString("hex");
 
   const latestForOperation = (operationId: string): BookingRecord | undefined =>
     findLatest(records, (record) => record.operationId === operationId);
@@ -226,7 +239,11 @@ export function createAppointmentLedger(options: { readonly dataDir?: string } =
   };
 
   return {
-    record: append,
+    record(fields) {
+      const record = bookingRecord(fields);
+      append(record);
+      return record;
+    },
 
     recordPending(fields) {
       const latest = latestForOperation(fields.operationId);
@@ -258,12 +275,13 @@ export function createAppointmentLedger(options: { readonly dataDir?: string } =
       return records.length > 0;
     },
 
-    hashCallbackNumber(normalizedNumber) {
-      // Settled on first use, so opening a ledger only to inspect it never
-      // writes a salt into the data directory.
-      salt ??= loadOrCreateSalt();
+    hashCallbackNumber(callbackNumber) {
+      const normalized = normalizeCallbackNumber(callbackNumber);
+      if (!normalized) {
+        return undefined;
+      }
       return createHash("sha256")
-        .update(`callback-limit-v1:${salt}:${normalizedNumber}`)
+        .update(`callback-limit-v1:${salt}:${normalized}`)
         .digest("hex");
     },
 

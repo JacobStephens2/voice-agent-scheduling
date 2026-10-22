@@ -33,6 +33,14 @@ export function endTimeOf(startTime: string): string {
   return `${String(hour + 1).padStart(2, "0")}:00`;
 }
 
+/**
+ * End of an appointment starting at `startUtc`, in epoch milliseconds.
+ * NaN when the start time cannot be parsed.
+ */
+export function appointmentEndMs(startUtc: string): number {
+  return Date.parse(startUtc) + APPOINTMENT_MINUTES * 60_000;
+}
+
 export function computeAvailableStarts(options: {
   readonly date: string;
   readonly now: Date;

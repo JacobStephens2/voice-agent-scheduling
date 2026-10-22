@@ -13,13 +13,13 @@ import {
   type ProposalStore,
 } from "./booking-proposal.js";
 import {
-  bookingRecord,
   createAppointmentLedger,
   isUnresolvedBookingStatus,
   type AppointmentLedger,
   type BookingRecord,
+  type BookingRecordFields,
 } from "./appointment-ledger.js";
-import { evaluateCallbackLimit, normalizeCallbackNumber } from "./callback-limit.js";
+import { evaluateCallbackLimit } from "./callback-limit.js";
 import {
   appointmentNotificationProof,
   CalendarQueryError,
@@ -353,15 +353,14 @@ async function confirm(
     };
   }
 
-  const normalizedCallback = normalizeCallbackNumber(proposal.callbackNumber);
-  if (!normalizedCallback) {
+  const numberHash = ctx.ledger.hashCallbackNumber(proposal.callbackNumber);
+  if (!numberHash) {
     return {
       status: "failed",
       message:
         "The callback number could not be understood. Do not claim the appointment is booked.",
     };
   }
-  const numberHash = ctx.ledger.hashCallbackNumber(normalizedCallback);
 
   const generated = existing
     ? { operationId: existing.operationId, eventId: existing.eventId }
@@ -383,7 +382,7 @@ async function confirm(
   } catch {
     // A retry has not proved the earlier write is gone. Leave that
     // unresolved row in place instead of hiding it behind failed.
-    return failUnlessUnresolved(ctx, existing, identities);
+    return failUnlessUnresolved(ctx.ledger, existing, identities);
   }
 
   // Evaluate the per-number limit before presenting a booking as
@@ -398,7 +397,7 @@ async function confirm(
     excludeOperationId: generated.operationId,
   });
   if (limit !== "clear") {
-    recordFailedUnlessUnresolved(ctx, existing, identities);
+    recordFailedUnlessUnresolved(ctx.ledger, existing, identities);
     return limitRefusal(limit);
   }
 
@@ -416,7 +415,7 @@ async function confirm(
   } catch {
     // Free/busy failed before this attempt could prove the event absent.
     // A retry keeps the unresolved row that already blocks the callback number.
-    return failUnlessUnresolved(ctx, existing, identities);
+    return failUnlessUnresolved(ctx.ledger, existing, identities);
   }
   const stillOpen = computeAvailableStarts({
     date: proposal.date,
@@ -429,19 +428,18 @@ async function confirm(
     // reporting the time as taken by someone else.
     const own = await readOwnEvent(ctx.fetchFn, accessToken, calendarId, generated.eventId);
     if (own === "matching") {
-      const booked = bookingRecord({ ...identities, status: "booked" });
-      ctx.ledger.record(booked);
+      const booked = ctx.ledger.record({ ...identities, status: "booked" });
       return bookedResult(booked, proposal.callbackNumber);
     }
     if (own === "unknown") {
-      return recordInconclusiveOutcome(ctx, identities, INCONCLUSIVE_MESSAGE);
+      return recordInconclusiveOutcome(ctx.ledger, identities, INCONCLUSIVE_MESSAGE);
     }
     // A stored event that fails the approved shape is still stored. Recording
     // unavailable would hide it the same way a proven-missing event is hidden.
     if (own === "mismatched") {
-      return recordInconclusiveOutcome(ctx, identities, MISMATCHED_SHAPE_MESSAGE, "mismatched");
+      return recordInconclusiveOutcome(ctx.ledger, identities, MISMATCHED_SHAPE_MESSAGE, "mismatched");
     }
-    ctx.ledger.record(bookingRecord({ ...identities, status: "unavailable" }));
+    ctx.ledger.record({ ...identities, status: "unavailable" });
     ctx.proposals.drop(execOptions.callId);
     return {
       status: "unavailable",
@@ -465,7 +463,7 @@ async function confirm(
     excludeOperationId: generated.operationId,
   });
   if (finalLimit !== "clear") {
-    recordFailedUnlessUnresolved(ctx, existing, identities);
+    recordFailedUnlessUnresolved(ctx.ledger, existing, identities);
     return limitRefusal(finalLimit);
   }
 
@@ -482,8 +480,7 @@ async function confirm(
     if (!stored.id) {
       throw new Error("missing stored event");
     }
-    const booked = bookingRecord({ ...identities, status: "booked" });
-    ctx.ledger.record(booked);
+    const booked = ctx.ledger.record({ ...identities, status: "booked" });
     return bookedResult(booked, proposal.callbackNumber);
   } catch {
     // A timeout can fire after Google accepted the insertion. Reconcile
@@ -492,14 +489,13 @@ async function confirm(
     // and a duplicate delivery finds the booked outcome below.
     const own = await readOwnEvent(ctx.fetchFn, accessToken, calendarId, generated.eventId);
     if (own === "matching") {
-      const booked = bookingRecord({ ...identities, status: "booked" });
-      ctx.ledger.record(booked);
+      const booked = ctx.ledger.record({ ...identities, status: "booked" });
       return bookedResult(booked, proposal.callbackNumber);
     }
     if (own === "mismatched") {
-      return recordInconclusiveOutcome(ctx, identities, MISMATCHED_SHAPE_MESSAGE, "mismatched");
+      return recordInconclusiveOutcome(ctx.ledger, identities, MISMATCHED_SHAPE_MESSAGE, "mismatched");
     }
-    return recordInconclusiveOutcome(ctx, identities, INCONCLUSIVE_MESSAGE);
+    return recordInconclusiveOutcome(ctx.ledger, identities, INCONCLUSIVE_MESSAGE);
   }
 }
 
@@ -531,31 +527,19 @@ const MISMATCHED_SHAPE_MESSAGE =
   "Do not tell the caller the appointment is booked. " +
   "This is not a missing event. The caller may confirm the same proposal again.";
 
-type OperationIdentities = {
-  operationId: string;
-  eventId: string;
-  callId: string;
-  proposalId: string;
-  calendarId: string;
-  startUtc: string;
-  numberHash: string;
-};
-
-type LedgerCtx = {
-  ledger: AppointmentLedger;
-};
+type OperationIdentities = BookingRecordFields & { readonly numberHash: string };
 
 const UNCONFIRMED_MESSAGE =
   "The calendar event could not be confirmed. Do not tell the caller the appointment is booked.";
 
 /** Return the prior unresolved outcome without appending a new row. */
-function heldUnresolved(existing: BookingRecord | undefined): ConfirmResult | undefined {
-  if (!existing || !isUnresolvedBookingStatus(existing.status)) {
+function heldUnresolved(beforeAttempt: BookingRecord | undefined): ConfirmResult | undefined {
+  if (!beforeAttempt || !isUnresolvedBookingStatus(beforeAttempt.status)) {
     return undefined;
   }
   return inconclusiveResult(
-    existing,
-    existing.storedShape === "mismatched" ? MISMATCHED_SHAPE_MESSAGE : INCONCLUSIVE_MESSAGE,
+    beforeAttempt,
+    beforeAttempt.storedShape === "mismatched" ? MISMATCHED_SHAPE_MESSAGE : INCONCLUSIVE_MESSAGE,
   );
 }
 
@@ -580,42 +564,47 @@ function inconclusiveResult(
  * later retry can repeat that outcome without a new row.
  */
 function recordInconclusiveOutcome(
-  ctx: LedgerCtx,
+  ledger: AppointmentLedger,
   identities: OperationIdentities,
   message: string,
   storedShape?: "mismatched",
 ): ConfirmResult {
-  ctx.ledger.record(
-    bookingRecord({
-      ...identities,
-      status: "inconclusive",
-      ...(storedShape === undefined ? {} : { storedShape }),
-    }),
-  );
+  ledger.record({
+    ...identities,
+    status: "inconclusive",
+    ...(storedShape === undefined ? {} : { storedShape }),
+  });
   return inconclusiveResult(identities, message);
 }
 
+/**
+ * Close this attempt as failed unless it began from an unresolved record.
+ * beforeAttempt is the proposal's latest record from before this attempt,
+ * not the ledger's live latest: once recordPending has run, the live latest
+ * is this attempt's own pending, which a failure before the insert must
+ * still close.
+ */
 function recordFailedUnlessUnresolved(
-  ctx: LedgerCtx,
-  existing: BookingRecord | undefined,
+  ledger: AppointmentLedger,
+  beforeAttempt: BookingRecord | undefined,
   identities: OperationIdentities,
 ): void {
-  if (existing && isUnresolvedBookingStatus(existing.status)) {
+  if (beforeAttempt && isUnresolvedBookingStatus(beforeAttempt.status)) {
     return;
   }
-  ctx.ledger.record(bookingRecord({ ...identities, status: "failed" }));
+  ledger.record({ ...identities, status: "failed" });
 }
 
 function failUnlessUnresolved(
-  ctx: LedgerCtx,
-  existing: BookingRecord | undefined,
+  ledger: AppointmentLedger,
+  beforeAttempt: BookingRecord | undefined,
   identities: OperationIdentities,
 ): ConfirmResult {
-  const held = heldUnresolved(existing);
+  const held = heldUnresolved(beforeAttempt);
   if (held) {
     return held;
   }
-  recordFailedUnlessUnresolved(ctx, existing, identities);
+  recordFailedUnlessUnresolved(ledger, beforeAttempt, identities);
   return {
     status: "failed",
     operationId: identities.operationId,
@@ -689,7 +678,7 @@ async function reconcileUnresolved(ctx: {
       latest.eventId,
     );
     if (own === "matching") {
-      const booked = bookingRecord({
+      ctx.ledger.record({
         operationId: latest.operationId,
         eventId: latest.eventId,
         callId: latest.callId,
@@ -699,7 +688,6 @@ async function reconcileUnresolved(ctx: {
         status: "booked",
         numberHash: latest.numberHash,
       });
-      ctx.ledger.record(booked);
       outcomes.push({ ...identity, status: "booked", eventExists: true });
       continue;
     }
@@ -708,19 +696,17 @@ async function reconcileUnresolved(ctx: {
       continue;
     }
     if (latest.status === "pending") {
-      ctx.ledger.record(
-        bookingRecord({
-          operationId: latest.operationId,
-          eventId: latest.eventId,
-          callId: latest.callId,
-          proposalId: latest.proposalId,
-          calendarId: latest.calendarId,
-          startUtc: latest.startUtc,
-          status: "inconclusive",
-          numberHash: latest.numberHash,
-          ...(own === "mismatched" ? { storedShape: "mismatched" as const } : {}),
-        }),
-      );
+      ctx.ledger.record({
+        operationId: latest.operationId,
+        eventId: latest.eventId,
+        callId: latest.callId,
+        proposalId: latest.proposalId,
+        calendarId: latest.calendarId,
+        startUtc: latest.startUtc,
+        status: "inconclusive",
+        numberHash: latest.numberHash,
+        ...(own === "mismatched" ? { storedShape: "mismatched" as const } : {}),
+      });
     }
     outcomes.push({
       ...identity,

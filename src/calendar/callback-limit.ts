@@ -1,17 +1,8 @@
-import { extractE164, isE164 } from "../phone.js";
-import { appointmentEndMs, type AppointmentLedger } from "./appointment-ledger.js";
+import type { AppointmentLedger } from "./appointment-ledger.js";
 import { CalendarQueryError, getAppointmentEvent } from "./client.js";
+import { appointmentEndMs } from "./policy.js";
 
 export type CallbackLimitOutcome = "clear" | "blocked" | "unknown";
-
-/** Normalize a supplied callback number so equivalent formats share one limit key. */
-export function normalizeCallbackNumber(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const normalized = extractE164(value);
-  return isE164(normalized) ? normalized : undefined;
-}
 
 /**
  * Decide whether a callback number already holds an upcoming

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -85,27 +85,23 @@ describe("appointment ledger", () => {
   });
 
   it("durably records pending after a failed append is repaired", () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "issue-29-pending-append-"));
-    try {
-      const ledger = createAppointmentLedger({ dataDir });
-      const fields = {
-        operationId: "retry-operation",
-        eventId: "0123456789abcdef0123456789abcdef",
-        callId: "retry-call",
-        proposalId: "retry-proposal",
-        calendarId: "primary",
-        startUtc: "2026-11-02T15:00:00.000Z",
-      };
-      const recordsPath = join(dataDir, "bookings.jsonl");
-      mkdirSync(recordsPath);
-      expect(() => ledger.recordPending(fields)).toThrow();
-      rmSync(recordsPath, { recursive: true });
-      ledger.recordPending(fields);
-      const reopened = createAppointmentLedger({ dataDir });
-      expect(reopened.latestForOperation(fields.operationId)?.status).toBe("pending");
-    } finally {
-      rmSync(dataDir, { recursive: true, force: true });
-    }
+    const dataDir = tempDir();
+    const ledger = createAppointmentLedger({ dataDir });
+    const fields = { ...row("op-1", "pending") };
+    const recordsPath = join(dataDir, "bookings.jsonl");
+    mkdirSync(recordsPath);
+    expect(() => ledger.recordPending(fields)).toThrow();
+    rmSync(recordsPath, { recursive: true });
+    ledger.recordPending(fields);
+    expect(createAppointmentLedger({ dataDir }).latestForOperation("op-1")?.status).toBe("pending");
+  });
+
+  it("never stores a caller name handed to record", () => {
+    const dataDir = tempDir();
+    const ledger = createAppointmentLedger({ dataDir });
+    const handed = { ...row("op-1", "booked"), callerName: "Ada Lovelace" };
+    ledger.record(handed);
+    expect(readFileSync(join(dataDir, "bookings.jsonl"), "utf8")).not.toContain("Ada Lovelace");
   });
 
   it("lists other operations that may hold an appointment for a number hash", () => {
@@ -146,7 +142,7 @@ describe("appointment ledger", () => {
     expect(reopened.unresolvedOperations()).toHaveLength(1);
   });
 
-  it("hashes equivalent numbers alike with a salt kept per data directory", () => {
+  it("hashes a callback number with a salt kept per data directory", () => {
     const dataDir = tempDir();
     const first = createAppointmentLedger({ dataDir });
     const hash = first.hashCallbackNumber("+15551239876");
@@ -176,12 +172,22 @@ describe("appointment ledger", () => {
     expect(restored.missingFiles()).toEqual(["callback-salt"]);
   });
 
-  it("does not write a salt when opened only to inspect it", () => {
+  it("hashes equivalent formats of a callback number alike", () => {
+    const ledger = createAppointmentLedger({ dataDir: tempDir() });
+    const hash = ledger.hashCallbackNumber("+15551239876");
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(ledger.hashCallbackNumber("(555) 123-9876")).toBe(hash);
+  });
+
+  it("does not hash a value that is not a phone number", () => {
+    const ledger = createAppointmentLedger({ dataDir: tempDir() });
+    expect(ledger.hashCallbackNumber("call me later")).toBeUndefined();
+  });
+
+  it("writes the callback-number salt when the booking tool is constructed", () => {
     const dataDir = tempDir();
-    writeFileSync(join(dataDir, "bookings.jsonl"), "");
-    const ledger = createAppointmentLedger({ dataDir });
-    expect(ledger.missingFiles()).toEqual([]);
-    expect(() => rmSync(join(dataDir, "callback-salt"))).toThrow();
+    createAppointmentBooking({ dataDir, credentials: null, selection: null, allowWrites: true });
+    expect(existsSync(join(dataDir, "callback-salt"))).toBe(true);
   });
 });
 

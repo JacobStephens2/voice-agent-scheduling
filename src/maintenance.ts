@@ -1,6 +1,6 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { CALLBACK_SALT_FILE, type AppointmentLedger } from "./calendar/appointment-ledger.js";
+import type { AppointmentLedger } from "./calendar/appointment-ledger.js";
 import {
   OPERATIONAL_RETENTION_MS,
   isRetainedOperationalRecord,
@@ -8,7 +8,7 @@ import {
   replaceEvidence,
 } from "./evidence.js";
 
-export { CALLBACK_SALT_FILE, OPERATIONAL_RETENTION_MS };
+export { OPERATIONAL_RETENTION_MS };
 
 export const BUDGET_LEDGER_FILE = "budget-ledger.json";
 
@@ -56,13 +56,13 @@ export function runRetentionCleanup(options: {
   const keptOperational = operational.filter((record) => isRetainedOperationalRecord(record, now));
   replaceEvidence(options.dataDir, keptOperational);
 
-  const bookings = options.ledger.compact(now);
+  const compaction = options.ledger.compact(now);
 
   return {
     operationalRecordsRemoved: operational.length - keptOperational.length,
     operationalRecordsKept: keptOperational.length,
-    bookingRecordsRemoved: bookings.removed,
-    bookingRecordsKept: bookings.kept,
+    bookingRecordsRemoved: compaction.removed,
+    bookingRecordsKept: compaction.kept,
   };
 }
 
