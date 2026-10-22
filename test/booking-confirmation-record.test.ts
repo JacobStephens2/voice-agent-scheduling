@@ -322,6 +322,27 @@ describe("booking confirmation records", () => {
     const reconciled = await booking.reconcileUnresolvedOperations();
     expect(reconciled.some((outcome) => outcome.operationId === "op-1")).toBe(true);
   });
+
+  it("keeps the mismatched-shape message when a retry cannot refresh the access token", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-shape-token-"));
+    const { calendar, booking, setTokenMode } = bookingAt(dataDir);
+    calendar.state.getMode = "mismatch";
+    const callId = "call-shape-token";
+
+    const proposalId = await propose(booking, callId);
+    const first = await confirm(booking, callId, proposalId);
+    expect(first.message).toContain("does not match the approved shape");
+    expect(first.message).not.toContain("interrupted");
+
+    const rowsBeforeRetry = loadBookingRecords(dataDir);
+    setTokenMode("throw");
+    const retry = await confirm(booking, callId, proposalId);
+    expect(loadBookingRecords(dataDir)).toEqual(rowsBeforeRetry);
+    expect(retry.status).toBe("inconclusive");
+    expect(retry.message).toContain("does not match the approved shape");
+    expect(retry.message).not.toContain("interrupted");
+    expect(calendar.stored.has("ev-1")).toBe(true);
+  });
 });
 
 async function confirmMissingBusySlot() {
