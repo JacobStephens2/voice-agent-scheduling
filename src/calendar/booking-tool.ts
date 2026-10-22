@@ -15,6 +15,7 @@ import {
 import {
   appendBookingRecord,
   bookingRecord,
+  isUnresolvedBookingStatus,
   latestForProposal,
   loadBookingRecords,
   unresolvedOperations,
@@ -65,9 +66,12 @@ export interface ConfirmResult {
 
 /**
  * Bounded outcome for one durable operation after restart recovery.
- * "booked" means the matching event is known to exist; "inconclusive"
- * means no matching event could be established without inventing one;
- * "unresolved" means Calendar could not be reached to decide.
+ * "booked" means the matching event is known to exist. "inconclusive"
+ * means no matching event could be established without inventing one.
+ * eventExists is true when an event is stored under this identity, including
+ * one that does not match the approved shape; a missing event is
+ * inconclusive with eventExists false. "unresolved" means Calendar could
+ * not be reached to decide.
  */
 export interface ReconcileResult {
   readonly operationId: string;
@@ -401,6 +405,12 @@ async function confirm(
   try {
     accessToken = await ctx.tokenProvider.getAccessToken();
   } catch {
+    // A retry has not proved the earlier write is gone. Leave that
+    // unresolved row in place instead of hiding it behind failed.
+    const held = heldUnresolved(existing);
+    if (held) {
+      return held;
+    }
     ctx.persist(bookingRecord({ ...identities, status: "failed" }));
     return {
       status: "failed",
@@ -424,7 +434,9 @@ async function confirm(
     excludeOperationId: generated.operationId,
   });
   if (limit !== "clear") {
-    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    if (!existing || !isUnresolvedBookingStatus(existing.status)) {
+      ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    }
     return limitRefusal(limit);
   }
 
@@ -442,6 +454,12 @@ async function confirm(
       timeMax: dayEnd,
     });
   } catch {
+    // Free/busy failed before this attempt could prove the event absent.
+    // A retry keeps the unresolved row that already blocks the callback number.
+    const held = heldUnresolved(existing);
+    if (held) {
+      return held;
+    }
     ctx.persist(bookingRecord({ ...identities, status: "failed" }));
     return {
       status: "failed",
@@ -462,13 +480,18 @@ async function confirm(
     // already landed. Reconcile against the original event identity before
     // reporting the time as taken by someone else.
     const own = await readOwnEvent(ctx.fetchFn, accessToken, calendarId, generated.eventId);
-    if (own) {
+    if (own === "matching") {
       const booked = bookingRecord({ ...identities, status: "booked" });
       ctx.persist(booked);
       return bookedResult(booked, proposal.callbackNumber);
     }
-    if (own === undefined) {
+    if (own === "unknown") {
       return persistInconclusive(ctx, identities);
+    }
+    // A stored event that fails the approved shape is still stored. Recording
+    // unavailable would hide it the same way a proven-missing event is hidden.
+    if (own === "mismatched") {
+      return persistMismatchedShape(ctx, identities);
     }
     ctx.persist(bookingRecord({ ...identities, status: "unavailable" }));
     ctx.proposals.drop(execOptions.callId);
@@ -494,7 +517,9 @@ async function confirm(
     excludeOperationId: generated.operationId,
   });
   if (finalLimit !== "clear") {
-    ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    if (!existing || !isUnresolvedBookingStatus(existing.status)) {
+      ctx.persist(bookingRecord({ ...identities, status: "failed" }));
+    }
     return limitRefusal(finalLimit);
   }
 
@@ -520,10 +545,13 @@ async function confirm(
     // replacement: a retry of this same proposal reuses these identities,
     // and a duplicate delivery finds the booked outcome below.
     const own = await readOwnEvent(ctx.fetchFn, accessToken, calendarId, generated.eventId);
-    if (own) {
+    if (own === "matching") {
       const booked = bookingRecord({ ...identities, status: "booked" });
       ctx.persist(booked);
       return bookedResult(booked, proposal.callbackNumber);
+    }
+    if (own === "mismatched") {
+      return persistMismatchedShape(ctx, identities);
     }
     return persistInconclusive(ctx, identities);
   }
@@ -552,19 +580,40 @@ const INCONCLUSIVE_MESSAGE =
   "Do not tell the caller the appointment is booked. " +
   "The caller may confirm the same proposal again or choose another time.";
 
+const MISMATCHED_SHAPE_MESSAGE =
+  "A calendar event for this appointment is stored but does not match the approved shape. " +
+  "Do not tell the caller the appointment is booked. " +
+  "This is not a missing event. The caller may confirm the same proposal again.";
+
+type OperationIdentities = {
+  operationId: string;
+  eventId: string;
+  callId: string;
+  proposalId: string;
+  calendarId: string;
+  startUtc: string;
+  numberHash: string;
+};
+
+/** Return the prior unresolved outcome without appending a new row. */
+function heldUnresolved(existing: BookingRecord | undefined): ConfirmResult | undefined {
+  if (!existing || !isUnresolvedBookingStatus(existing.status)) {
+    return undefined;
+  }
+  return {
+    status: "inconclusive",
+    operationId: existing.operationId,
+    eventId: existing.eventId,
+    eventExists: false,
+    message: INCONCLUSIVE_MESSAGE,
+  };
+}
+
 function persistInconclusive(
   ctx: {
     persist: (record: BookingRecord) => void;
   },
-  identities: {
-    operationId: string;
-    eventId: string;
-    callId: string;
-    proposalId: string;
-    calendarId: string;
-    startUtc: string;
-    numberHash: string;
-  },
+  identities: OperationIdentities,
 ): ConfirmResult {
   ctx.persist(bookingRecord({ ...identities, status: "inconclusive" }));
   return {
@@ -577,29 +626,52 @@ function persistInconclusive(
 }
 
 /**
+ * The event is stored, so the durable row stays inconclusive and keeps
+ * blocking this callback number. eventExists stays false: this is not an
+ * approved booking the caller may be told exists. The message is what
+ * separates it from a missing event.
+ */
+function persistMismatchedShape(
+  ctx: {
+    persist: (record: BookingRecord) => void;
+  },
+  identities: OperationIdentities,
+): ConfirmResult {
+  ctx.persist(bookingRecord({ ...identities, status: "inconclusive" }));
+  return {
+    status: "inconclusive",
+    operationId: identities.operationId,
+    eventId: identities.eventId,
+    eventExists: false,
+    message: MISMATCHED_SHAPE_MESSAGE,
+  };
+}
+
+type OwnEventOutcome = "matching" | "mismatched" | "missing" | "unknown";
+
+/**
  * Read back this operation's own event by its stored identity.
- * Returns the stored event only when a policy-matching event exists;
- * anything else readable under the identity (absent, or an event that
- * does not match the approved shape) is not this operation's booked
- * appointment, so success is never claimed for it. Returns undefined
- * when the read itself failed and nothing can be established.
+ * "matching" is the only reading that may be announced as booked.
+ * "mismatched" means an event is stored but fails the approved shape;
+ * that is not "missing". "unknown" means the read failed and absence
+ * is unproven.
  */
 async function readOwnEvent(
   fetchFn: typeof fetch,
   accessToken: string,
   calendarId: string,
   eventId: string,
-): Promise<StoredCalendarEvent | null | undefined> {
+): Promise<OwnEventOutcome> {
   let stored: StoredCalendarEvent;
   try {
     stored = await getAppointmentEvent(fetchFn, accessToken, calendarId, eventId);
   } catch (error) {
     if (error instanceof CalendarQueryError && error.kind === "not_found") {
-      return null;
+      return "missing";
     }
-    return undefined;
+    return "unknown";
   }
-  return appointmentNotificationProof(stored).matchesApprovedShape ? stored : null;
+  return appointmentNotificationProof(stored).matchesApprovedShape ? "matching" : "mismatched";
 }
 
 /**
@@ -639,7 +711,7 @@ async function reconcileUnresolved(ctx: {
       latest.calendarId,
       latest.eventId,
     );
-    if (own) {
+    if (own === "matching") {
       const booked = bookingRecord({
         operationId: latest.operationId,
         eventId: latest.eventId,
@@ -654,7 +726,7 @@ async function reconcileUnresolved(ctx: {
       outcomes.push({ ...identity, status: "booked", eventExists: true });
       continue;
     }
-    if (own === undefined) {
+    if (own === "unknown") {
       outcomes.push({ ...identity, status: "unresolved", eventExists: false });
       continue;
     }
@@ -672,7 +744,11 @@ async function reconcileUnresolved(ctx: {
         }),
       );
     }
-    outcomes.push({ ...identity, status: "inconclusive", eventExists: false });
+    outcomes.push({
+      ...identity,
+      status: "inconclusive",
+      eventExists: own === "mismatched",
+    });
   }
   return outcomes;
 }

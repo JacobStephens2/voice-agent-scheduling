@@ -90,7 +90,12 @@ export function fakeGoogleCalendar(options: {
       });
     }
     if (target.includes(`/events/${eventId}`) && method === "GET") {
-      const inserted = writes[writes.length - 1]?.body ?? {};
+      const inserted = writes[writes.length - 1]?.body;
+      // No insert was accepted, so the event is absent. A hollow 200 would
+      // look like a stored event that fails the approved shape.
+      if (!inserted) {
+        return new Response("{}", { status: 404 });
+      }
       return new Response(
         JSON.stringify({
           id: eventId,
