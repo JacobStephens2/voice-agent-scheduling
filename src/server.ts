@@ -139,7 +139,15 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
     : undefined;
 
   const server = http.createServer((req, res) => {
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    // An unparsable Host, such as ::1, makes this constructor throw. Catch it
+    // here so the exception does not leave the listener before routing.
+    let url: URL;
+    try {
+      url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    } catch {
+      json(res, 400, { error: "bad_request" });
+      return;
+    }
 
     if (url.pathname.startsWith("/calendar/auth/")) {
       if (!oauthRouter) {
