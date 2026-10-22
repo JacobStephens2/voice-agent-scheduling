@@ -23,11 +23,10 @@ import {
   commitStoredCalendarEvent,
   queryBusyIntervals,
   readStoredCalendarEvent,
-  type StoredEventKind,
 } from "./client.js";
 import {
-  projectStoredKind,
-  settleRecovery,
+  project,
+  type Confirmation,
   type LedgerCommit,
 } from "./stored-event-projection.js";
 import {
@@ -436,10 +435,11 @@ async function confirm(
       calendarId,
       generated.eventId,
     );
-    // Missing is the only kind this path does not share with a commit:
-    // unavailable is how a proven-missing event is hidden. A cancelled event
-    // is stored, so it stays inconclusive rather than unavailable.
-    if (own.kind === "missing") {
+    // The projection decides a closed start. Missing is unavailable: no
+    // commit, drop the proposal, and say the time was taken. Every other
+    // kind appends the same commit confirm would, and the proposal stays.
+    const closed = project(own.kind).confirmClosedStart();
+    if (closed.outcome === "unavailable") {
       ctx.ledger.record({ ...identities, status: "unavailable" });
       ctx.proposals.drop(execOptions.callId);
       return {
@@ -451,7 +451,12 @@ async function confirm(
           "That time is no longer available. Offer fresh alternatives from check_availability and require confirmation of any replacement. Do not claim the appointment is booked.",
       };
     }
-    return projectCommittedEvent(ctx.ledger, identities, proposal.callbackNumber, own.kind);
+    return applyConfirmation(
+      ctx.ledger,
+      identities,
+      proposal.callbackNumber,
+      closed.confirmation,
+    );
   }
 
   // Evaluate the limit again within the committing operation, after the
@@ -481,7 +486,12 @@ async function confirm(
     date: proposal.date,
     startTime: proposal.startTime,
   });
-  return projectCommittedEvent(ctx.ledger, identities, proposal.callbackNumber, committed.kind);
+  return applyConfirmation(
+    ctx.ledger,
+    identities,
+    proposal.callbackNumber,
+    project(committed.kind).confirm(),
+  );
 }
 
 const CALLBACK_LIMIT_MESSAGE =
@@ -612,27 +622,28 @@ function failUnlessUnresolved(
 }
 
 /**
- * Append the projection's commit for one confirmation. A shape mark
- * selects the approved-shape sentence, a booked projection selects the
- * Jacob-will-call sentence, and every other commit selects the
- * interrupted-write sentence. The event-exists flag is `announce`.
- * Confirmation always appends and does not settle recovery.
+ * Append the confirmation's commit. The speech key selects the sentence.
+ * The event-exists flag is the tell-the-caller flag, true only when the
+ * caller may be told the appointment is booked. Confirmation always
+ * appends and does not recover.
  */
-function projectCommittedEvent(
+function applyConfirmation(
   ledger: AppointmentLedger,
   identities: OperationIdentities,
   callbackNumber: string,
-  kind: StoredEventKind,
+  confirmation: Confirmation,
 ): ConfirmResult {
-  const projection = projectStoredKind(kind);
-  const recorded = recordCommit(ledger, identities, projection.commit);
-  if (projection.commit.storedShape === "mismatched") {
-    return inconclusiveResult(identities, MISMATCHED_SHAPE_MESSAGE);
+  const recorded = recordCommit(ledger, identities, confirmation.commit);
+  if (confirmation.speechKey === "booked") {
+    return { ...bookedResult(recorded, callbackNumber), eventExists: confirmation.tellCaller };
   }
-  if (projection.announce) {
-    return bookedResult(recorded, callbackNumber);
-  }
-  return inconclusiveResult(identities, INCONCLUSIVE_MESSAGE);
+  return {
+    ...inconclusiveResult(
+      identities,
+      confirmation.speechKey === "mismatched" ? MISMATCHED_SHAPE_MESSAGE : INCONCLUSIVE_MESSAGE,
+    ),
+    eventExists: confirmation.tellCaller,
+  };
 }
 
 /**
@@ -672,7 +683,7 @@ async function evaluateCallbackLimit(options: {
       record.calendarId,
       record.eventId,
     );
-    const hold = projectStoredKind(reading.kind).callbackHold;
+    const hold = project(reading.kind).hold();
     if (hold === "not_held") {
       continue;
     }
@@ -688,8 +699,8 @@ async function evaluateCallbackLimit(options: {
  * Reconcile durable pending/inconclusive operations after a restart, using
  * only the stored operation/event identities. No transcript or proposal is
  * needed, and nothing is re-inserted. The projection says what the stored
- * event means; recovery settlement says whether to append. The event-exists
- * flag is `eventStored`, not confirmation's announce flag.
+ * event means. The event-exists flag is whether a stored event was read,
+ * not the tell-the-caller flag.
  */
 async function reconcileUnresolved(ctx: {
   ledger: AppointmentLedger;
@@ -720,8 +731,7 @@ async function reconcileUnresolved(ctx: {
       latest.calendarId,
       latest.eventId,
     );
-    const projection = projectStoredKind(own.kind);
-    const settlement = settleRecovery(projection, {
+    const settlement = project(own.kind).recover({
       status: latest.status,
       ...(latest.storedShape === undefined ? {} : { storedShape: latest.storedShape }),
     });
@@ -731,7 +741,7 @@ async function reconcileUnresolved(ctx: {
     outcomes.push({
       ...identity,
       status: settlement.status,
-      eventExists: projection.eventStored,
+      eventExists: settlement.eventStored,
     });
   }
   return outcomes;
