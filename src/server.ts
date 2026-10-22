@@ -62,10 +62,15 @@ function evidenceAuthorized(req: http.IncomingMessage, token: string): boolean {
   const presented = header?.startsWith("Bearer ")
     ? header.slice("Bearer ".length)
     : undefined;
-  if (!presented || presented.length !== token.length) {
+  if (!presented) {
     return false;
   }
-  return timingSafeEqual(Buffer.from(presented), Buffer.from(token));
+  const presentedBuf = Buffer.from(presented);
+  const tokenBuf = Buffer.from(token);
+  return (
+    presentedBuf.length === tokenBuf.length &&
+    timingSafeEqual(presentedBuf, tokenBuf)
+  );
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {

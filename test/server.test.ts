@@ -78,6 +78,17 @@ describe("scheduling HTTP boundary", () => {
     expect(response.status).toBe(401);
   });
 
+  it("rejects an evidence token whose UTF-8 byte length differs from the configured token", async () => {
+    // "é" is one UTF-16 code unit and two UTF-8 bytes, so this bearer value
+    // matches the configured token's string length and not its byte length.
+    const presented = `é${"x".repeat(EVIDENCE_TOKEN.length - 1)}`;
+    const response = await fetch(`http://127.0.0.1:${PORT}/evidence`, {
+      headers: { authorization: `Bearer ${presented}` },
+    });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "unauthorized" });
+  });
+
   it("serves GET /evidence with the evidence token", async () => {
     const response = await fetch(`http://127.0.0.1:${PORT}/evidence`, {
       headers: { authorization: `Bearer ${EVIDENCE_TOKEN}` },
