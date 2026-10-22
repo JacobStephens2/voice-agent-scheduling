@@ -15,7 +15,7 @@ const SELECTION = {
   updatedAt: "2026-09-07T00:00:00.000Z",
 };
 
-type GetMode = "match" | "mismatch" | "missing" | "error";
+type GetMode = "match" | "mismatch" | "missing" | "error" | "cancelled";
 
 /**
  * In-process calendar. Stored events answer free/busy so a retry sees its
@@ -72,7 +72,7 @@ function createFakeCalendar() {
       }
       const payload: { [key: string]: unknown } = {
         id: getMatch[1],
-        status: "confirmed",
+        status: state.getMode === "cancelled" ? "cancelled" : "confirmed",
         summary: body.summary,
         description: body.description,
         start: body.start,
@@ -195,6 +195,48 @@ function retainedAfterCleanup(dataDir: string, operationId: string): BookingReco
 }
 
 describe("booking confirmation records", () => {
+  it("does not book a cancelled stored event, even when the other fields match", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-cancelled-"));
+    const { calendar, booking } = bookingAt(dataDir);
+    calendar.state.getMode = "cancelled";
+    const callId = "call-cancelled";
+
+    const proposalId = await propose(booking, callId);
+    const result = await confirm(booking, callId, proposalId);
+    expect(result).toMatchObject({ status: "inconclusive", eventExists: false });
+    expect(result.message).toContain("interrupted");
+    expect(result.message).not.toContain("approved shape");
+    expect(result.message).not.toContain("Jacob will call");
+    expect(result.message).not.toContain("no longer available");
+    expect(latestRow(dataDir, "op-1")).toMatchObject({ status: "inconclusive" });
+    expect(latestRow(dataDir, "op-1")?.storedShape).toBeUndefined();
+  });
+
+  it("does not hide a cancelled stored event as unavailable when the slot is no longer open", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-cancelled-busy-"));
+    const { calendar, booking } = bookingAt(dataDir);
+    calendar.state.getMode = "cancelled";
+    calendar.stored.set("ev-1", {
+      summary: "Appointment with Ada Lovelace",
+      description: "Callback number: +15551230000",
+      start: { dateTime: "2026-09-11T10:00:00", timeZone: "America/New_York" },
+      end: { dateTime: "2026-09-11T10:30:00", timeZone: "America/New_York" },
+      transparency: "opaque",
+      reminders: { useDefault: false, overrides: [{ method: "popup", minutes: 10 }] },
+    });
+    const callId = "call-cancelled-busy";
+
+    const proposalId = await propose(booking, callId);
+    const result = await confirm(booking, callId, proposalId);
+    expect(result).toMatchObject({ status: "inconclusive", eventExists: false });
+    expect(result.message).toContain("interrupted");
+    expect(result.message).not.toContain("no longer available");
+    expect(result.message).not.toContain("approved shape");
+    expect(result.message).not.toContain("Jacob will call");
+    expect(latestRow(dataDir, "op-1")).toMatchObject({ status: "inconclusive" });
+    expect(latestRow(dataDir, "op-1")?.storedShape).toBeUndefined();
+  });
+
   it("keeps a stored event that fails the approved shape distinct from a missing event", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-shape-"));
     const { calendar, booking } = bookingAt(dataDir);

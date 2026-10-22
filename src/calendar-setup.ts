@@ -31,7 +31,7 @@ import {
 } from "./calendar/auth.js";
 import {
   appointmentNotificationProof,
-  createAppointmentEvent,
+  commitStoredCalendarEvent,
   deleteAppointmentEvent,
   validateCalendars,
 } from "./calendar/client.js";
@@ -190,45 +190,52 @@ async function verifyBooking(): Promise<void> {
   const slot = firstPermittedSlot(new Date());
   const eventId = randomBytes(16).toString("hex");
   const token = await createTokenProvider(credentials, fetch).getAccessToken();
-  let stored;
-  try {
-    stored = await createAppointmentEvent(fetch, token, {
-      calendarId,
-      eventId,
-      callerName: "Live verification",
-      callbackNumber: "+15555550100",
-      purpose: "Notification proof",
-      date: slot.date,
-      startTime: slot.startTime,
-    });
-  } catch (error) {
+  const reading = await commitStoredCalendarEvent(fetch, token, {
+    calendarId,
+    eventId,
+    callerName: "Live verification",
+    callbackNumber: "+15555550100",
+    purpose: "Notification proof",
+    date: slot.date,
+    startTime: slot.startTime,
+  });
+  const stored = reading.event;
+  if (stored) {
+    const proof = appointmentNotificationProof(stored);
+    process.stdout.write(
+      [
+        `GET stored event ${stored.id} on ${calendarId}`,
+        `summary starts Appointment with: ${stored.summary?.startsWith("Appointment with ") ? "yes" : "no"}`,
+        `attendees: ${proof.hasAttendees ? "present" : "none"}`,
+        `hangoutLink: ${proof.hasHangoutLink ? "present" : "none"}`,
+        `conferenceData: ${proof.hasConferenceData ? "present" : "none"}`,
+        `emailReminder: ${proof.hasEmailReminder ? "present" : "none"}`,
+        `popupMinutes: ${proof.popupReminderMinutes.join(",") || "none"}`,
+        "",
+      ].join("\n"),
+    );
+  }
+  if (reading.kind === "mismatched") {
     try {
       await deleteAppointmentEvent(fetch, token, calendarId, eventId);
+      process.stdout.write("Deleted the verification event (sendUpdates=none).\n");
     } catch {
-      // Best-effort cleanup if insert's GET rejected the stored shape.
+      // The shape failure is the result. Cleanup is best-effort.
     }
-    throw error;
-  }
-  const proof = appointmentNotificationProof(stored);
-  process.stdout.write(
-    [
-      `GET stored event ${stored.id} on ${calendarId}`,
-      `summary starts Appointment with: ${stored.summary?.startsWith("Appointment with ") ? "yes" : "no"}`,
-      `attendees: ${proof.hasAttendees ? "present" : "none"}`,
-      `hangoutLink: ${proof.hasHangoutLink ? "present" : "none"}`,
-      `conferenceData: ${proof.hasConferenceData ? "present" : "none"}`,
-      `emailReminder: ${proof.hasEmailReminder ? "present" : "none"}`,
-      `popupMinutes: ${proof.popupReminderMinutes.join(",") || "none"}`,
-      "",
-    ].join("\n"),
-  );
-  await deleteAppointmentEvent(fetch, token, calendarId, eventId);
-  process.stdout.write("Deleted the verification event (sendUpdates=none).\n");
-  if (!proof.matchesApprovedShape) {
     throw new Error(
       "Stored event did not match the approved notification shape (no attendees, Meet, or email reminder; popup 10 only).",
     );
   }
+  if (reading.kind !== "matching" || !stored) {
+    try {
+      await deleteAppointmentEvent(fetch, token, calendarId, eventId);
+    } catch {
+      // Best-effort cleanup when the stored event could not be classified.
+    }
+    throw new Error("The stored verification event could not be read from the authorized account.");
+  }
+  await deleteAppointmentEvent(fetch, token, calendarId, eventId);
+  process.stdout.write("Deleted the verification event (sendUpdates=none).\n");
   process.stdout.write("Notification proof passed on the authorized account.\n");
 }
 

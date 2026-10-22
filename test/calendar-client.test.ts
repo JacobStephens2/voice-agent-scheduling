@@ -2,17 +2,46 @@ import { describe, expect, it } from "vitest";
 import {
   CalendarQueryError,
   appointmentNotificationProof,
-  createAppointmentEvent,
+  commitStoredCalendarEvent,
   deleteAppointmentEvent,
-  getAppointmentEvent,
   queryBusyIntervals,
+  readStoredCalendarEvent,
   validateCalendars,
 } from "../src/calendar/client.js";
+
+const EVENT_ID = "0123456789abcdef0123456789abcdef";
 
 function cannedFetch(handler: (url: string, init?: RequestInit) => Response): typeof fetch {
   return (async (url: unknown, init?: unknown) =>
     handler(String(url), init as RequestInit)) as typeof fetch;
 }
+
+function approvedEvent(overrides: { [key: string]: unknown } = {}): { [key: string]: unknown } {
+  return {
+    id: EVENT_ID,
+    status: "confirmed",
+    summary: "Appointment with Ada Lovelace",
+    description: "Callback number: +15551239876\nPurpose: Website review",
+    start: { dateTime: "2026-09-11T10:00:00", timeZone: "America/New_York" },
+    end: { dateTime: "2026-09-11T10:30:00", timeZone: "America/New_York" },
+    transparency: "opaque",
+    reminders: {
+      useDefault: false,
+      overrides: [{ method: "popup", minutes: 10 }],
+    },
+    ...overrides,
+  };
+}
+
+const COMMIT_OPTIONS = {
+  calendarId: "primary",
+  eventId: EVENT_ID,
+  callerName: "Ada Lovelace",
+  callbackNumber: "+15551239876",
+  purpose: "Website review",
+  date: "2026-09-11",
+  startTime: "10:00",
+};
 
 describe("calendar client", () => {
   it("validates candidate calendars through freeBusy without reading event content", async () => {
@@ -143,23 +172,10 @@ describe("calendar client", () => {
     expect(busy[0]?.end.toISOString()).toBe("2026-09-12T04:00:00.000Z");
   });
 
-  it("creates a 30-minute busy appointment and returns the stored event from GET, not the insert body", async () => {
-    const eventId = "0123456789abcdef0123456789abcdef";
+  it("creates a 30-minute busy appointment and classifies the stored event, not the insert body", async () => {
     const requests: Array<{ method?: string; url: string; body?: { [key: string]: unknown } }> =
       [];
-    const stored = {
-      id: eventId,
-      status: "confirmed",
-      summary: "Appointment with Ada Lovelace",
-      description: "Callback number: +15551239876\nPurpose: Website review",
-      start: { dateTime: "2026-09-11T10:00:00", timeZone: "America/New_York" },
-      end: { dateTime: "2026-09-11T10:30:00", timeZone: "America/New_York" },
-      transparency: "opaque",
-      reminders: {
-        useDefault: false,
-        overrides: [{ method: "popup", minutes: 10 }],
-      },
-    };
+    const stored = approvedEvent();
     const fetchFn = cannedFetch((url, init) => {
       const method = init?.method ?? "GET";
       requests.push({
@@ -170,29 +186,26 @@ describe("calendar client", () => {
           : undefined,
       });
       if (url.includes("/events") && method === "POST") {
-        return Response.json({ id: eventId, summary: "insert-response-not-proof" });
+        return Response.json({
+          id: EVENT_ID,
+          summary: "insert-response-not-proof",
+          hangoutLink: "https://meet.google.com/insert-not-proof",
+          attendees: [{ email: "insert@example.com" }],
+        });
       }
-      if (url.includes(`/events/${eventId}`) && method === "GET") {
+      if (url.includes(`/events/${EVENT_ID}`) && method === "GET") {
         return Response.json(stored);
       }
       throw new Error(`unexpected request ${method} ${url}`);
     });
 
-    const event = await createAppointmentEvent(fetchFn, "token", {
-      calendarId: "primary",
-      eventId,
-      callerName: "Ada Lovelace",
-      callbackNumber: "+15551239876",
-      purpose: "Website review",
-      date: "2026-09-11",
-      startTime: "10:00",
-    });
+    const reading = await commitStoredCalendarEvent(fetchFn, "token", COMMIT_OPTIONS);
 
     const insert = requests.find((entry) => entry.method === "POST");
     expect(insert?.url).toContain("/calendars/primary/events");
     expect(insert?.url).toContain("sendUpdates=none");
     expect(insert?.body).toMatchObject({
-      id: eventId,
+      id: EVENT_ID,
       summary: "Appointment with Ada Lovelace",
       description: "Callback number: +15551239876\nPurpose: Website review",
       start: { dateTime: "2026-09-11T10:00:00", timeZone: "America/New_York" },
@@ -207,17 +220,20 @@ describe("calendar client", () => {
     expect(insert?.body).not.toHaveProperty("conferenceData");
     expect(JSON.stringify(insert?.body)).not.toContain("email");
 
-    expect(requests.some((entry) => entry.method === "GET" && entry.url.includes(eventId))).toBe(
-      true,
-    );
-    expect(event.summary).toBe("Appointment with Ada Lovelace");
-    expect(event.summary).not.toBe("insert-response-not-proof");
-    expect(event.hangoutLink).toBeUndefined();
-    expect(event.attendees).toEqual([]);
-    expect(event.conferenceData).toBeUndefined();
-    expect(event.reminders?.overrides).toEqual([{ method: "popup", minutes: 10 }]);
-    expect(event.reminders?.useDefault).toBe(false);
-    expect(appointmentNotificationProof(event)).toMatchObject({
+    expect(reading.kind).toBe("matching");
+    expect(reading.event?.summary).toBe("Appointment with Ada Lovelace");
+    expect(reading.event?.summary).not.toBe("insert-response-not-proof");
+    expect(reading.event?.hangoutLink).toBeUndefined();
+    expect(reading.event?.attendees).toEqual([]);
+    expect(reading.event?.conferenceData).toBeUndefined();
+    expect(reading.event?.reminders?.overrides).toEqual([{ method: "popup", minutes: 10 }]);
+    expect(reading.event?.reminders?.useDefault).toBe(false);
+    const storedEvent = reading.event;
+    expect(storedEvent).toBeDefined();
+    if (!storedEvent) {
+      return;
+    }
+    expect(appointmentNotificationProof(storedEvent)).toMatchObject({
       hasAttendees: false,
       hasHangoutLink: false,
       hasConferenceData: false,
@@ -244,53 +260,166 @@ describe("calendar client", () => {
     expect(requests[0]?.url).toContain("sendUpdates=none");
   });
 
-  it("does not treat a stored event with a Meet link or email reminder as a successful appointment", async () => {
-    const eventId = "0123456789abcdef0123456789abcdef";
+  it("classifies a stored event that matches the approved shape as matching", async () => {
+    const fetchFn = cannedFetch(() => Response.json(approvedEvent()));
+    const reading = await readStoredCalendarEvent(fetchFn, "token", "primary", EVENT_ID);
+    expect(reading.kind).toBe("matching");
+    expect(reading.event?.summary).toBe("Appointment with Ada Lovelace");
+    expect(reading.event?.id).toBe(EVENT_ID);
+  });
+
+  it("classifies a tentative event with the approved shape as matching", async () => {
+    const fetchFn = cannedFetch(() => Response.json(approvedEvent({ status: "tentative" })));
+    const reading = await readStoredCalendarEvent(fetchFn, "token", "primary", EVENT_ID);
+    expect(reading.kind).toBe("matching");
+    expect(reading.event?.status).toBe("tentative");
+  });
+
+  it("classifies a shape miss as mismatched and does not throw a transport failure", async () => {
+    const stored = approvedEvent({
+      hangoutLink: "https://meet.google.com/abc-defg-hij",
+      attendees: [{ email: "ada@example.com" }],
+      reminders: {
+        useDefault: false,
+        overrides: [{ method: "email", minutes: 10 }],
+      },
+    });
     const fetchFn = cannedFetch((url, init) => {
       const method = init?.method ?? "GET";
       if (url.includes("/events") && method === "POST") {
-        return Response.json({ id: eventId });
+        return Response.json({ id: EVENT_ID, summary: "insert-response-not-proof" });
       }
-      if (url.includes(`/events/${eventId}`) && method === "GET") {
-        return Response.json({
-          id: eventId,
-          summary: "Appointment with Ada Lovelace",
-          hangoutLink: "https://meet.google.com/abc-defg-hij",
-          attendees: [{ email: "ada@example.com" }],
-          reminders: {
-            useDefault: false,
-            overrides: [{ method: "email", minutes: 10 }],
-          },
-        });
+      if (method === "GET") {
+        return Response.json(stored);
       }
       throw new Error(`unexpected request ${method} ${url}`);
     });
 
-    const error = await createAppointmentEvent(fetchFn, "token", {
-      calendarId: "primary",
-      eventId,
-      callerName: "Ada Lovelace",
-      callbackNumber: "+15551239876",
-      date: "2026-09-11",
-      startTime: "10:00",
-    }).catch((value: unknown) => value);
-    expect(error).toBeInstanceOf(CalendarQueryError);
+    const read = await readStoredCalendarEvent(fetchFn, "token", "primary", EVENT_ID);
+    expect(read.kind).toBe("mismatched");
+    expect(read.event?.hangoutLink).toBe("https://meet.google.com/abc-defg-hij");
+
+    const committed = await commitStoredCalendarEvent(fetchFn, "token", COMMIT_OPTIONS);
+    expect(committed.kind).toBe("mismatched");
+    expect(committed.event?.summary).toBe("Appointment with Ada Lovelace");
+    expect(committed.event?.summary).not.toBe("insert-response-not-proof");
   });
 
-  it("reports a missing event as not_found so reconciliation can distinguish absence from an outage", async () => {
-    const eventId = "0123456789abcdef0123456789abcdef";
-    const fetchFn = cannedFetch((url, init) => {
+  it("classifies a cancelled stored event as cancelled even when the other fields match", async () => {
+    const matching = cannedFetch(() => Response.json(approvedEvent({ status: "cancelled" })));
+    const matchingRead = await readStoredCalendarEvent(matching, "token", "primary", EVENT_ID);
+    expect(matchingRead.kind).toBe("cancelled");
+    expect(matchingRead.event?.status).toBe("cancelled");
+    expect(matchingRead.event?.summary).toBe("Appointment with Ada Lovelace");
+
+    const missed = cannedFetch(() =>
+      Response.json(
+        approvedEvent({
+          status: "cancelled",
+          hangoutLink: "https://meet.google.com/abc-defg-hij",
+          attendees: [{ email: "ada@example.com" }],
+        }),
+      ),
+    );
+    const missedRead = await readStoredCalendarEvent(missed, "token", "primary", EVENT_ID);
+    expect(missedRead.kind).toBe("cancelled");
+    expect(missedRead.kind).not.toBe("mismatched");
+  });
+
+  it("classifies a proven-absent event as missing", async () => {
+    for (const status of [404, 410]) {
+      const fetchFn = cannedFetch(() => new Response("{}", { status }));
+      const reading = await readStoredCalendarEvent(fetchFn, "token", "primary", EVENT_ID);
+      expect(reading.kind).toBe("missing");
+      expect(reading.event).toBeUndefined();
+    }
+  });
+
+  it("classifies an unusable read as unreachable and does not throw", async () => {
+    const cases: Array<{ name: string; fetchFn: typeof fetch }> = [
+      {
+        name: "network failure",
+        fetchFn: cannedFetch(() => {
+          throw new Error("socket reset");
+        }),
+      },
+      {
+        name: "rejected credentials",
+        fetchFn: cannedFetch(() => new Response("{}", { status: 401 })),
+      },
+      {
+        name: "other unsuccessful response",
+        fetchFn: cannedFetch(() => new Response("{}", { status: 503 })),
+      },
+      {
+        name: "body is not a usable event",
+        fetchFn: cannedFetch(
+          () => new Response("not-json", { status: 200, headers: { "content-type": "text/plain" } }),
+        ),
+      },
+      {
+        name: "empty id",
+        fetchFn: cannedFetch(() => Response.json({ id: "", summary: "Appointment with Ada Lovelace" })),
+      },
+    ];
+    for (const entry of cases) {
+      const reading = await readStoredCalendarEvent(entry.fetchFn, "token", "primary", EVENT_ID);
+      expect(reading.kind, entry.name).toBe("unreachable");
+      expect(reading.event, entry.name).toBeUndefined();
+    }
+  });
+
+  it("classifies the stored event when the insert times out or conflicts", async () => {
+    const timedOut = cannedFetch((url, init) => {
       const method = init?.method ?? "GET";
-      if (url.includes(`/events/${eventId}`) && method === "GET") {
-        return new Response("{}", { status: 404 });
+      if (method === "POST") {
+        throw new Error("timeout after accept");
+      }
+      if (method === "GET") {
+        return Response.json(approvedEvent());
       }
       throw new Error(`unexpected request ${method} ${url}`);
     });
+    const afterTimeout = await commitStoredCalendarEvent(timedOut, "token", COMMIT_OPTIONS);
+    expect(afterTimeout.kind).toBe("matching");
+    expect(afterTimeout.event?.summary).toBe("Appointment with Ada Lovelace");
 
-    const error = await getAppointmentEvent(fetchFn, "token", "primary", eventId).catch(
+    const conflicted = cannedFetch((url, init) => {
+      const method = init?.method ?? "GET";
+      if (method === "POST") {
+        return Response.json(
+          { id: EVENT_ID, summary: "insert-response-not-proof", status: "confirmed" },
+          { status: 409 },
+        );
+      }
+      if (method === "GET") {
+        return Response.json(approvedEvent({ status: "cancelled" }));
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    });
+    const afterConflict = await commitStoredCalendarEvent(conflicted, "token", COMMIT_OPTIONS);
+    expect(afterConflict.kind).toBe("cancelled");
+    expect(afterConflict.event?.status).toBe("cancelled");
+    expect(afterConflict.event?.summary).not.toBe("insert-response-not-proof");
+  });
+
+  it("throws when a read or commit is missing an event id", async () => {
+    const fetchFn = cannedFetch(() => {
+      throw new Error("should not be called");
+    });
+    const readError = await readStoredCalendarEvent(fetchFn, "token", "primary", "").catch(
       (value: unknown) => value,
     );
-    expect(error).toBeInstanceOf(CalendarQueryError);
-    expect((error as CalendarQueryError).kind).toBe("not_found");
+    expect(readError).toBeInstanceOf(Error);
+    expect(readError).not.toBeInstanceOf(CalendarQueryError);
+    expect((readError as Error).message).toMatch(/event id/);
+
+    const commitError = await commitStoredCalendarEvent(fetchFn, "token", {
+      ...COMMIT_OPTIONS,
+      eventId: "",
+    }).catch((value: unknown) => value);
+    expect(commitError).toBeInstanceOf(Error);
+    expect(commitError).not.toBeInstanceOf(CalendarQueryError);
+    expect((commitError as Error).message).toMatch(/event id/);
   });
 });

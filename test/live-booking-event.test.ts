@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createTokenProvider, loadCredentials } from "../src/calendar/auth.js";
 import {
   appointmentNotificationProof,
-  createAppointmentEvent,
+  commitStoredCalendarEvent,
   deleteAppointmentEvent,
 } from "../src/calendar/client.js";
 import { computeAvailableStarts, SCHEDULING_TIMEZONE } from "../src/calendar/policy.js";
@@ -48,7 +48,7 @@ describe.skipIf(!live || !calendarId || !credentials)(
       const eventId = randomBytes(16).toString("hex");
       const token = await createTokenProvider(credentials!, fetch).getAccessToken();
       try {
-        const stored = await createAppointmentEvent(fetch, token, {
+        const reading = await commitStoredCalendarEvent(fetch, token, {
           calendarId: calendarId!,
           eventId,
           callerName: "Live verification",
@@ -57,7 +57,11 @@ describe.skipIf(!live || !calendarId || !credentials)(
           date: slot.date,
           startTime: slot.startTime,
         });
-        expect(appointmentNotificationProof(stored)).toMatchObject({
+        expect(reading.kind).toBe("matching");
+        if (reading.kind !== "matching") {
+          return;
+        }
+        expect(appointmentNotificationProof(reading.event)).toMatchObject({
           hasAttendees: false,
           hasHangoutLink: false,
           hasConferenceData: false,

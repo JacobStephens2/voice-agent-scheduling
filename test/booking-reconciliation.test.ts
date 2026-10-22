@@ -77,7 +77,7 @@ function controllableCalendar(initial: Partial<CalendarState> = {}) {
       return new Response(
         JSON.stringify({
           id: getMatch[1],
-          status: "confirmed",
+          status: body.status === "cancelled" ? "cancelled" : "confirmed",
           summary: body.summary,
           description: body.description,
           start: body.start,
@@ -403,6 +403,58 @@ describe("confirmed booking reconciliation", () => {
     // Already inconclusive before the restart, so recovery records nothing
     // new: the same record object, not even an identical row appended.
     expect(restartedLedger.latestForOperation("op-1")).toBe(recordBeforeRecovery);
+  });
+
+  it("records a cancelled stored event as inconclusive on restart and does not leave it blocking", async () => {
+    const calendar = controllableCalendar();
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-reconcile-cancel-"));
+    const ledger = createAppointmentLedger({ dataDir });
+    const numberHash = ledger.hashCallbackNumber("+15551239876");
+    ledger.record({
+      operationId: TEST_OPERATION_ID,
+      eventId: TEST_EVENT_ID,
+      callId: CALL_ID,
+      proposalId: "proposal-cancelled",
+      calendarId: "primary",
+      startUtc: "2026-09-11T14:00:00.000Z",
+      status: "pending",
+      numberHash,
+    });
+    calendar.landEvent(TEST_EVENT_ID, {
+      status: "cancelled",
+      summary: "Appointment with Ada Lovelace",
+      description: "Callback number: +15551239876",
+      start: { dateTime: "2026-09-11T10:00:00", timeZone: "America/New_York" },
+      end: { dateTime: "2026-09-11T10:30:00", timeZone: "America/New_York" },
+      transparency: "opaque",
+      reminders: { useDefault: false, overrides: [{ method: "popup", minutes: 10 }] },
+    });
+
+    const booking = bookingWith(
+      calendar,
+      dataDir,
+      () => ({ operationId: "op-after-cancel", eventId: "ev-after-cancel" }),
+      ledger,
+    );
+    const outcomes = await booking.reconcileUnresolvedOperations();
+
+    expect(outcomes).toEqual([
+      {
+        operationId: TEST_OPERATION_ID,
+        eventId: TEST_EVENT_ID,
+        status: "inconclusive",
+        eventExists: true,
+      },
+    ]);
+    expect(outcomes[0]?.status).not.toBe("unresolved");
+    expect(ledger.latestForOperation(TEST_OPERATION_ID)).toMatchObject({
+      status: "inconclusive",
+    });
+    expect(ledger.latestForOperation(TEST_OPERATION_ID)?.storedShape).toBeUndefined();
+
+    const proposalId = await propose(booking, { startTime: "14:00" }, "call-after-cancel");
+    const second = await confirm(booking, proposalId, "call-after-cancel");
+    expect(second).toMatchObject({ status: "booked", eventExists: true });
   });
 
   it("reports unresolved when Calendar cannot be reached during restart recovery", async () => {
