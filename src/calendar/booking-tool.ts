@@ -19,16 +19,14 @@ import {
   type BookingRecord,
   type BookingRecordFields,
 } from "./appointment-ledger.js";
-import { evaluateCallbackLimit } from "./callback-limit.js";
 import {
-  appointmentNotificationProof,
-  CalendarQueryError,
-  createAppointmentEvent,
-  getAppointmentEvent,
+  commitStoredCalendarEvent,
   queryBusyIntervals,
-  type StoredCalendarEvent,
+  readStoredCalendarEvent,
+  type StoredEventKind,
 } from "./client.js";
 import {
+  appointmentEndMs,
   computeAvailableStarts,
   SCHEDULING_TIMEZONE,
   type BusyInterval,
@@ -62,9 +60,10 @@ export interface ConfirmResult {
  * "booked" means the matching event is known to exist. "inconclusive"
  * means no matching event could be established without inventing one.
  * eventExists is true when an event is stored under this identity, including
- * one that does not match the approved shape; a missing event is
- * inconclusive with eventExists false. "unresolved" means Calendar could
- * not be reached to decide.
+ * one that does not match the approved shape and one that is cancelled; a
+ * missing event is inconclusive with eventExists false. "unresolved" means
+ * Calendar could not be reached to decide. A cancelled event is not booked,
+ * so admissions are not left paused on it.
  */
 export interface ReconcileResult {
   readonly operationId: string;
@@ -426,19 +425,30 @@ async function confirm(
     // The slot can read busy because this operation's own uncertain write
     // already landed. Reconcile against the original event identity before
     // reporting the time as taken by someone else.
-    const own = await readOwnEvent(ctx.fetchFn, accessToken, calendarId, generated.eventId);
-    if (own === "matching") {
+    const own = await readStoredCalendarEvent(
+      ctx.fetchFn,
+      accessToken,
+      calendarId,
+      generated.eventId,
+    );
+    if (own.kind === "matching") {
       const booked = ctx.ledger.record({ ...identities, status: "booked" });
       return bookedResult(booked, proposal.callbackNumber);
     }
-    if (own === "unknown") {
+    if (own.kind === "unreachable") {
       return recordInconclusiveOutcome(ctx.ledger, identities, INCONCLUSIVE_MESSAGE);
     }
     // A stored event that fails the approved shape is still stored. Recording
     // unavailable would hide it the same way a proven-missing event is hidden.
-    if (own === "mismatched") {
+    if (own.kind === "mismatched") {
       return recordInconclusiveOutcome(ctx.ledger, identities, MISMATCHED_SHAPE_MESSAGE, "mismatched");
     }
+    // A cancelled event is stored, so it is not the unavailable outcome used
+    // to hide a proven-missing event, and it is not booked.
+    if (own.kind === "cancelled") {
+      return recordInconclusiveOutcome(ctx.ledger, identities, INCONCLUSIVE_MESSAGE);
+    }
+    // The remaining kind is missing: nothing is stored under this identity.
     ctx.ledger.record({ ...identities, status: "unavailable" });
     ctx.proposals.drop(execOptions.callId);
     return {
@@ -467,36 +477,18 @@ async function confirm(
     return limitRefusal(finalLimit);
   }
 
-  try {
-    const stored = await createAppointmentEvent(ctx.fetchFn, accessToken, {
-      calendarId,
-      eventId: generated.eventId,
-      callerName: proposal.callerName,
-      callbackNumber: proposal.callbackNumber,
-      purpose: proposal.purpose,
-      date: proposal.date,
-      startTime: proposal.startTime,
-    });
-    if (!stored.id) {
-      throw new Error("missing stored event");
-    }
-    const booked = ctx.ledger.record({ ...identities, status: "booked" });
-    return bookedResult(booked, proposal.callbackNumber);
-  } catch {
-    // A timeout can fire after Google accepted the insertion. Reconcile
-    // against the original operation/event identity instead of minting a
-    // replacement: a retry of this same proposal reuses these identities,
-    // and a duplicate delivery finds the booked outcome below.
-    const own = await readOwnEvent(ctx.fetchFn, accessToken, calendarId, generated.eventId);
-    if (own === "matching") {
-      const booked = ctx.ledger.record({ ...identities, status: "booked" });
-      return bookedResult(booked, proposal.callbackNumber);
-    }
-    if (own === "mismatched") {
-      return recordInconclusiveOutcome(ctx.ledger, identities, MISMATCHED_SHAPE_MESSAGE, "mismatched");
-    }
-    return recordInconclusiveOutcome(ctx.ledger, identities, INCONCLUSIVE_MESSAGE);
-  }
+  // Commit already read the stored event once, including when the insert
+  // timed out or conflicted. Confirmation does not read it again.
+  const committed = await commitStoredCalendarEvent(ctx.fetchFn, accessToken, {
+    calendarId,
+    eventId: generated.eventId,
+    callerName: proposal.callerName,
+    callbackNumber: proposal.callbackNumber,
+    purpose: proposal.purpose,
+    date: proposal.date,
+    startTime: proposal.startTime,
+  });
+  return projectCommittedEvent(ctx.ledger, identities, proposal.callbackNumber, committed.kind);
 }
 
 const CALLBACK_LIMIT_MESSAGE =
@@ -614,39 +606,82 @@ function failUnlessUnresolved(
   };
 }
 
-type OwnEventOutcome = "matching" | "mismatched" | "missing" | "unknown";
+/**
+ * Project a commit's kind onto confirmation. Matching is the only kind
+ * recorded as booked. A shape miss keeps the mismatched-shape mark. Every
+ * other kind is an interrupted write, including a cancelled event, and
+ * confirmation reports the event as not present.
+ */
+function projectCommittedEvent(
+  ledger: AppointmentLedger,
+  identities: OperationIdentities,
+  callbackNumber: string,
+  kind: StoredEventKind,
+): ConfirmResult {
+  if (kind === "matching") {
+    const booked = ledger.record({ ...identities, status: "booked" });
+    return bookedResult(booked, callbackNumber);
+  }
+  if (kind === "mismatched") {
+    return recordInconclusiveOutcome(ledger, identities, MISMATCHED_SHAPE_MESSAGE, "mismatched");
+  }
+  return recordInconclusiveOutcome(ledger, identities, INCONCLUSIVE_MESSAGE);
+}
 
 /**
- * Read back this operation's own event by its stored identity.
- * "matching" is the only reading that may be announced as booked.
- * "mismatched" means an event is stored but fails the approved shape;
- * that is not "missing". "unknown" means the read failed and absence
- * is unproven.
+ * Whether another operation already holds an upcoming appointment for this
+ * callback number. The upcoming window uses the ledger start and the clock.
+ * The stored event's kind decides the rest: matching or mismatched blocks,
+ * missing or cancelled does not, and an unreadable calendar is unknown.
  */
-async function readOwnEvent(
-  fetchFn: typeof fetch,
-  accessToken: string,
-  calendarId: string,
-  eventId: string,
-): Promise<OwnEventOutcome> {
-  let stored: StoredCalendarEvent;
-  try {
-    stored = await getAppointmentEvent(fetchFn, accessToken, calendarId, eventId);
-  } catch (error) {
-    if (error instanceof CalendarQueryError && error.kind === "not_found") {
-      return "missing";
+async function evaluateCallbackLimit(options: {
+  readonly fetchFn: typeof fetch;
+  readonly accessToken: string;
+  readonly ledger: AppointmentLedger;
+  readonly numberHash: string;
+  readonly now: Date;
+  /**
+   * The committing operation's own identity. Its records describe this
+   * attempt's uncertain write, reconciled separately against the same
+   * identity; only other operations can hold a competing appointment.
+   */
+  readonly excludeOperationId?: string;
+}): Promise<"clear" | "blocked" | "unknown"> {
+  const candidates = options.ledger.operationsHoldingAppointment(
+    options.numberHash,
+    options.excludeOperationId,
+  );
+  for (const record of candidates) {
+    const endMs = appointmentEndMs(record.startUtc);
+    if (Number.isNaN(endMs)) {
+      return "unknown";
     }
-    return "unknown";
+    if (endMs <= options.now.getTime()) {
+      continue;
+    }
+    const reading = await readStoredCalendarEvent(
+      options.fetchFn,
+      options.accessToken,
+      record.calendarId,
+      record.eventId,
+    );
+    if (reading.kind === "missing" || reading.kind === "cancelled") {
+      continue;
+    }
+    if (reading.kind === "unreachable") {
+      return "unknown";
+    }
+    return "blocked";
   }
-  return appointmentNotificationProof(stored).matchesApprovedShape ? "matching" : "mismatched";
+  return "clear";
 }
 
 /**
  * Reconcile durable pending/inconclusive operations after a restart, using
  * only the stored operation/event identities. No transcript or proposal is
- * needed: a matching stored event becomes booked, an absent event stays a
- * bounded inconclusive outcome, and an unreachable Calendar stays
- * unresolved. Nothing is re-inserted and no identity is replaced.
+ * needed, and nothing is re-inserted. A matching event becomes booked. A
+ * cancelled event is stored but not booked. An absent event stays
+ * inconclusive. An unreachable Calendar appends nothing and stays unresolved.
  */
 async function reconcileUnresolved(ctx: {
   ledger: AppointmentLedger;
@@ -671,13 +706,13 @@ async function reconcileUnresolved(ctx: {
       outcomes.push({ ...identity, status: "unresolved", eventExists: false });
       continue;
     }
-    const own = await readOwnEvent(
+    const own = await readStoredCalendarEvent(
       ctx.fetchFn,
       accessToken,
       latest.calendarId,
       latest.eventId,
     );
-    if (own === "matching") {
+    if (own.kind === "matching") {
       ctx.ledger.record({
         operationId: latest.operationId,
         eventId: latest.eventId,
@@ -691,8 +726,27 @@ async function reconcileUnresolved(ctx: {
       outcomes.push({ ...identity, status: "booked", eventExists: true });
       continue;
     }
-    if (own === "unknown") {
+    if (own.kind === "unreachable") {
       outcomes.push({ ...identity, status: "unresolved", eventExists: false });
+      continue;
+    }
+    if (own.kind === "cancelled") {
+      // A pending row, or one still marked as a shape miss, becomes
+      // inconclusive without that mark. The event stays stored, so a later
+      // limit read can see the cancellation and not block.
+      if (latest.status === "pending" || latest.storedShape === "mismatched") {
+        ctx.ledger.record({
+          operationId: latest.operationId,
+          eventId: latest.eventId,
+          callId: latest.callId,
+          proposalId: latest.proposalId,
+          calendarId: latest.calendarId,
+          startUtc: latest.startUtc,
+          status: "inconclusive",
+          numberHash: latest.numberHash,
+        });
+      }
+      outcomes.push({ ...identity, status: "inconclusive", eventExists: true });
       continue;
     }
     if (latest.status === "pending") {
@@ -705,13 +759,13 @@ async function reconcileUnresolved(ctx: {
         startUtc: latest.startUtc,
         status: "inconclusive",
         numberHash: latest.numberHash,
-        ...(own === "mismatched" ? { storedShape: "mismatched" as const } : {}),
+        ...(own.kind === "mismatched" ? { storedShape: "mismatched" as const } : {}),
       });
     }
     outcomes.push({
       ...identity,
       status: "inconclusive",
-      eventExists: own === "mismatched",
+      eventExists: own.kind === "mismatched",
     });
   }
   return outcomes;

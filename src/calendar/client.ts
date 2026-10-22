@@ -11,7 +11,7 @@ export interface CalendarValidation {
 }
 
 export class CalendarQueryError extends Error {
-  readonly kind: "auth" | "required_calendar" | "transport" | "not_found";
+  readonly kind: "auth" | "required_calendar" | "transport";
   constructor(kind: CalendarQueryError["kind"], message: string) {
     super(message);
     this.name = "CalendarQueryError";
@@ -301,45 +301,112 @@ function asStoredEvent(payload: { [key: string]: unknown }): StoredCalendarEvent
   };
 }
 
+export type StoredEventKind =
+  | "matching"
+  | "mismatched"
+  | "cancelled"
+  | "missing"
+  | "unreachable";
+
 /**
- * Read one event as stored on the account. Used after insert so callers
- * observe account-level fields (attendees, Meet, reminders), not the
- * insert request parameters.
+ * One classification of a stored calendar event. `event` is set only when
+ * an event was read: matching, mismatched, or cancelled. Missing and
+ * unreachable carry no event. Callers branch on `kind`; the approved-shape
+ * predicate stays here, next to the insert.
  */
-export async function getAppointmentEvent(
+export interface StoredEventReading {
+  readonly kind: StoredEventKind;
+  readonly event?: StoredCalendarEvent;
+}
+
+function requireEventId(eventId: string): void {
+  if (!eventId) {
+    throw new Error("A calendar event read requires an event id.");
+  }
+}
+
+type FetchedEvent =
+  | { readonly kind: "missing" }
+  | { readonly kind: "unreachable" }
+  | { readonly kind: "event"; readonly event: StoredCalendarEvent };
+
+/**
+ * Fetch one event. Proven absence is missing. A network failure, rejected
+ * credentials, any other unsuccessful response, a body that is not a usable
+ * event, or an empty id is unreachable. None of these are thrown.
+ */
+async function fetchStoredEvent(
   fetchFn: FetchFn,
   accessToken: string,
   calendarId: string,
   eventId: string,
-): Promise<StoredCalendarEvent> {
+): Promise<FetchedEvent> {
   let response: Response;
   try {
     response = await fetchFn(eventsUrl(calendarId, eventId), {
       headers: { authorization: `Bearer ${accessToken}` },
     });
-  } catch (error) {
-    throw toAuthOrTransport(error);
+  } catch {
+    return { kind: "unreachable" };
   }
-  // A missing event is a reconciled absence, not an unreachable Calendar:
-  // callers distinguish "no event under this identity" from transport/auth
-  // failures so an uncertain write is never reported as a false success.
   if (response.status === 404 || response.status === 410) {
-    throw new CalendarQueryError("not_found", "The calendar event was not found.");
+    return { kind: "missing" };
   }
-  throwForHttpStatus(response);
-  const payload = await readJsonBody(response);
-  const stored = asStoredEvent(payload);
-  if (!stored.id) {
-    throw new CalendarQueryError("transport", UNAVAILABLE_MESSAGE);
+  if (!response.ok) {
+    return { kind: "unreachable" };
   }
-  return stored;
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return { kind: "unreachable" };
+  }
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return { kind: "unreachable" };
+  }
+  const event = asStoredEvent(payload as { [key: string]: unknown });
+  if (!event.id) {
+    return { kind: "unreachable" };
+  }
+  return { kind: "event", event };
+}
+
+/** Cancelled wins over the approved shape. Tentative and confirmed are both live. */
+function classifyStoredEvent(event: StoredCalendarEvent): StoredEventReading {
+  if (event.status === "cancelled") {
+    return { kind: "cancelled", event };
+  }
+  return {
+    kind: storedAppointmentMatchesPolicy(event) ? "matching" : "mismatched",
+    event,
+  };
 }
 
 /**
- * Insert a 30-minute busy appointment with the approved notification
- * shape, then GET it. Success is the stored event, not the insert body.
+ * Read one stored event and classify it. Does not insert. A thrown error
+ * means the caller passed no event id; calendar conditions are outcomes.
  */
-export async function createAppointmentEvent(
+export async function readStoredCalendarEvent(
+  fetchFn: FetchFn,
+  accessToken: string,
+  calendarId: string,
+  eventId: string,
+): Promise<StoredEventReading> {
+  requireEventId(eventId);
+  const fetched = await fetchStoredEvent(fetchFn, accessToken, calendarId, eventId);
+  if (fetched.kind === "event") {
+    return classifyStoredEvent(fetched.event);
+  }
+  return { kind: fetched.kind };
+}
+
+/**
+ * Insert one 30-minute busy appointment under the caller-supplied event id,
+ * then read that id once. The insert response is not the classification,
+ * including when the insert times out or returns a conflict. A shape miss
+ * is `mismatched`, not a thrown transport failure.
+ */
+export async function commitStoredCalendarEvent(
   fetchFn: FetchFn,
   accessToken: string,
   options: {
@@ -351,7 +418,8 @@ export async function createAppointmentEvent(
     readonly date: string;
     readonly startTime: string;
   },
-): Promise<StoredCalendarEvent> {
+): Promise<StoredEventReading> {
+  requireEventId(options.eventId);
   const endTime = endTimeOf(options.startTime);
   const body = {
     id: options.eventId,
@@ -371,9 +439,8 @@ export async function createAppointmentEvent(
       overrides: [{ method: "popup", minutes: 10 }],
     },
   };
-  let response: Response;
   try {
-    response = await fetchFn(`${eventsUrl(options.calendarId)}?sendUpdates=none`, {
+    await fetchFn(`${eventsUrl(options.calendarId)}?sendUpdates=none`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${accessToken}`,
@@ -381,35 +448,16 @@ export async function createAppointmentEvent(
       },
       body: JSON.stringify(body),
     });
-  } catch (error) {
-    throw toAuthOrTransport(error);
+  } catch {
+    // The insert may have landed before a timeout. One read of the stored
+    // event decides; the insert response is never the proof.
   }
-  if (response.status === 409) {
-    return readMatchingAppointment(
-      fetchFn,
-      accessToken,
-      options.calendarId,
-      options.eventId,
-    );
-  }
-  throwForHttpStatus(response);
-  return readMatchingAppointment(fetchFn, accessToken, options.calendarId, options.eventId);
-}
-
-async function readMatchingAppointment(
-  fetchFn: FetchFn,
-  accessToken: string,
-  calendarId: string,
-  eventId: string,
-): Promise<StoredCalendarEvent> {
-  const stored = await getAppointmentEvent(fetchFn, accessToken, calendarId, eventId);
-  if (!storedAppointmentMatchesPolicy(stored)) {
-    throw new CalendarQueryError(
-      "transport",
-      "The stored calendar event does not match the approved appointment shape.",
-    );
-  }
-  return stored;
+  return readStoredCalendarEvent(
+    fetchFn,
+    accessToken,
+    options.calendarId,
+    options.eventId,
+  );
 }
 
 export async function deleteAppointmentEvent(
