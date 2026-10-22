@@ -8,6 +8,7 @@ import {
   saveRefreshToken,
 } from "./calendar/auth.js";
 import { createCalendarAvailabilityTool } from "./calendar/availability-tool.js";
+import { createAppointmentLedger } from "./calendar/appointment-ledger.js";
 import { createAppointmentBooking } from "./calendar/booking-tool.js";
 import { createOAuthRouter } from "./calendar/oauth-routes.js";
 import { productionReadiness, type CallerAdmissionMode } from "./admission-policy.js";
@@ -91,15 +92,20 @@ function json(res: http.ServerResponse, statusCode: number, body: unknown): void
 
 export function createSchedulingServer(config: ServerConfig): SchedulingServer {
   const fetchFn = config.fetchFn ?? fetch;
+  // One appointment ledger per process: the booking tool, restart
+  // reconciliation and retention cleanup all read and write this instance,
+  // so a cleanup can never leave the confirmation path a stale view.
+  const ledger = createAppointmentLedger({ dataDir: config.dataDir });
   const booking =
     config.booking ??
     createAppointmentBooking({
       fetchFn,
       dataDir: config.dataDir,
+      ledger,
       allowWrites: config.allowCalendarWrites === true,
     });
-  // A restarted process reloads durable booking records when the booking
-  // tool is constructed. Reconcile pending/uncertain operations in the
+  // A restarted process loads the appointment ledger's durable records
+  // when the ledger opens. Reconcile pending/uncertain operations in the
   // background so each one settles to a single matching event or a bounded
   // unresolved outcome. Reconciliation only reads by stored event identity;
   // it never re-inserts, so it cannot create a duplicate event.
@@ -110,6 +116,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
       config.availabilityTool ??
       createCalendarAvailabilityTool({ fetchFn, dataDir: config.dataDir }),
     booking,
+    ledger,
     maxConcurrentCalls: config.maxConcurrentCalls ?? 1,
     allowedCallerNumbers: config.allowedCallerNumbers,
     maxCallDurationMs: config.maxCallDurationMs,
@@ -242,7 +249,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         return;
       }
       const result = config.dataDir
-        ? runRetentionCleanup({ dataDir: config.dataDir })
+        ? runRetentionCleanup({ dataDir: config.dataDir, ledger })
         : {
             operationalRecordsRemoved: 0,
             operationalRecordsKept: lifecycleManager.listEvidence().length,

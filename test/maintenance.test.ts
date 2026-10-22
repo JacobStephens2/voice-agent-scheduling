@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
-import { loadBookingRecords } from "../src/calendar/booking-store.js";
+import { createAppointmentLedger, type AppointmentLedger } from "../src/calendar/appointment-ledger.js";
 import {
   DIRECT_SIP_MICRO_USD_PER_MINUTE,
   createBudgetLedger,
@@ -145,6 +145,7 @@ function bookingWith(
   dataDir: string,
   createIds: () => { operationId: string; eventId: string },
   now: () => Date = () => MONDAY_14H,
+  ledger?: AppointmentLedger,
 ) {
   return createAppointmentBooking({
     fetchFn: calendar.fetchFn,
@@ -152,6 +153,7 @@ function bookingWith(
     selection: SELECTION,
     now,
     dataDir,
+    ledger,
     createIds,
     allowWrites: true,
   });
@@ -200,9 +202,10 @@ function createManager(options: {
   now?: () => Date;
 }) {
   const calendar = options.calendar ?? controllableCalendar();
+  const ledger = createAppointmentLedger({ dataDir: options.dataDir });
   const booking =
     options.booking ??
-    bookingWith(calendar, options.dataDir, sequencedIds(), options.now ?? (() => MONDAY_14H));
+    bookingWith(calendar, options.dataDir, sequencedIds(), options.now ?? (() => MONDAY_14H), ledger);
   return createCallLifecycleManager({
     webhookSecret: WEBHOOK_SECRET,
     apiKey: "test-xai-key",
@@ -217,6 +220,7 @@ function createManager(options: {
       execute: async () => ({ status: "available", starts: [] }),
     },
     booking,
+    ledger: options.booking ? undefined : ledger,
     connectWebSocket: (url, headers) => {
       const socket = new FakeRealtimeSocket(url, headers);
       options.sockets.push(socket);
@@ -235,10 +239,6 @@ function createManager(options: {
 
 function eventInserts(calendar: ReturnType<typeof controllableCalendar>) {
   return calendar.writes.filter((row) => row.method === "POST" && row.url.includes("/events"));
-}
-
-function latestBookings(dataDir: string) {
-  return loadBookingRecords(dataDir);
 }
 
 function operationalLines(dataDir: string): StructuredCallEvidence[] {
@@ -292,7 +292,7 @@ describe("retention cleanup and recovery", () => {
       recordedAt: now.toISOString(),
     });
 
-    const result = runRetentionCleanup({ dataDir, now });
+    const result = runRetentionCleanup({ dataDir, ledger: createAppointmentLedger({ dataDir }), now });
     expect(result.operationalRecordsRemoved).toBe(1);
     expect(result.operationalRecordsKept).toBe(1);
 
@@ -322,7 +322,7 @@ describe("retention cleanup and recovery", () => {
       { mode: 0o600 },
     );
 
-    const result = runRetentionCleanup({ dataDir, now });
+    const result = runRetentionCleanup({ dataDir, ledger: createAppointmentLedger({ dataDir }), now });
     expect(result.operationalRecordsKept).toBe(1);
     expect(existsSync(join(dataDir, "smoke-evidence.jsonl"))).toBe(false);
     expect(operationalLines(dataDir)[0]?.callId).toBe("call-legacy");
@@ -332,13 +332,14 @@ describe("retention cleanup and recovery", () => {
     const calendar = controllableCalendar();
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-uncertain-"));
     const createIds = sequencedIds();
-    const before = bookingWith(calendar, dataDir, createIds);
+    const ledger = createAppointmentLedger({ dataDir });
+    const before = bookingWith(calendar, dataDir, createIds, undefined, ledger);
     calendar.failNextPost();
     const uncertain = await proposeAndConfirm(before, { callId: "call-uncertain" });
     expect(uncertain.status).toBe("inconclusive");
     const postsBeforeCleanup = eventInserts(calendar).length;
 
-    const cleanup = runRetentionCleanup({ dataDir, now: MONDAY_14H });
+    const cleanup = runRetentionCleanup({ dataDir, ledger, now: MONDAY_14H });
     expect(cleanup.bookingRecordsKept).toBeGreaterThan(0);
     expect(calendar.writes.filter((row) => row.method === "DELETE")).toHaveLength(0);
 
@@ -373,12 +374,13 @@ describe("retention cleanup and recovery", () => {
     const calendar = controllableCalendar();
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-upcoming-"));
     const createIds = sequencedIds();
-    const before = bookingWith(calendar, dataDir, createIds);
+    const ledger = createAppointmentLedger({ dataDir });
+    const before = bookingWith(calendar, dataDir, createIds, undefined, ledger);
     const first = await proposeAndConfirm(before, { callId: "call-upcoming-1" });
     expect(first.status).toBe("booked");
 
-    runRetentionCleanup({ dataDir, now: MONDAY_14H });
-    expect(latestBookings(dataDir).some((row) => row.status === "booked")).toBe(true);
+    runRetentionCleanup({ dataDir, ledger, now: MONDAY_14H });
+    expect(ledger.latestForOperation("op-maint-1")?.status).toBe("booked");
 
     const after = bookingWith(calendar, dataDir, createIds);
     const second = await proposeAndConfirm(after, { callId: "call-upcoming-2", startTime: "14:00" });
@@ -395,13 +397,14 @@ describe("retention cleanup and recovery", () => {
     const calendar = controllableCalendar();
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-cancel-"));
     const createIds = sequencedIds();
-    const before = bookingWith(calendar, dataDir, createIds);
+    const ledger = createAppointmentLedger({ dataDir });
+    const before = bookingWith(calendar, dataDir, createIds, undefined, ledger);
     const first = await proposeAndConfirm(before, { callId: "call-cancel-1" });
     expect(first.status).toBe("booked");
     calendar.cancelEvent("ev-maint-1");
 
-    runRetentionCleanup({ dataDir, now: MONDAY_14H });
-    expect(latestBookings(dataDir).some((row) => row.status === "booked")).toBe(true);
+    runRetentionCleanup({ dataDir, ledger, now: MONDAY_14H });
+    expect(ledger.latestForOperation("op-maint-1")?.status).toBe("booked");
 
     const after = bookingWith(calendar, dataDir, createIds);
     const second = await proposeAndConfirm(after, { callId: "call-cancel-2", startTime: "14:00" });
@@ -432,7 +435,7 @@ describe("retention cleanup and recovery", () => {
     expect(reserved.reservedMicroUsd).toBe(reservation);
     expect(reserved.spentMicroUsd).toBe(0);
 
-    runRetentionCleanup({ dataDir, now: MONDAY_14H });
+    runRetentionCleanup({ dataDir, ledger: createAppointmentLedger({ dataDir }), now: MONDAY_14H });
     manager.reloadDurableViews();
     expect(manager.budgetSnapshot()).toMatchObject({
       reservedMicroUsd: reservation,
@@ -535,7 +538,10 @@ describe("retention cleanup and recovery", () => {
     const backupDir = mkdtempSync(join(tmpdir(), "scheduling-maint-stale-backup-"));
     restoreDurableState(dataDir, backupDir);
     rmSync(join(backupDir, "callback-salt"), { force: true });
-    expect(inspectDurableIntegrity(backupDir).complete).toBe(false);
+    expect(
+      inspectDurableIntegrity({ dataDir: backupDir, ledger: createAppointmentLedger({ dataDir: backupDir }) })
+        .complete,
+    ).toBe(false);
 
     const sockets: FakeRealtimeSocket[] = [];
     const hangups: string[] = [];
@@ -644,7 +650,7 @@ describe("retention cleanup and recovery", () => {
     assertSafeOperationalPayload(evidence);
     expect(evidence.error).toBeUndefined();
 
-    runRetentionCleanup({ dataDir, now: MONDAY_14H });
+    runRetentionCleanup({ dataDir, ledger: createAppointmentLedger({ dataDir }), now: MONDAY_14H });
 
     const afterSockets: FakeRealtimeSocket[] = [];
     const afterBooking = bookingWith(calendar, dataDir, createIds);

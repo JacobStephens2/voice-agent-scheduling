@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
 import { fakeGoogleCalendar, TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
 
@@ -278,10 +279,11 @@ describe("appointment booking tool", () => {
     const proposed = await proposedOn(booking, { purpose: "Website review" });
     await confirmCurrent(booking, proposed);
 
+    expect(createAppointmentLedger({ dataDir }).latestForOperation(TEST_OPERATION_ID)).toMatchObject({
+      eventId: TEST_EVENT_ID,
+      status: "booked",
+    });
     const stored = readFileSync(join(dataDir, "bookings.jsonl"), "utf8");
-    expect(stored).toContain(TEST_OPERATION_ID);
-    expect(stored).toContain(TEST_EVENT_ID);
-    expect(stored).toContain("booked");
     expect(stored).not.toContain("Ada Lovelace");
     expect(stored).not.toContain("15551239876");
     expect(stored).not.toContain("Website review");

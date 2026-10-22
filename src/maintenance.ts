@@ -1,16 +1,6 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import {
-  isRelevantBookingRecord,
-  latestByOperation,
-  loadBookingRecords,
-  replaceBookingRecords,
-} from "./calendar/booking-store.js";
-import {
-  CALLBACK_SALT_FILE,
-  bookingsHaveCallbackHashes,
-  loadCallbackSalt,
-} from "./calendar/callback-limit.js";
+import type { AppointmentLedger } from "./calendar/appointment-ledger.js";
 import {
   OPERATIONAL_RETENTION_MS,
   isRetainedOperationalRecord,
@@ -18,7 +8,7 @@ import {
   replaceEvidence,
 } from "./evidence.js";
 
-export { CALLBACK_SALT_FILE, OPERATIONAL_RETENTION_MS };
+export { OPERATIONAL_RETENTION_MS };
 
 export const BUDGET_LEDGER_FILE = "budget-ledger.json";
 
@@ -43,14 +33,14 @@ export interface RecoveryAssessment {
   readonly reconciliation: readonly { readonly status: string }[];
 }
 
-export function inspectDurableIntegrity(dataDir: string): DurableIntegrity {
-  const missing: string[] = [];
-  const bookings = loadBookingRecords(dataDir);
-  if (bookingsHaveCallbackHashes(dataDir) && !loadCallbackSalt(dataDir)) {
-    missing.push(CALLBACK_SALT_FILE);
-  }
+export function inspectDurableIntegrity(options: {
+  readonly dataDir: string;
+  readonly ledger: AppointmentLedger;
+}): DurableIntegrity {
+  const { dataDir, ledger } = options;
+  const missing = ledger.missingFiles();
   const evidence = loadEvidence(dataDir);
-  if ((bookings.length > 0 || evidence.length > 0) && !existsSync(join(dataDir, BUDGET_LEDGER_FILE))) {
+  if ((ledger.hasRecords() || evidence.length > 0) && !existsSync(join(dataDir, BUDGET_LEDGER_FILE))) {
     missing.push(BUDGET_LEDGER_FILE);
   }
   return { complete: missing.length === 0, missing };
@@ -58,6 +48,7 @@ export function inspectDurableIntegrity(dataDir: string): DurableIntegrity {
 
 export function runRetentionCleanup(options: {
   readonly dataDir: string;
+  readonly ledger: AppointmentLedger;
   readonly now?: Date;
 }): RetentionCleanupResult {
   const now = options.now ?? new Date();
@@ -65,25 +56,22 @@ export function runRetentionCleanup(options: {
   const keptOperational = operational.filter((record) => isRetainedOperationalRecord(record, now));
   replaceEvidence(options.dataDir, keptOperational);
 
-  const bookings = loadBookingRecords(options.dataDir);
-  const keptBookings = latestByOperation(bookings).filter((record) =>
-    isRelevantBookingRecord(record, now),
-  );
-  replaceBookingRecords(options.dataDir, keptBookings);
+  const compaction = options.ledger.compact(now);
 
   return {
     operationalRecordsRemoved: operational.length - keptOperational.length,
     operationalRecordsKept: keptOperational.length,
-    bookingRecordsRemoved: bookings.length - keptBookings.length,
-    bookingRecordsKept: keptBookings.length,
+    bookingRecordsRemoved: compaction.removed,
+    bookingRecordsKept: compaction.kept,
   };
 }
 
 export async function assessRecovery(options: {
   readonly dataDir: string;
+  readonly ledger: AppointmentLedger;
   readonly reconcile?: () => Promise<readonly { readonly status: string }[]>;
 }): Promise<RecoveryAssessment> {
-  const integrity = inspectDurableIntegrity(options.dataDir);
+  const integrity = inspectDurableIntegrity(options);
   if (!integrity.complete) {
     return {
       admissionAvailable: false,

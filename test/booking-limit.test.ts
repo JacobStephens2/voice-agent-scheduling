@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
 
 const MONDAY_14H = new Date("2026-09-07T14:00:00-04:00");
@@ -334,18 +335,11 @@ describe("one upcoming appointment per callback number", () => {
 
     // The recovered durable rows keep the number association, so the limit
     // does not depend on earlier superseded rows surviving alongside them.
-    const hashes = readFileSync(join(dataDir, "bookings.jsonl"), "utf8")
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as { operationId?: unknown; numberHash?: unknown })
-      .filter((row) => row.operationId === "op-limit-1")
-      .map((row) => row.numberHash);
-    expect(hashes.length).toBeGreaterThan(0);
-    for (const hash of hashes) {
-      expect(typeof hash).toBe("string");
-    }
-    expect(new Set(hashes).size).toBe(1);
+    const ledger = createAppointmentLedger({ dataDir });
+    expect(ledger.latestForOperation("op-limit-1")).toMatchObject({
+      status: "booked",
+      numberHash: ledger.hashCallbackNumber(CALLBACK_NUMBER),
+    });
 
     const second = await proposeAndConfirm(after, {
       callId: "call-limit-recover-2",

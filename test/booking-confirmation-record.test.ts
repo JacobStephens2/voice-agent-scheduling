@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
-import { loadBookingRecords, type BookingRecord } from "../src/calendar/booking-store.js";
+import { createAppointmentLedger, type BookingRecord } from "../src/calendar/appointment-ledger.js";
 import { runRetentionCleanup } from "../src/maintenance.js";
 
 const REFERENCE = new Date("2026-09-07T14:00:00-04:00");
@@ -106,13 +106,14 @@ function deletes(requests: Array<{ method: string; url: string }>) {
 }
 
 function latestRow(dataDir: string, operationId: string): BookingRecord | undefined {
-  return loadBookingRecords(dataDir).filter((row) => row.operationId === operationId).at(-1);
+  return createAppointmentLedger({ dataDir }).latestForOperation(operationId);
 }
 
 function bookingAt(dataDir: string) {
   let created = 0;
   const calendar = createFakeCalendar();
   let tokenMode: "ok" | "throw" = "ok";
+  const ledger = createAppointmentLedger({ dataDir });
   const booking = createAppointmentBooking({
     fetchFn: calendar.fetchFn,
     credentials: null,
@@ -127,6 +128,7 @@ function bookingAt(dataDir: string) {
     selection: SELECTION,
     now: () => REFERENCE,
     dataDir,
+    ledger,
     env: {},
     allowWrites: true,
     createIds: () => {
@@ -137,6 +139,7 @@ function bookingAt(dataDir: string) {
   return {
     calendar,
     booking,
+    ledger,
     setTokenMode(mode: "ok" | "throw") {
       tokenMode = mode;
     },
@@ -179,12 +182,16 @@ async function confirm(
   );
 }
 
-function retainedOperationIds(dataDir: string): string[] {
+function retainedAfterCleanup(dataDir: string, operationId: string): BookingRecord | undefined {
   const copyDir = mkdtempSync(join(tmpdir(), "scheduling-retention-"));
   cpSync(join(dataDir, "bookings.jsonl"), join(copyDir, "bookings.jsonl"));
   cpSync(join(dataDir, "callback-salt"), join(copyDir, "callback-salt"));
-  runRetentionCleanup({ dataDir: copyDir, now: REFERENCE });
-  return loadBookingRecords(copyDir).map((row) => row.operationId);
+  runRetentionCleanup({
+    dataDir: copyDir,
+    ledger: createAppointmentLedger({ dataDir: copyDir }),
+    now: REFERENCE,
+  });
+  return latestRow(copyDir, operationId);
 }
 
 describe("booking confirmation records", () => {
@@ -223,7 +230,7 @@ describe("booking confirmation records", () => {
     expect(shapeOutcome?.status).not.toBe("booked");
     expect(shapeOutcome).toMatchObject({ status: "inconclusive", eventExists: true });
 
-    expect(retainedOperationIds(dataDir)).toContain("op-1");
+    expect(retainedAfterCleanup(dataDir, "op-1")).toBeDefined();
 
     const postsBeforeLater = eventPosts(calendar.requests).length;
     const laterProposalId = await propose(booking, callId, {
@@ -240,7 +247,7 @@ describe("booking confirmation records", () => {
 
   it("leaves the inconclusive row in place when a retry cannot refresh the access token", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-token-"));
-    const { calendar, booking, setTokenMode } = bookingAt(dataDir);
+    const { calendar, booking, ledger, setTokenMode } = bookingAt(dataDir);
     calendar.state.getMode = "error";
     const callId = "call-token";
 
@@ -251,17 +258,18 @@ describe("booking confirmation records", () => {
     expect(deletes(calendar.requests)).toHaveLength(0);
 
     calendar.state.getMode = "match";
-    const rowsBeforeRetry = loadBookingRecords(dataDir);
+    const rowBeforeRetry = ledger.latestForOperation("op-1");
     setTokenMode("throw");
     const retry = await confirm(booking, callId, proposalId);
     expect(retry.status).toBe("inconclusive");
     expect(retry.message).toContain("Do not tell the caller the appointment is booked");
-    expect(loadBookingRecords(dataDir)).toEqual(rowsBeforeRetry);
+    // The same record object: the retry appended nothing, not even an identical row.
+    expect(ledger.latestForOperation("op-1")).toBe(rowBeforeRetry);
     expect(latestRow(dataDir, "op-1")?.status).toBe("inconclusive");
     expect(calendar.stored.has("ev-1")).toBe(true);
 
     setTokenMode("ok");
-    expect(retainedOperationIds(dataDir)).toContain("op-1");
+    expect(retainedAfterCleanup(dataDir, "op-1")).toBeDefined();
 
     const postsBeforeLater = eventPosts(calendar.requests).length;
     const laterProposalId = await propose(booking, callId, {
@@ -287,7 +295,7 @@ describe("booking confirmation records", () => {
 
   it("leaves the inconclusive row in place when a retry cannot read free/busy", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-freebusy-"));
-    const { calendar, booking } = bookingAt(dataDir);
+    const { calendar, booking, ledger } = bookingAt(dataDir);
     calendar.state.getMode = "error";
     const callId = "call-freebusy";
 
@@ -298,15 +306,15 @@ describe("booking confirmation records", () => {
 
     calendar.state.getMode = "match";
     calendar.state.freeBusyMode = "throw";
-    const rowsBeforeRetry = loadBookingRecords(dataDir);
+    const rowBeforeRetry = ledger.latestForOperation("op-1");
     const retry = await confirm(booking, callId, proposalId);
     expect(retry.status).toBe("inconclusive");
-    expect(loadBookingRecords(dataDir)).toEqual(rowsBeforeRetry);
+    expect(ledger.latestForOperation("op-1")).toBe(rowBeforeRetry);
     expect(latestRow(dataDir, "op-1")?.status).toBe("inconclusive");
     expect(deletes(calendar.requests)).toHaveLength(0);
 
     calendar.state.freeBusyMode = "ok";
-    expect(retainedOperationIds(dataDir)).toContain("op-1");
+    expect(retainedAfterCleanup(dataDir, "op-1")).toBeDefined();
 
     const postsBeforeLater = eventPosts(calendar.requests).length;
     const laterProposalId = await propose(booking, callId, {
@@ -325,7 +333,7 @@ describe("booking confirmation records", () => {
 
   it("keeps the mismatched-shape message when a retry cannot refresh the access token", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-shape-token-"));
-    const { calendar, booking, setTokenMode } = bookingAt(dataDir);
+    const { calendar, booking, ledger, setTokenMode } = bookingAt(dataDir);
     calendar.state.getMode = "mismatch";
     const callId = "call-shape-token";
 
@@ -334,10 +342,11 @@ describe("booking confirmation records", () => {
     expect(first.message).toContain("does not match the approved shape");
     expect(first.message).not.toContain("interrupted");
 
-    const rowsBeforeRetry = loadBookingRecords(dataDir);
+    const rowBeforeRetry = ledger.latestForOperation("op-1");
+    expect(rowBeforeRetry?.storedShape).toBe("mismatched");
     setTokenMode("throw");
     const retry = await confirm(booking, callId, proposalId);
-    expect(loadBookingRecords(dataDir)).toEqual(rowsBeforeRetry);
+    expect(ledger.latestForOperation("op-1")).toBe(rowBeforeRetry);
     expect(retry.status).toBe("inconclusive");
     expect(retry.message).toContain("does not match the approved shape");
     expect(retry.message).not.toContain("interrupted");

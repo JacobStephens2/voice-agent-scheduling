@@ -34,3 +34,7 @@ _Avoid_: Working hours
 **Booking confirmation**:
 The caller's explicit agreement to the appointment details read back by the scheduling agent, authorizing the appointment to be created.
 _Avoid_: Booking success
+
+**Appointment ledger**:
+The scheduler's durable record of each attempt to create an appointment and its outcome. It holds identities, start time, status and a salted callback-number hash, never caller speech, names or raw numbers.
+_Avoid_: Booking store
