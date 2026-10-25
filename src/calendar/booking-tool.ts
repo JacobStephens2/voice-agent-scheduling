@@ -9,6 +9,7 @@ import {
 import {
   createProposalStore,
   proposeAppointment,
+  transcriptCoversReadback,
   type ProposeResult,
   type ProposalStore,
 } from "./booking-proposal.js";
@@ -95,6 +96,10 @@ export interface AppointmentBooking {
     options: { callId: string; referenceTime?: Date },
   ): Promise<BookingToolResult>;
   markReadbackFinished(callId: string): void;
+  noteAssistantResponse(
+    callId: string,
+    response: { readonly status: string; readonly transcript: string },
+  ): void;
   /**
    * Reconcile every pending/inconclusive durable operation against its
    * stored event identity. Establishes a single matching event or a
@@ -250,6 +255,17 @@ export function createAppointmentBooking(
     },
 
     markReadbackFinished(callId) {
+      proposals.markReadbackFinished(callId);
+    },
+
+    noteAssistantResponse(callId, response) {
+      if (response.status !== "completed") {
+        return;
+      }
+      const proposal = proposals.current(callId);
+      if (!proposal || !transcriptCoversReadback(proposal, response.transcript)) {
+        return;
+      }
       proposals.markReadbackFinished(callId);
     },
 

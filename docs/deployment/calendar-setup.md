@@ -122,10 +122,21 @@ On the host, credential and selection files live under
 - Refresh credentials stay outside source control (`.gitignore` covers
   `.env*` and `.scratch/`), model context, and logs. Error messages carry
   bounded categories only, never secrets or caller contact data.
-- Booking confirmation is tied to the current proposal on that call. The
-  application refuses confirm until a completed assistant turn has finished
-  the readback (`response.done`) and the matching `proposalId` is supplied
-  with `confirmed: true`. Unclear assent, an interrupted readback, a stale
+- Booking confirmation is tied to the current proposal on that call.
+  `confirm_appointment` creates the appointment only when the caller has
+  explicitly agreed (`confirmed: true`), the `proposalId` is the current one,
+  and a completed assistant response has already read that proposal back.
+  The readback counts as finished only when `response.done` reports status
+  `completed` and that response's assistant output transcript contains the
+  returned readback fields: caller name, callback number, date, start time,
+  end time, timezone, and purpose when the proposal includes one. The
+  transcript is taken from that response's `response.output_audio_transcript`
+  events and from the completed response payload, compared in memory, and
+  not written to the appointment ledger, operational evidence, or logs.
+  Input transcription stays off. A response that is not a completed readback
+  of the current proposal does not create an appointment. Replacing the
+  proposal clears the finished readback and requires a new completed readback
+  of the replacement. Unclear assent, an interrupted readback, a stale
   proposal, or a refusal creates no event. Disconnecting before explicit
   agreement creates no event. Repeating the same completed confirmation
   returns that operation's outcome and does not insert a second event.

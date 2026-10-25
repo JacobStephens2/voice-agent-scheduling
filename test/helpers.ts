@@ -142,6 +142,61 @@ export async function openTelephoneSession(
   return socket;
 }
 
+/**
+ * One provider assistant response. Transcript text from
+ * `response.output_audio_transcript` events stays separate from transcript
+ * text on the completed response payload, matching the two places the
+ * session is allowed to read.
+ */
+export function receiveAssistantResponse(
+  socket: FakeRealtimeSocket,
+  options: {
+    responseId: string;
+    status?: string;
+    eventTranscript?: string;
+    doneTranscript?: string;
+    payloadTranscript?: string;
+  },
+): void {
+  if (options.eventTranscript) {
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: options.responseId,
+      item_id: `${options.responseId}-msg`,
+      delta: options.eventTranscript,
+    });
+  }
+  if (options.doneTranscript !== undefined) {
+    socket.receive({
+      type: "response.output_audio_transcript.done",
+      response_id: options.responseId,
+      item_id: `${options.responseId}-msg`,
+      transcript: options.doneTranscript,
+    });
+  }
+  const payloadTranscript = options.payloadTranscript ?? "";
+  socket.receive({
+    type: "response.done",
+    response: {
+      id: options.responseId,
+      object: "realtime.response",
+      status: options.status ?? "completed",
+      ...(payloadTranscript
+        ? {
+            output: [
+              {
+                id: `${options.responseId}-item`,
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_audio", transcript: payloadTranscript }],
+              },
+            ],
+          }
+        : {}),
+    },
+  });
+}
+
 export async function toolRoundTrip(
   socket: FakeRealtimeSocket,
   toolCallId: string,

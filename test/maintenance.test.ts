@@ -29,6 +29,7 @@ import {
   WEBHOOK_SECRET,
   incomingCallPayload,
   openTelephoneSession,
+  receiveAssistantResponse,
   recordedEvidence,
   signedHeaders,
   toolOutputs,
@@ -637,7 +638,10 @@ describe("retention cleanup and recovery", () => {
       date: FRIDAY_DATE,
       startTime: "10:00",
     });
-    socket.receive({ type: "response.done" });
+    receiveAssistantResponse(socket, {
+      responseId: "resp-public-1",
+      eventTranscript: `${CALLER_NAME}, callback ${CALLBACK_NUMBER}, ${FRIDAY_DATE} 10:00 to 10:30 America/New_York.`,
+    });
     const proposed = toolOutputs(socket)[0] as { status: string; proposalId?: string };
     expect(proposed.status).toBe("proposed");
     await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
@@ -672,7 +676,10 @@ describe("retention cleanup and recovery", () => {
       date: FRIDAY_DATE,
       startTime: "14:00",
     });
-    afterSocket.receive({ type: "response.done" });
+    receiveAssistantResponse(afterSocket, {
+      responseId: "resp-public-2",
+      eventTranscript: `${CALLER_NAME}, callback ${CALLBACK_NUMBER}, ${FRIDAY_DATE} 14:00 to 14:30 America/New_York.`,
+    });
     const proposedAgain = toolOutputs(afterSocket)[0] as { proposalId?: string };
     await toolRoundTrip(afterSocket, "tool-confirm-2", "confirm_appointment", {
       confirmed: true,
