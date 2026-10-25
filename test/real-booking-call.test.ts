@@ -109,8 +109,8 @@ describe("controlled inbound call with appointment booking", () => {
 
     receiveAssistantResponse(socket, {
       responseId: "resp-readback-1",
-      transcriptDelta: "Ada Lovelace, callback +15551239876, 2026-09-11",
-      transcriptDone: "10:00 to 10:30",
+      transcriptDelta: "Ada Lovelace, callback +15551239876, 2026-09-11 ",
+      transcriptDone: "10:00 to 10:30 ",
       payloadTranscript: "America/New_York. Purpose: Website review.",
     });
     await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
@@ -514,5 +514,71 @@ describe("controlled inbound call with appointment booking", () => {
 
     const evidence = await recordedEvidence(() => manager.listEvidence(), "call-book-4");
     expect(evidence.toolRoundTrips).toBe(3);
+  });
+
+  it("does not finish a readback when a required field exists only at the delta/payload splice", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-splice",
+      webhookId: "evt_book_splice",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    const spoken =
+      "0:00 Ada Lovelace, callback +15551239876, 2026-09-11 10:30 America/New_York 1";
+    receiveAssistantResponse(socket, {
+      responseId: "resp-splice",
+      status: "completed",
+      transcriptDelta: spoken,
+      payloadTranscript: spoken,
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
+  it("does not finish a readback when the done transcript repeats the deltas and the start time exists only at that join", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-done-splice",
+      webhookId: "evt_book_done_splice",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    const spoken =
+      "0:00 Ada Lovelace, callback +15551239876, 2026-09-11 10:30 America/New_York 1";
+    receiveAssistantResponse(socket, {
+      responseId: "resp-done-splice",
+      status: "completed",
+      transcriptDelta: spoken,
+      transcriptDone: spoken,
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
   });
 });

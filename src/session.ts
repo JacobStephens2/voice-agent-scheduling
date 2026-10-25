@@ -270,6 +270,24 @@ function stringField(value: unknown): string {
   return asOptionalString(value) ?? "";
 }
 
+/**
+ * Join two pieces of one assistant transcript. A piece already contained in
+ * the other is not appended, so two copies cannot form a field at the join.
+ * Distinct fragments are still concatenated.
+ */
+function mergeTranscript(current: string, addition: string): string {
+  if (!addition) {
+    return current;
+  }
+  if (!current || current.includes(addition)) {
+    return current || addition;
+  }
+  if (addition.includes(current)) {
+    return addition;
+  }
+  return current + addition;
+}
+
 function rememberOutputTranscript(
   transcripts: Map<string, string>,
   event: { readonly [key: string]: unknown },
@@ -278,11 +296,11 @@ function rememberOutputTranscript(
   if (!responseId) {
     return;
   }
-  const piece = stringField(event.delta) + stringField(event.transcript);
+  const piece = mergeTranscript(stringField(event.delta), stringField(event.transcript));
   if (!piece) {
     return;
   }
-  transcripts.set(responseId, (transcripts.get(responseId) ?? "") + piece);
+  transcripts.set(responseId, mergeTranscript(transcripts.get(responseId) ?? "", piece));
 }
 
 function completedPayloadTranscript(response: unknown): string {
@@ -306,7 +324,7 @@ function completedPayloadTranscript(response: unknown): string {
       if (!part || typeof part !== "object") {
         continue;
       }
-      text += stringField((part as { transcript?: unknown }).transcript);
+      text = mergeTranscript(text, stringField((part as { transcript?: unknown }).transcript));
     }
   }
   return text;
@@ -510,9 +528,8 @@ export function createTelephoneSession(options: {
                   : undefined;
               const status = stringField(response?.status);
               const responseId = stringField(response?.id);
-              const transcript =
-                (responseId ? (assistantTranscripts.get(responseId) ?? "") : "") +
-                completedPayloadTranscript(response);
+              const streamed = responseId ? (assistantTranscripts.get(responseId) ?? "") : "";
+              const transcript = mergeTranscript(streamed, completedPayloadTranscript(response));
               if (responseId) {
                 assistantTranscripts.delete(responseId);
               }

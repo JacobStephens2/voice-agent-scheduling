@@ -141,8 +141,9 @@ export function proposeAppointment(
 }
 
 /**
- * The assistant output transcript covers the proposal when it contains each
- * returned readback field. Purpose is required only when the proposal has one.
+ * The assistant output transcript covers the proposal when each returned
+ * readback field appears as its own value. A field inside a longer word or
+ * number does not count. Purpose is required only when the proposal has one.
  * The transcript itself is not retained.
  */
 export function transcriptCoversReadback(proposal: AppointmentProposal, transcript: string): boolean {
@@ -157,5 +158,31 @@ export function transcriptCoversReadback(proposal: AppointmentProposal, transcri
   if (proposal.purpose) {
     fields.push(proposal.purpose);
   }
-  return fields.every((field) => field.length > 0 && transcript.includes(field));
+  return fields.every((field) => containsField(transcript, field));
+}
+
+function containsField(transcript: string, field: string): boolean {
+  if (field.length === 0) {
+    return false;
+  }
+  let from = 0;
+  while (from <= transcript.length - field.length) {
+    const at = transcript.indexOf(field, from);
+    if (at < 0) {
+      return false;
+    }
+    const before = at === 0 ? "" : (transcript[at - 1] ?? "");
+    const afterIndex = at + field.length;
+    const after = afterIndex >= transcript.length ? "" : (transcript[afterIndex] ?? "");
+    if (!isFieldCharacter(before) && !isFieldCharacter(after)) {
+      return true;
+    }
+    from = at + 1;
+  }
+  return false;
+}
+
+/** Letters, numbers, and underscore continue a field. `Ada` does not match inside `Adam`. */
+function isFieldCharacter(char: string): boolean {
+  return char !== "" && /[\p{L}\p{N}_]/u.test(char);
 }

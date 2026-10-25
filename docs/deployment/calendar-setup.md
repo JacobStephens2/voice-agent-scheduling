@@ -128,12 +128,16 @@ On the host, credential and selection files live under
   and a completed assistant response has already read that proposal back.
   Otherwise it returns `readback_incomplete` and creates no appointment.
   The readback counts as finished only when `response.done` reports status
-  `completed` and that response's assistant output transcript contains the
-  returned readback fields: caller name, callback number, date, start time,
-  end time, timezone, and purpose when the proposal includes one. The
-  transcript is taken from that response's `response.output_audio_transcript`
+  `completed` and that response's assistant output transcript contains each
+  returned readback field as its own value: caller name, callback number,
+  date, start time, end time, timezone, and purpose when the proposal
+  includes one. A field inside a longer word or number does not count.
+  The transcript is taken from that response's `response.output_audio_transcript`
   events and from the completed response payload, compared in memory, and
   not written to the appointment ledger, operational evidence, or logs.
+  Distinct fragments from those places are joined. A copy of text already
+  present is not joined again, so a field cannot be formed by gluing the end
+  of one copy to the start of the other.
   Input transcription stays off. A response that is not a completed readback
   of the current proposal does not create an appointment. Replacing the
   proposal clears the finished readback and requires a new completed readback
