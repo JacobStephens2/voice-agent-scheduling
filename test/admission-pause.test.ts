@@ -39,7 +39,6 @@ function createStubBooking(options: {
       }
       return { status: "booked", message: "The appointment is booked." };
     },
-    markReadbackFinished: () => undefined,
   };
 }
 

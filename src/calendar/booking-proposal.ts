@@ -139,3 +139,50 @@ export function proposeAppointment(
     message: `Please read back: ${callerName}, callback ${callbackNumber}, ${slot.date} ${slot.startTime}–${slot.endTime} ${SCHEDULING_TIMEZONE}.${purposeLine} Wait for explicit agreement before confirming.`,
   };
 }
+
+/**
+ * The assistant output transcript covers the proposal when each returned
+ * readback field appears as its own value. A field inside a longer word or
+ * number does not count. Purpose is required only when the proposal has one.
+ * The transcript itself is not retained.
+ */
+export function transcriptCoversReadback(proposal: AppointmentProposal, transcript: string): boolean {
+  const fields = [
+    proposal.callerName,
+    proposal.callbackNumber,
+    proposal.date,
+    proposal.startTime,
+    proposal.endTime,
+    proposal.timezone,
+  ];
+  if (proposal.purpose) {
+    fields.push(proposal.purpose);
+  }
+  return fields.every((field) => containsField(transcript, field));
+}
+
+function containsField(transcript: string, field: string): boolean {
+  if (field.length === 0) {
+    return false;
+  }
+  let from = 0;
+  while (from <= transcript.length - field.length) {
+    const at = transcript.indexOf(field, from);
+    if (at < 0) {
+      return false;
+    }
+    const before = at === 0 ? "" : (transcript[at - 1] ?? "");
+    const afterIndex = at + field.length;
+    const after = afterIndex >= transcript.length ? "" : (transcript[afterIndex] ?? "");
+    if (!isFieldCharacter(before) && !isFieldCharacter(after)) {
+      return true;
+    }
+    from = at + 1;
+  }
+  return false;
+}
+
+/** Letters, numbers, and underscore continue a field. `Ada` does not match inside `Adam`. */
+function isFieldCharacter(char: string): boolean {
+  return char !== "" && /[\p{L}\p{N}_]/u.test(char);
+}

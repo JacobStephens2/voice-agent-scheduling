@@ -9,6 +9,7 @@ import {
 import {
   createProposalStore,
   proposeAppointment,
+  transcriptCoversReadback,
   type ProposeResult,
   type ProposalStore,
 } from "./booking-proposal.js";
@@ -47,8 +48,6 @@ export interface BookingIds {
 export interface ConfirmResult {
   readonly status:
     | "booked"
-    | "not_confirmed"
-    | "no_proposal"
     | "readback_incomplete"
     | "unavailable"
     | "inconclusive"
@@ -95,6 +94,10 @@ export interface AppointmentBooking {
     options: { callId: string; referenceTime?: Date },
   ): Promise<BookingToolResult>;
   markReadbackFinished(callId: string): void;
+  finishReadbackIfCovered(
+    callId: string,
+    response: { readonly status: string; readonly transcript: string },
+  ): void;
   /**
    * Reconcile every pending/inconclusive durable operation against its
    * stored event identity. Establishes a single matching event or a
@@ -253,6 +256,17 @@ export function createAppointmentBooking(
       proposals.markReadbackFinished(callId);
     },
 
+    finishReadbackIfCovered(callId, response) {
+      if (response.status !== "completed") {
+        return;
+      }
+      const proposal = proposals.current(callId);
+      if (!proposal || !transcriptCoversReadback(proposal, response.transcript)) {
+        return;
+      }
+      proposals.markReadbackFinished(callId);
+    },
+
     reconcileUnresolvedOperations() {
       return enqueue(() =>
         reconcileUnresolved({
@@ -293,20 +307,20 @@ async function confirm(
   const proposal = ctx.proposals.current(execOptions.callId);
   if (!proposal) {
     return {
-      status: "no_proposal",
+      status: "readback_incomplete",
       message: "There is no current appointment proposal on this call to confirm.",
     };
   }
   if (args.confirmed !== true) {
     return {
-      status: "not_confirmed",
+      status: "readback_incomplete",
       message:
         "Do not create the appointment. Unclear assent, background speech, or a refusal is not confirmation.",
     };
   }
   if (typeof args.proposalId !== "string" || args.proposalId !== proposal.proposalId) {
     return {
-      status: "no_proposal",
+      status: "readback_incomplete",
       message:
         "That confirmation does not match the current proposal on this call. Finish a fresh complete readback first.",
     };
