@@ -33,7 +33,15 @@ export interface BookingTool {
     args: Record<string, unknown>,
     options: { callId: string; referenceTime?: Date },
   ): unknown | Promise<unknown>;
-  markReadbackFinished?(callId: string): void;
+  /**
+   * Mark the current readback finished when this assistant response
+   * completed and its transcript covers the proposal. The transcript
+   * is not stored or logged.
+   */
+  finishReadbackIfCovered?(
+    callId: string,
+    response: { readonly status: string; readonly transcript: string },
+  ): void;
   reconcileUnresolvedOperations?(): Promise<readonly BookingReconciliation[]>;
 }
 
@@ -99,7 +107,7 @@ const AVAILABILITY_INSTRUCTIONS = [
 const BOOKING_INSTRUCTIONS = [
   "Collect the caller's name and a callback number they speak and confirm. The callback number may differ from the number that placed this call. Purpose is optional. Do not request an email address.",
   "After the caller chooses an offered time and has confirmed their callback number, call propose_appointment with their name, confirmed callback number, date, Eastern start time, and optional purpose.",
-  "Read back every field the proposal returns: name, callback number, exact date, start and end times, and timezone. Do not call confirm_appointment until you have finished speaking that entire readback.",
+  "Read back every field the proposal returns, using the exact returned values: name, callback number, date, start and end times, timezone, and purpose when the proposal includes one. Do not call confirm_appointment until you have finished speaking that entire readback.",
   "A material correction of name, callback number, date, time, timezone, or purpose requires a new propose_appointment and a fresh complete readback. Do not reuse an earlier proposalId.",
   "Call confirm_appointment only after you finished the full readback and the caller explicitly agrees. Pass that proposal's proposalId and confirmed true.",
   "Do not call confirm_appointment for unclear assent, background speech, an interrupted readback, a refusal, or if the caller has not clearly agreed. Interrupted readback requires a fresh complete readback first.",
@@ -258,6 +266,52 @@ function asOptionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function stringField(value: unknown): string {
+  return asOptionalString(value) ?? "";
+}
+
+function rememberOutputTranscript(
+  transcripts: Map<string, string>,
+  event: { readonly [key: string]: unknown },
+): void {
+  const responseId = stringField(event.response_id);
+  if (!responseId) {
+    return;
+  }
+  const piece = stringField(event.delta) + stringField(event.transcript);
+  if (!piece) {
+    return;
+  }
+  transcripts.set(responseId, (transcripts.get(responseId) ?? "") + piece);
+}
+
+function completedPayloadTranscript(response: unknown): string {
+  if (!response || typeof response !== "object") {
+    return "";
+  }
+  const output = (response as { output?: unknown }).output;
+  if (!Array.isArray(output)) {
+    return "";
+  }
+  let text = "";
+  for (const item of output) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) {
+      continue;
+    }
+    for (const part of content) {
+      if (!part || typeof part !== "object") {
+        continue;
+      }
+      text += stringField((part as { transcript?: unknown }).transcript);
+    }
+  }
+  return text;
+}
+
 function eventText(data: unknown): string | undefined {
   if (typeof data === "string") {
     return data;
@@ -343,6 +397,7 @@ export function createTelephoneSession(options: {
         };
 
         const limitLabel = callLimitLabel(maxDurationMs);
+        const assistantTranscripts = new Map<string, string>();
 
         warningTimeout = setTimeout(() => {
           if (finished) {
@@ -397,6 +452,11 @@ export function createTelephoneSession(options: {
             return;
           }
 
+          if (event.type.startsWith("response.output_audio_transcript")) {
+            rememberOutputTranscript(assistantTranscripts, event);
+            return;
+          }
+
           switch (event.type) {
             case "session.created": {
               const session = event.session as { model?: unknown } | undefined;
@@ -444,7 +504,19 @@ export function createTelephoneSession(options: {
               break;
             }
             case "response.done": {
-              options.booking?.markReadbackFinished?.(options.callId);
+              const response =
+                event.response && typeof event.response === "object"
+                  ? (event.response as { status?: unknown; id?: unknown })
+                  : undefined;
+              const status = stringField(response?.status);
+              const responseId = stringField(response?.id);
+              const transcript =
+                (responseId ? (assistantTranscripts.get(responseId) ?? "") : "") +
+                completedPayloadTranscript(response);
+              if (responseId) {
+                assistantTranscripts.delete(responseId);
+              }
+              options.booking?.finishReadbackIfCovered?.(options.callId, { status, transcript });
               break;
             }
             case "response.function_call_arguments.done": {

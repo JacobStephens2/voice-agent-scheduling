@@ -118,7 +118,7 @@ describe("appointment booking tool", () => {
       { confirmed: true },
       { callId: CALL_ID },
     );
-    expect(withoutProposal.status).toBe("no_proposal");
+    expect(withoutProposal.status).toBe("readback_incomplete");
     expect(google.writes).toEqual([]);
 
     const proposed = await proposedOn(booking);
@@ -128,7 +128,7 @@ describe("appointment booking tool", () => {
       { confirmed: false, proposalId: (proposed as { proposalId?: string }).proposalId },
       { callId: CALL_ID },
     );
-    expect(unclear.status).toBe("not_confirmed");
+    expect(unclear.status).toBe("readback_incomplete");
     expect(google.writes).toEqual([]);
 
     const otherCall = await booking.execute(
@@ -136,7 +136,7 @@ describe("appointment booking tool", () => {
       { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId },
       { callId: "call-other" },
     );
-    expect(otherCall.status).toBe("no_proposal");
+    expect(otherCall.status).toBe("readback_incomplete");
     expect(google.writes).toEqual([]);
   });
 
@@ -159,7 +159,7 @@ describe("appointment booking tool", () => {
       { confirmed: true, proposalId: "not-the-current-proposal" },
       { callId: CALL_ID },
     );
-    expect(stale.status).toBe("no_proposal");
+    expect(stale.status).toBe("readback_incomplete");
     expect(google.writes).toEqual([]);
   });
 

@@ -139,3 +139,23 @@ export function proposeAppointment(
     message: `Please read back: ${callerName}, callback ${callbackNumber}, ${slot.date} ${slot.startTime}–${slot.endTime} ${SCHEDULING_TIMEZONE}.${purposeLine} Wait for explicit agreement before confirming.`,
   };
 }
+
+/**
+ * The assistant output transcript covers the proposal when it contains each
+ * returned readback field. Purpose is required only when the proposal has one.
+ * The transcript itself is not retained.
+ */
+export function transcriptCoversReadback(proposal: AppointmentProposal, transcript: string): boolean {
+  const fields = [
+    proposal.callerName,
+    proposal.callbackNumber,
+    proposal.date,
+    proposal.startTime,
+    proposal.endTime,
+    proposal.timezone,
+  ];
+  if (proposal.purpose) {
+    fields.push(proposal.purpose);
+  }
+  return fields.every((field) => field.length > 0 && transcript.includes(field));
+}

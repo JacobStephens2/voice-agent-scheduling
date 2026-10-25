@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,6 +11,7 @@ import {
   WEBHOOK_SECRET,
   fakeGoogleCalendar,
   openTelephoneSession,
+  receiveAssistantResponse,
   recordedEvidence,
   TEST_EVENT_ID,
   TEST_OPERATION_ID,
@@ -67,7 +68,7 @@ describe("controlled inbound call with appointment booking", () => {
   it("books one appointment through the telephone flow after explicit confirmation", async () => {
     const sockets: FakeRealtimeSocket[] = [];
     const google = fakeGoogleCalendar({});
-    const { manager } = createBookingManager(sockets, google);
+    const { manager, dataDir } = createBookingManager(sockets, google);
 
     const socket = await openTelephoneSession(sockets, manager, {
       callId: "call-book-1",
@@ -82,6 +83,7 @@ describe("controlled inbound call with appointment booking", () => {
       "propose_appointment",
       "confirm_appointment",
     ]);
+    expect(JSON.stringify(update.session)).not.toMatch(/transcription/i);
     expect(update.session.instructions.toLowerCase()).toContain("callback");
     expect(update.session.instructions.toLowerCase()).toContain("confirm");
     expect(update.session.instructions.toLowerCase()).toContain("do not request an email");
@@ -105,7 +107,12 @@ describe("controlled inbound call with appointment booking", () => {
     expect(proposed.readback.startTime).toBe("10:00");
     expect(proposed.readback.endTime).toBe("10:30");
 
-    socket.receive({ type: "response.done" });
+    receiveAssistantResponse(socket, {
+      responseId: "resp-readback-1",
+      transcriptDelta: "Ada Lovelace, callback +15551239876, 2026-09-11",
+      transcriptDone: "10:00 to 10:30",
+      payloadTranscript: "America/New_York. Purpose: Website review.",
+    });
     await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
       confirmed: true,
       proposalId: (proposed as { proposalId?: string }).proposalId,
@@ -134,6 +141,13 @@ describe("controlled inbound call with appointment booking", () => {
     expect(evidence).not.toHaveProperty("audio");
     expect(JSON.stringify(evidence)).not.toContain("Ada Lovelace");
     expect(JSON.stringify(evidence)).not.toContain("15551239876");
+    expect(JSON.stringify(evidence)).not.toContain("Website review");
+    expect(evidence).not.toHaveProperty("transcript");
+    const stored = readFileSync(join(dataDir, "bookings.jsonl"), "utf8");
+    expect(stored).not.toContain("Ada Lovelace");
+    expect(stored).not.toContain("15551239876");
+    expect(stored).not.toContain("Website review");
+    expect(stored).not.toContain("transcript");
   });
 
   it("creates no event when the caller disconnects before explicit confirmation", async () => {
@@ -216,6 +230,89 @@ describe("controlled inbound call with appointment booking", () => {
     expect(google.writes).toEqual([]);
   });
 
+  it("creates no event when the assistant response is not a completed readback of the current proposal", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-not-readback",
+      webhookId: "evt_book_not_readback",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+      purpose: "Website review",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+
+    // A different response already spoke the fields. This completed response did not.
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-other",
+      delta:
+        "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York. Purpose: Website review.",
+    });
+    socket.receive({
+      type: "conversation.item.input_audio_transcription.completed",
+      transcript:
+        "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York. Purpose: Website review.",
+    });
+    receiveAssistantResponse(socket, {
+      responseId: "resp-chatter",
+      status: "completed",
+      transcriptDelta: "I can help you find a time.",
+      payloadTranscript: "Let me know what day works.",
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
+  it("creates no event when the readback response did not complete", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-cancelled-readback",
+      webhookId: "evt_book_cancelled_readback",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+      purpose: "Website review",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    receiveAssistantResponse(socket, {
+      responseId: "resp-cut-off",
+      status: "cancelled",
+      transcriptDelta:
+        "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York. Purpose: Website review.",
+      payloadTranscript:
+        "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York. Purpose: Website review.",
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
   it("requires a fresh readback after a material correction before writing", async () => {
     const sockets: FakeRealtimeSocket[] = [];
     const google = fakeGoogleCalendar({});
@@ -232,6 +329,11 @@ describe("controlled inbound call with appointment booking", () => {
       date: "2026-09-11",
       startTime: "10:00",
     });
+    receiveAssistantResponse(socket, {
+      responseId: "resp-first-readback",
+      transcriptDelta:
+        "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York.",
+    });
     await toolRoundTrip(socket, "tool-2", "propose_appointment", {
       callerName: "Ada Lovelace",
       callbackNumber: "+15559876543",
@@ -240,8 +342,25 @@ describe("controlled inbound call with appointment booking", () => {
       startTime: "14:00",
     });
     const corrected = toolOutputs(socket)[1] as { proposalId?: string };
-    socket.receive({ type: "response.done" });
     await toolRoundTrip(socket, "tool-3", "confirm_appointment", {
+      confirmed: true,
+      proposalId: corrected.proposalId,
+    });
+    receiveAssistantResponse(socket, {
+      responseId: "resp-old-readback",
+      transcriptDelta:
+        "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York.",
+    });
+    await toolRoundTrip(socket, "tool-4", "confirm_appointment", {
+      confirmed: true,
+      proposalId: corrected.proposalId,
+    });
+    receiveAssistantResponse(socket, {
+      responseId: "resp-new-readback",
+      transcriptDelta:
+        "Ada Lovelace, callback +15559876543, 2026-09-11 14:00 to 14:30 America/New_York.",
+    });
+    await toolRoundTrip(socket, "tool-5", "confirm_appointment", {
       confirmed: true,
       proposalId: corrected.proposalId,
     });
@@ -252,7 +371,9 @@ describe("controlled inbound call with appointment booking", () => {
       status: "proposed",
       readback: { callbackNumber: "+15559876543", startTime: "14:00" },
     });
-    expect(outputs[2]).toMatchObject({ status: "booked", eventExists: true });
+    expect(outputs[2]).toMatchObject({ status: "readback_incomplete" });
+    expect(outputs[3]).toMatchObject({ status: "readback_incomplete" });
+    expect(outputs[4]).toMatchObject({ status: "booked", eventExists: true });
     expect(google.writes).toHaveLength(1);
     expect(google.writes[0]?.body).toMatchObject({
       description: "Callback number: +15559876543",
@@ -291,7 +412,11 @@ describe("controlled inbound call with appointment booking", () => {
       startTime: "10:00",
     });
     const proposed = toolOutputs(socket)[0] as { proposalId?: string };
-    socket.receive({ type: "response.done" });
+    receiveAssistantResponse(socket, {
+      responseId: "resp-disconnect",
+      payloadTranscript:
+        "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York.",
+    });
     socket.receive({
       type: "response.function_call_arguments.done",
       call_id: "tool-2",
@@ -357,7 +482,11 @@ describe("controlled inbound call with appointment booking", () => {
       startTime: "10:00",
     });
     const proposed = toolOutputs(socket)[0] as { proposalId?: string };
-    socket.receive({ type: "response.done" });
+    receiveAssistantResponse(socket, {
+      responseId: "resp-repeat",
+      transcriptDelta:
+        "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York.",
+    });
     await toolRoundTrip(socket, "tool-2", "confirm_appointment", {
       confirmed: true,
       proposalId: proposed.proposalId,
