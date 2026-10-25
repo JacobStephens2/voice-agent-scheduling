@@ -349,7 +349,7 @@ describe("confirmed booking reconciliation", () => {
       { confirmed: true, proposalId },
       { callId: CALL_ID },
     );
-    expect(stale.status).toBe("no_proposal");
+    expect(stale.status).toBe("readback_incomplete");
 
     const replacementId = await propose(booking, { startTime: "14:00" });
     const replacement = await confirm(booking, replacementId);

@@ -153,25 +153,25 @@ export function receiveAssistantResponse(
   options: {
     responseId: string;
     status?: string;
-    eventTranscript?: string;
-    doneTranscript?: string;
+    transcriptDelta?: string;
+    transcriptDone?: string;
     payloadTranscript?: string;
   },
 ): void {
-  if (options.eventTranscript) {
+  if (options.transcriptDelta) {
     socket.receive({
       type: "response.output_audio_transcript.delta",
       response_id: options.responseId,
       item_id: `${options.responseId}-msg`,
-      delta: options.eventTranscript,
+      delta: options.transcriptDelta,
     });
   }
-  if (options.doneTranscript !== undefined) {
+  if (options.transcriptDone !== undefined) {
     socket.receive({
       type: "response.output_audio_transcript.done",
       response_id: options.responseId,
       item_id: `${options.responseId}-msg`,
-      transcript: options.doneTranscript,
+      transcript: options.transcriptDone,
     });
   }
   const payloadTranscript = options.payloadTranscript ?? "";

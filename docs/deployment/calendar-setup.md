@@ -126,6 +126,7 @@ On the host, credential and selection files live under
   `confirm_appointment` creates the appointment only when the caller has
   explicitly agreed (`confirmed: true`), the `proposalId` is the current one,
   and a completed assistant response has already read that proposal back.
+  Otherwise it returns `readback_incomplete` and creates no appointment.
   The readback counts as finished only when `response.done` reports status
   `completed` and that response's assistant output transcript contains the
   returned readback fields: caller name, callback number, date, start time,

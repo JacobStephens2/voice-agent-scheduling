@@ -33,12 +33,12 @@ export interface BookingTool {
     args: Record<string, unknown>,
     options: { callId: string; referenceTime?: Date },
   ): unknown | Promise<unknown>;
-  markReadbackFinished?(callId: string): void;
   /**
-   * Decide whether this assistant response finished the current readback.
-   * `transcript` is compared in memory and must not be stored or logged.
+   * Mark the current readback finished when this assistant response
+   * completed and its transcript covers the proposal. The transcript
+   * is not stored or logged.
    */
-  noteAssistantResponse?(
+  finishReadbackIfCovered?(
     callId: string,
     response: { readonly status: string; readonly transcript: string },
   ): void;
@@ -267,7 +267,7 @@ function asOptionalString(value: unknown): string | undefined {
 }
 
 function stringField(value: unknown): string {
-  return typeof value === "string" ? value : "";
+  return asOptionalString(value) ?? "";
 }
 
 function rememberOutputTranscript(
@@ -504,22 +504,19 @@ export function createTelephoneSession(options: {
               break;
             }
             case "response.done": {
-              const response = event.response;
-              const status =
-                response && typeof response === "object"
-                  ? stringField((response as { status?: unknown }).status)
-                  : "";
-              const responseId =
-                response && typeof response === "object"
-                  ? stringField((response as { id?: unknown }).id)
-                  : "";
+              const response =
+                event.response && typeof event.response === "object"
+                  ? (event.response as { status?: unknown; id?: unknown })
+                  : undefined;
+              const status = stringField(response?.status);
+              const responseId = stringField(response?.id);
               const transcript =
                 (responseId ? (assistantTranscripts.get(responseId) ?? "") : "") +
                 completedPayloadTranscript(response);
               if (responseId) {
                 assistantTranscripts.delete(responseId);
               }
-              options.booking?.noteAssistantResponse?.(options.callId, { status, transcript });
+              options.booking?.finishReadbackIfCovered?.(options.callId, { status, transcript });
               break;
             }
             case "response.function_call_arguments.done": {

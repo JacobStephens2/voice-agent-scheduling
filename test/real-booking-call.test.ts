@@ -109,8 +109,8 @@ describe("controlled inbound call with appointment booking", () => {
 
     receiveAssistantResponse(socket, {
       responseId: "resp-readback-1",
-      eventTranscript: "Ada Lovelace, callback +15551239876, 2026-09-11",
-      doneTranscript: "10:00 to 10:30",
+      transcriptDelta: "Ada Lovelace, callback +15551239876, 2026-09-11",
+      transcriptDone: "10:00 to 10:30",
       payloadTranscript: "America/New_York. Purpose: Website review.",
     });
     await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
@@ -264,7 +264,7 @@ describe("controlled inbound call with appointment booking", () => {
     receiveAssistantResponse(socket, {
       responseId: "resp-chatter",
       status: "completed",
-      eventTranscript: "I can help you find a time.",
+      transcriptDelta: "I can help you find a time.",
       payloadTranscript: "Let me know what day works.",
     });
     await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
@@ -298,7 +298,7 @@ describe("controlled inbound call with appointment booking", () => {
     receiveAssistantResponse(socket, {
       responseId: "resp-cut-off",
       status: "cancelled",
-      eventTranscript:
+      transcriptDelta:
         "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York. Purpose: Website review.",
       payloadTranscript:
         "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York. Purpose: Website review.",
@@ -331,7 +331,7 @@ describe("controlled inbound call with appointment booking", () => {
     });
     receiveAssistantResponse(socket, {
       responseId: "resp-first-readback",
-      eventTranscript:
+      transcriptDelta:
         "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York.",
     });
     await toolRoundTrip(socket, "tool-2", "propose_appointment", {
@@ -348,7 +348,7 @@ describe("controlled inbound call with appointment booking", () => {
     });
     receiveAssistantResponse(socket, {
       responseId: "resp-old-readback",
-      eventTranscript:
+      transcriptDelta:
         "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York.",
     });
     await toolRoundTrip(socket, "tool-4", "confirm_appointment", {
@@ -357,7 +357,7 @@ describe("controlled inbound call with appointment booking", () => {
     });
     receiveAssistantResponse(socket, {
       responseId: "resp-new-readback",
-      eventTranscript:
+      transcriptDelta:
         "Ada Lovelace, callback +15559876543, 2026-09-11 14:00 to 14:30 America/New_York.",
     });
     await toolRoundTrip(socket, "tool-5", "confirm_appointment", {
@@ -484,7 +484,7 @@ describe("controlled inbound call with appointment booking", () => {
     const proposed = toolOutputs(socket)[0] as { proposalId?: string };
     receiveAssistantResponse(socket, {
       responseId: "resp-repeat",
-      eventTranscript:
+      transcriptDelta:
         "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York.",
     });
     await toolRoundTrip(socket, "tool-2", "confirm_appointment", {
