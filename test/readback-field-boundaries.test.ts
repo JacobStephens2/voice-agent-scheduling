@@ -49,4 +49,78 @@ describe("readback field boundaries", () => {
     expect(result.status).toBe("readback_incomplete");
     expect(google.writes).toEqual([]);
   });
+
+  it("does not accept a caller name that continues through a Unicode format character", async () => {
+    const google = fakeGoogleCalendar({});
+    const booking = createAppointmentBooking({
+      fetchFn: google.fetchFn,
+      tokenProvider: { getAccessToken: async () => "test-access-token" },
+      selection: SELECTION,
+      now: () => MONDAY_14H,
+      dataDir: mkdtempSync(join(tmpdir(), "scheduling-format-")),
+      createIds: () => ({ operationId: TEST_OPERATION_ID, eventId: TEST_EVENT_ID }),
+      allowWrites: true,
+    });
+    const callId = "call-format-name";
+    const proposed = (await booking.execute(
+      "propose_appointment",
+      {
+        callerName: "Ada",
+        callbackNumber: "+15551239876",
+        callbackConfirmed: true,
+        date: "2026-09-11",
+        startTime: "10:00",
+      },
+      { callId },
+    )) as { proposalId: string };
+    booking.finishReadbackIfCovered(callId, {
+      status: "completed",
+      transcript:
+        "Ada\u200Bm Smith, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York.",
+    });
+    const result = await booking.execute(
+      "confirm_appointment",
+      { confirmed: true, proposalId: proposed.proposalId },
+      { callId },
+    );
+    expect(result.status).toBe("readback_incomplete");
+    expect(google.writes).toEqual([]);
+  });
+
+  it("does not accept a caller name that continues through a supplementary-plane format character", async () => {
+    const google = fakeGoogleCalendar({});
+    const booking = createAppointmentBooking({
+      fetchFn: google.fetchFn,
+      tokenProvider: { getAccessToken: async () => "test-access-token" },
+      selection: SELECTION,
+      now: () => MONDAY_14H,
+      dataDir: mkdtempSync(join(tmpdir(), "scheduling-format-pair-")),
+      createIds: () => ({ operationId: TEST_OPERATION_ID, eventId: TEST_EVENT_ID }),
+      allowWrites: true,
+    });
+    const callId = "call-format-pair-name";
+    const proposed = (await booking.execute(
+      "propose_appointment",
+      {
+        callerName: "Ada",
+        callbackNumber: "+15551239876",
+        callbackConfirmed: true,
+        date: "2026-09-11",
+        startTime: "10:00",
+      },
+      { callId },
+    )) as { proposalId: string };
+    booking.finishReadbackIfCovered(callId, {
+      status: "completed",
+      transcript:
+        "Ada\u{E0020}m Smith, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York.",
+    });
+    const result = await booking.execute(
+      "confirm_appointment",
+      { confirmed: true, proposalId: proposed.proposalId },
+      { callId },
+    );
+    expect(result.status).toBe("readback_incomplete");
+    expect(google.writes).toEqual([]);
+  });
 });
