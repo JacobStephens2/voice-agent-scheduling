@@ -143,7 +143,8 @@ export function proposeAppointment(
 /**
  * The assistant output transcript covers the proposal when each returned
  * readback field appears as its own value. A field inside a longer word or
- * number does not count. Purpose is required only when the proposal has one.
+ * number does not count. A Unicode format character continues a field, so it
+ * does not end one. Purpose is required only when the proposal has one.
  * The transcript itself is not retained.
  */
 export function transcriptCoversReadback(proposal: AppointmentProposal, transcript: string): boolean {
@@ -171,9 +172,8 @@ function containsField(transcript: string, field: string): boolean {
     if (at < 0) {
       return false;
     }
-    const before = at === 0 ? "" : (transcript[at - 1] ?? "");
-    const afterIndex = at + field.length;
-    const after = afterIndex >= transcript.length ? "" : (transcript[afterIndex] ?? "");
+    const before = codePointEndingAt(transcript, at);
+    const after = codePointStartingAt(transcript, at + field.length);
     if (!isFieldCharacter(before) && !isFieldCharacter(after)) {
       return true;
     }
@@ -182,7 +182,36 @@ function containsField(transcript: string, field: string): boolean {
   return false;
 }
 
-/** Letters, numbers, and underscore continue a field. `Ada` does not match inside `Adam`. */
+/**
+ * The code point ending at this UTF-16 index. A supplementary format
+ * character is two units; reading one unit would end the field early.
+ */
+function codePointEndingAt(text: string, index: number): string {
+  if (index <= 0) {
+    return "";
+  }
+  const tail = index - 1;
+  const unit = text.charCodeAt(tail);
+  const lead = tail > 0 ? text.charCodeAt(tail - 1) : 0;
+  if (unit >= 0xdc00 && unit <= 0xdfff && lead >= 0xd800 && lead <= 0xdbff) {
+    return text.slice(tail - 1, index);
+  }
+  return text[tail] ?? "";
+}
+
+/** The code point starting at this UTF-16 index, or "" at the end. */
+function codePointStartingAt(text: string, index: number): string {
+  if (index < 0 || index >= text.length) {
+    return "";
+  }
+  const point = text.codePointAt(index);
+  if (point === undefined) {
+    return "";
+  }
+  return String.fromCodePoint(point);
+}
+
+/** Letters, numbers, underscore, and Unicode format characters continue a field. `Ada` does not match inside `Adam`. */
 function isFieldCharacter(char: string): boolean {
-  return char !== "" && /[\p{L}\p{N}_]/u.test(char);
+  return char !== "" && /^[\p{L}\p{N}\p{Cf}_]$/u.test(char);
 }
