@@ -39,7 +39,7 @@ async function confirmCallerName(transcriptName: string, callId: string, dirPref
   )) as { proposalId: string };
   booking.finishReadbackIfCovered(callId, {
     status: "completed",
-    transcript: `${transcriptName}${READBACK_TAIL}`,
+    sources: [`${transcriptName}${READBACK_TAIL}`],
   });
   const result = await booking.execute(
     "confirm_appointment",

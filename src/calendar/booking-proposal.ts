@@ -150,9 +150,8 @@ export function proposeAppointment(
  */
 export function transcriptCoversReadback(
   proposal: AppointmentProposal,
-  transcript: string | readonly string[],
+  sources: readonly string[],
 ): boolean {
-  const sources = typeof transcript === "string" ? [transcript] : transcript;
   const fields = [
     proposal.callerName,
     proposal.callbackNumber,

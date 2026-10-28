@@ -40,7 +40,7 @@ export interface BookingTool {
    */
   finishReadbackIfCovered?(
     callId: string,
-    response: { readonly status: string; readonly transcript: string | readonly string[] },
+    response: { readonly status: string; readonly sources: readonly string[] },
   ): void;
   reconcileUnresolvedOperations?(): Promise<readonly BookingReconciliation[]>;
 }
@@ -533,11 +533,11 @@ export function createTelephoneSession(options: {
               const streamed = responseId ? (assistantTranscripts.get(responseId) ?? "") : "";
               // Two sources of this response. Do not concatenate them:
               // near-copies can form a readback field only at the join.
-              const transcript = [streamed, completedPayloadTranscript(response)];
+              const sources = [streamed, completedPayloadTranscript(response)];
               if (responseId) {
                 assistantTranscripts.delete(responseId);
               }
-              options.booking?.finishReadbackIfCovered?.(options.callId, { status, transcript });
+              options.booking?.finishReadbackIfCovered?.(options.callId, { status, sources });
               break;
             }
             case "response.function_call_arguments.done": {

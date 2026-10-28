@@ -96,7 +96,7 @@ export interface AppointmentBooking {
   markReadbackFinished(callId: string): void;
   finishReadbackIfCovered(
     callId: string,
-    response: { readonly status: string; readonly transcript: string | readonly string[] },
+    response: { readonly status: string; readonly sources: readonly string[] },
   ): void;
   /**
    * Reconcile every pending/inconclusive durable operation against its
@@ -261,7 +261,7 @@ export function createAppointmentBooking(
         return;
       }
       const proposal = proposals.current(callId);
-      if (!proposal || !transcriptCoversReadback(proposal, response.transcript)) {
+      if (!proposal || !transcriptCoversReadback(proposal, response.sources)) {
         return;
       }
       proposals.markReadbackFinished(callId);
