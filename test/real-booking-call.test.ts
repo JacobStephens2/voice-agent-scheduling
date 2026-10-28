@@ -581,4 +581,156 @@ describe("controlled inbound call with appointment booking", () => {
     expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
     expect(google.writes).toEqual([]);
   });
+
+  it("does not finish a readback when near-copies of the two transcript sources form a field only at the join", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-near-copy",
+      webhookId: "evt_book_near_copy",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    // Neither source contains the other, and neither contains "10:00".
+    // Concatenating them would form that start time at the boundary.
+    const streamed =
+      "0:00 Ada Lovelace, callback +15551239876, 2026-09-11 10:30 America/New_York 1";
+    const payload =
+      "0:00 Ada Lovelace, callback +15551239876, 2026-09-11 10:30 America/New_York.";
+    receiveAssistantResponse(socket, {
+      responseId: "resp-near-copy",
+      status: "completed",
+      transcriptDelta: streamed,
+      payloadTranscript: payload,
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
+  it("does not finish a readback when a required field is split across the two transcript sources", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-cross-source",
+      webhookId: "evt_book_cross_source",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    receiveAssistantResponse(socket, {
+      responseId: "resp-cross-source",
+      status: "completed",
+      transcriptDelta: "Ada Lovelace, callback +15551239876, 2026-09-11 10:",
+      payloadTranscript: "00 to 10:30 America/New_York.",
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
+  it("finishes a readback when each field appears in one of two near-copy transcript sources", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-near-copy-covered",
+      webhookId: "evt_book_near_copy_covered",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    const readback =
+      "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York";
+    receiveAssistantResponse(socket, {
+      responseId: "resp-near-copy-covered",
+      status: "completed",
+      transcriptDelta: `${readback}.`,
+      payloadTranscript: `${readback}!`,
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({
+      status: "booked",
+      eventExists: true,
+    });
+    expect(google.writes).toHaveLength(1);
+  });
+
+  it("finishes a readback when distinct fragments of the streamed transcript together contain each field", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-stream-fragments",
+      webhookId: "evt_book_stream_fragments",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-stream-fragments",
+      item_id: "resp-stream-fragments-msg",
+      delta: "Ada Lovelace, callback +15551239876, 2026-09-11 10:",
+    });
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-stream-fragments",
+      item_id: "resp-stream-fragments-msg",
+      delta: "00 to 10:30 America/New_York.",
+    });
+    socket.receive({
+      type: "response.done",
+      response: {
+        id: "resp-stream-fragments",
+        object: "realtime.response",
+        status: "completed",
+      },
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({
+      status: "booked",
+      eventExists: true,
+    });
+    expect(google.writes).toHaveLength(1);
+  });
 });

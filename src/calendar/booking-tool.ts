@@ -96,7 +96,7 @@ export interface AppointmentBooking {
   markReadbackFinished(callId: string): void;
   finishReadbackIfCovered(
     callId: string,
-    response: { readonly status: string; readonly transcript: string },
+    response: { readonly status: string; readonly transcript: string | readonly string[] },
   ): void;
   /**
    * Reconcile every pending/inconclusive durable operation against its

@@ -141,13 +141,18 @@ export function proposeAppointment(
 }
 
 /**
- * The assistant output transcript covers the proposal when each returned
- * readback field appears as its own value. A field inside a longer word or
- * number does not count. A Unicode format character continues a field, so it
- * does not end one. Purpose is required only when the proposal has one.
- * The transcript itself is not retained.
+ * The assistant output covers the proposal when each returned readback field
+ * appears as its own value in one transcript source. Sources are not
+ * concatenated. A field inside a longer word or number does not count. A
+ * Unicode format character continues a field, so it does not end one.
+ * Purpose is required only when the proposal has one. The transcript itself
+ * is not retained.
  */
-export function transcriptCoversReadback(proposal: AppointmentProposal, transcript: string): boolean {
+export function transcriptCoversReadback(
+  proposal: AppointmentProposal,
+  transcript: string | readonly string[],
+): boolean {
+  const sources = typeof transcript === "string" ? [transcript] : transcript;
   const fields = [
     proposal.callerName,
     proposal.callbackNumber,
@@ -159,7 +164,7 @@ export function transcriptCoversReadback(proposal: AppointmentProposal, transcri
   if (proposal.purpose) {
     fields.push(proposal.purpose);
   }
-  return fields.every((field) => containsField(transcript, field));
+  return fields.every((field) => sources.some((source) => containsField(source, field)));
 }
 
 function containsField(transcript: string, field: string): boolean {
