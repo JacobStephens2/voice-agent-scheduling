@@ -35,12 +35,12 @@ export interface BookingTool {
   ): unknown | Promise<unknown>;
   /**
    * Mark the current readback finished when this assistant response
-   * completed and its transcript covers the proposal. The transcript
-   * is not stored or logged.
+   * completed and each returned field appears in one of its transcript
+   * sources. The transcript is not stored or logged.
    */
   finishReadbackIfCovered?(
     callId: string,
-    response: { readonly status: string; readonly transcript: string },
+    response: { readonly status: string; readonly sources: readonly string[] },
   ): void;
   reconcileUnresolvedOperations?(): Promise<readonly BookingReconciliation[]>;
 }
@@ -271,9 +271,11 @@ function stringField(value: unknown): string {
 }
 
 /**
- * Join two pieces of one assistant transcript. A piece already contained in
- * the other is not appended, so two copies cannot form a field at the join.
- * Distinct fragments are still concatenated.
+ * Join two fragments of one assistant transcript source. A fragment already
+ * contained in the other is not appended, so two copies cannot form a field
+ * at the join. Distinct fragments are still concatenated. The streamed
+ * output-audio transcript and the completed response payload are separate
+ * sources and must not be passed here together.
  */
 function mergeTranscript(current: string, addition: string): string {
   if (!addition) {
@@ -529,11 +531,13 @@ export function createTelephoneSession(options: {
               const status = stringField(response?.status);
               const responseId = stringField(response?.id);
               const streamed = responseId ? (assistantTranscripts.get(responseId) ?? "") : "";
-              const transcript = mergeTranscript(streamed, completedPayloadTranscript(response));
+              // Two sources of this response. Do not concatenate them:
+              // near-copies can form a readback field only at the join.
+              const sources = [streamed, completedPayloadTranscript(response)];
               if (responseId) {
                 assistantTranscripts.delete(responseId);
               }
-              options.booking?.finishReadbackIfCovered?.(options.callId, { status, transcript });
+              options.booking?.finishReadbackIfCovered?.(options.callId, { status, sources });
               break;
             }
             case "response.function_call_arguments.done": {

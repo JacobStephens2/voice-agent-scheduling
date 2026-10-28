@@ -133,11 +133,15 @@ On the host, credential and selection files live under
   date, start time, end time, timezone, and purpose when the proposal
   includes one. A field inside a longer word or number does not count.
   The transcript is taken from that response's `response.output_audio_transcript`
-  events and from the completed response payload, compared in memory, and
-  not written to the appointment ledger, operational evidence, or logs.
-  Distinct fragments from those places are joined. A copy of text already
-  present is not joined again, so a field cannot be formed by gluing the end
-  of one copy to the start of the other.
+  events and from the completed response payload. Those are two sources of
+  that response. They are compared in memory and not written to the
+  appointment ledger, operational evidence, or logs. Distinct fragments of
+  one source are joined. A source that already contains the other is not
+  appended. When the two sources are near-copies and neither contains the
+  other, each source is compared on its own and they are not concatenated.
+  A returned field counts only when it appears as its own value in one of
+  those sources, so a field cannot be formed by gluing the end of one
+  source to the start of the other.
   Input transcription stays off. A response that is not a completed readback
   of the current proposal does not create an appointment. Replacing the
   proposal clears the finished readback and requires a new completed readback
