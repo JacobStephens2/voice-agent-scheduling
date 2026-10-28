@@ -143,10 +143,11 @@ export function proposeAppointment(
 /**
  * The assistant output covers the proposal when each returned readback field
  * appears as its own value in one transcript source. Sources are not
- * concatenated. A field inside a longer word or number does not count. A
- * Unicode format character continues a field, so it does not end one.
- * Purpose is required only when the proposal has one. The transcript itself
- * is not retained.
+ * concatenated. A source already contained in another is not a separate
+ * witness, so its cut cannot open a field inside a longer word or number.
+ * A field inside a longer word or number does not count. A Unicode format
+ * character continues a field, so it does not end one. Purpose is required
+ * only when the proposal has one. The transcript itself is not retained.
  */
 export function transcriptCoversReadback(
   proposal: AppointmentProposal,
@@ -163,7 +164,28 @@ export function transcriptCoversReadback(
   if (proposal.purpose) {
     fields.push(proposal.purpose);
   }
-  return fields.every((field) => sources.some((source) => containsField(source, field)));
+  const witnesses = uncontainedSources(sources);
+  return fields.every((field) => witnesses.some((source) => containsField(source, field)));
+}
+
+/**
+ * A source already contained in another is the same text with a cut at its
+ * edge. That cut is not a field boundary. Near-copies where neither string
+ * contains the other stay separate and are not concatenated.
+ */
+function uncontainedSources(sources: readonly string[]): string[] {
+  let kept: string[] = [];
+  for (const source of sources) {
+    if (source.length === 0) {
+      continue;
+    }
+    if (kept.some((existing) => existing.includes(source))) {
+      continue;
+    }
+    kept = kept.filter((existing) => !source.includes(existing));
+    kept.push(source);
+  }
+  return kept;
 }
 
 function containsField(transcript: string, field: string): boolean {

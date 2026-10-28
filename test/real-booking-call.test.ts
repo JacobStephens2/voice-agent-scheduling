@@ -619,6 +619,75 @@ describe("controlled inbound call with appointment booking", () => {
     expect(google.writes).toEqual([]);
   });
 
+  it("does not finish a readback when a contained transcript source cuts a field out of a longer number", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-contained-cut",
+      webhookId: "evt_book_contained_cut",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    // The shorter source is a substring of the longer one. "10:00" is its own
+    // value only in the shorter source; in the longer source it sits inside "110:00".
+    const contained =
+      "10:00 Ada Lovelace, callback +15551239876, 2026-09-11 10:30 America/New_York";
+    const containing = `1${contained}`;
+    receiveAssistantResponse(socket, {
+      responseId: "resp-contained-cut",
+      status: "completed",
+      transcriptDelta: contained,
+      payloadTranscript: containing,
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
+  it("does not finish a readback when the streamed transcript contains the payload and the cut opens the start time", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-contained-cut-swap",
+      webhookId: "evt_book_contained_cut_swap",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    const contained =
+      "10:00 Ada Lovelace, callback +15551239876, 2026-09-11 10:30 America/New_York";
+    receiveAssistantResponse(socket, {
+      responseId: "resp-contained-cut-swap",
+      status: "completed",
+      transcriptDelta: `1${contained}`,
+      payloadTranscript: contained,
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
   it("does not finish a readback when a required field is split across the two transcript sources", async () => {
     const sockets: FakeRealtimeSocket[] = [];
     const google = fakeGoogleCalendar({});
