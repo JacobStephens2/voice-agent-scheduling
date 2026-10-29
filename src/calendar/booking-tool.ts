@@ -12,6 +12,7 @@ import {
   transcriptCoversReadback,
   type ProposeResult,
   type ProposalStore,
+  type RepeatedFragmentJoin,
 } from "./booking-proposal.js";
 import {
   createAppointmentLedger,
@@ -96,7 +97,11 @@ export interface AppointmentBooking {
   markReadbackFinished(callId: string): void;
   finishReadbackIfCovered(
     callId: string,
-    response: { readonly status: string; readonly sources: readonly string[] },
+    response: {
+      readonly status: string;
+      readonly sources: readonly string[];
+      readonly repeatedJoins?: readonly (readonly RepeatedFragmentJoin[])[];
+    },
   ): void;
   /**
    * Reconcile every pending/inconclusive durable operation against its
@@ -261,7 +266,10 @@ export function createAppointmentBooking(
         return;
       }
       const proposal = proposals.current(callId);
-      if (!proposal || !transcriptCoversReadback(proposal, response.sources)) {
+      if (
+        !proposal ||
+        !transcriptCoversReadback(proposal, response.sources, response.repeatedJoins)
+      ) {
         return;
       }
       proposals.markReadbackFinished(callId);

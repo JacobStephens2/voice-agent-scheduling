@@ -802,4 +802,214 @@ describe("controlled inbound call with appointment booking", () => {
     });
     expect(google.writes).toHaveLength(1);
   });
+
+  it("does not finish a readback when a repeated fragment is the only thing that keeps the name inside a longer word", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-repeated-fragment",
+      webhookId: "evt_book_repeated_fragment",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    // The continuation is the letter m. That letter already occurs in the
+    // earlier fragment, and the utterance ends in Adam.
+    const earlier =
+      "m callback +15551239876 2026-09-11 10:00 10:30 America/New_York Ada";
+    const continuation = "m";
+    expect(earlier.endsWith("Ada")).toBe(true);
+    expect(earlier.includes(continuation)).toBe(true);
+    expect(`${earlier}${continuation}`.endsWith("Adam")).toBe(true);
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-repeated-fragment",
+      delta: earlier,
+    });
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-repeated-fragment",
+      delta: continuation,
+    });
+    socket.receive({
+      type: "response.done",
+      response: {
+        id: "resp-repeated-fragment",
+        object: "realtime.response",
+        status: "completed",
+      },
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
+  it("does not finish a readback when a repeated fragment forms the start time only at the join", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-repeated-join",
+      webhookId: "evt_book_repeated_join",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    // "0:00" is already in the earlier fragment. Neither piece contains
+    // "10:00". Appending the repeated fragment forms that start time at the join.
+    const earlier =
+      "0:00 Ada Lovelace, callback +15551239876, 2026-09-11 10:30 America/New_York 1";
+    const repeated = "0:00";
+    expect(earlier.includes(repeated)).toBe(true);
+    expect(repeated.includes(earlier)).toBe(false);
+    expect(earlier.includes("10:00")).toBe(false);
+    expect(repeated.includes("10:00")).toBe(false);
+    expect(`${earlier}${repeated}`.endsWith("10:00")).toBe(true);
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-repeated-join",
+      delta: earlier,
+    });
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-repeated-join",
+      delta: repeated,
+    });
+    socket.receive({
+      type: "response.done",
+      response: {
+        id: "resp-repeated-join",
+        object: "realtime.response",
+        status: "completed",
+      },
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
+  it("does not finish a readback when a repeated fragment's leading edge opens a start time glued inside a longer number", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-repeated-edge",
+      webhookId: "evt_book_repeated_edge",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    // The held text has "110:00", so "10:00" is not its own value. The later
+    // fragment is that text without the leading 1, which the held text already
+    // contains. Appending it opens "10:00" at the fragment's leading edge.
+    const body =
+      "10:00 Ada Lovelace, callback +15551239876, 2026-09-11 10:30 America/New_York";
+    const earlier = `1${body}.`;
+    const repeated = body;
+    expect(earlier.includes(repeated)).toBe(true);
+    expect(repeated.includes(earlier)).toBe(false);
+    expect(earlier.includes("110:00")).toBe(true);
+    expect(`${earlier}${repeated}`.includes(`.${repeated}`)).toBe(true);
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-repeated-edge",
+      delta: earlier,
+    });
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-repeated-edge",
+      delta: repeated,
+    });
+    socket.receive({
+      type: "response.done",
+      response: {
+        id: "resp-repeated-edge",
+        object: "realtime.response",
+        status: "completed",
+      },
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
+  it("finishes a readback when a repeated one-character fragment completes the start time", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-repeated-digit",
+      webhookId: "evt_book_repeated_digit",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    const earlier =
+      "Ada Lovelace, callback +15551239876, 2026-09-11 10:30 America/New_York 10:0";
+    const continuation = "0";
+    expect(earlier.includes(continuation)).toBe(true);
+    expect(earlier.includes("10:00")).toBe(false);
+    expect(`${earlier}${continuation}`.endsWith("10:00")).toBe(true);
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-repeated-digit",
+      delta: earlier,
+    });
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-repeated-digit",
+      delta: continuation,
+    });
+    socket.receive({
+      type: "response.done",
+      response: {
+        id: "resp-repeated-digit",
+        object: "realtime.response",
+        status: "completed",
+      },
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({
+      status: "booked",
+      eventExists: true,
+    });
+    expect(google.writes).toHaveLength(1);
+  });
 });
