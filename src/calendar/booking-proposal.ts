@@ -141,17 +141,36 @@ export function proposeAppointment(
 }
 
 /**
+ * A join where one transcript source appended a fragment it already contained.
+ * `index` is the UTF-16 offset of that fragment. `additionLength` is its length.
+ */
+export interface RepeatedFragmentJoin {
+  readonly index: number;
+  readonly additionLength: number;
+}
+
+interface TranscriptWitness {
+  readonly text: string;
+  readonly repeatedJoins: readonly RepeatedFragmentJoin[];
+}
+
+/**
  * The assistant output covers the proposal when each returned readback field
  * appears as its own value in one transcript source. Sources are not
  * concatenated. A source already contained in another is not a separate
  * witness, so its cut cannot open a field inside a longer word or number.
- * A field inside a longer word or number does not count. A Unicode format
- * character continues a field, so it does not end one. Purpose is required
- * only when the proposal has one. The transcript itself is not retained.
+ * A repeated fragment can extend a field that already ends at its join. A
+ * field that appears only across that join does not count unless the fragment
+ * is one code point that finishes the field, and a field opened only at the
+ * fragment's leading edge does not count. A field inside a longer word or
+ * number does not count. A Unicode format character continues a field, so it
+ * does not end one. Purpose is required only when the proposal has one. The
+ * transcript itself is not retained.
  */
 export function transcriptCoversReadback(
   proposal: AppointmentProposal,
   sources: readonly string[],
+  repeatedJoins: readonly (readonly RepeatedFragmentJoin[])[] = [],
 ): boolean {
   const fields = [
     proposal.callerName,
@@ -164,8 +183,15 @@ export function transcriptCoversReadback(
   if (proposal.purpose) {
     fields.push(proposal.purpose);
   }
-  const witnesses = uncontainedSources(sources);
-  return fields.every((field) => witnesses.some((source) => containsField(source, field)));
+  const witnesses = uncontainedSources(
+    sources.map((text, index) => ({
+      text,
+      repeatedJoins: repeatedJoins[index] ?? [],
+    })),
+  );
+  return fields.every((field) =>
+    witnesses.some((source) => containsField(source.text, field, source.repeatedJoins)),
+  );
 }
 
 /**
@@ -173,22 +199,26 @@ export function transcriptCoversReadback(
  * edge. That cut is not a field boundary. Near-copies where neither string
  * contains the other stay separate and are not concatenated.
  */
-function uncontainedSources(sources: readonly string[]): string[] {
-  let kept: string[] = [];
+function uncontainedSources(sources: readonly TranscriptWitness[]): TranscriptWitness[] {
+  let kept: TranscriptWitness[] = [];
   for (const source of sources) {
-    if (source.length === 0) {
+    if (source.text.length === 0) {
       continue;
     }
-    if (kept.some((existing) => existing.includes(source))) {
+    if (kept.some((existing) => existing.text.includes(source.text))) {
       continue;
     }
-    kept = kept.filter((existing) => !source.includes(existing));
+    kept = kept.filter((existing) => !source.text.includes(existing.text));
     kept.push(source);
   }
   return kept;
 }
 
-function containsField(transcript: string, field: string): boolean {
+function containsField(
+  transcript: string,
+  field: string,
+  repeatedJoins: readonly RepeatedFragmentJoin[],
+): boolean {
   if (field.length === 0) {
     return false;
   }
@@ -200,12 +230,57 @@ function containsField(transcript: string, field: string): boolean {
     }
     const before = codePointEndingAt(transcript, at);
     const after = codePointStartingAt(transcript, at + field.length);
-    if (!isFieldCharacter(before) && !isFieldCharacter(after)) {
+    if (
+      !isFieldCharacter(before) &&
+      !isFieldCharacter(after) &&
+      !repeatedJoinBlocksMatch(transcript, at, field.length, repeatedJoins)
+    ) {
       return true;
     }
     from = at + 1;
   }
   return false;
+}
+
+/**
+ * A copied fragment must not mint a field. A match that starts on its leading
+ * edge is the cut of the copy. A match that crosses the join counts only when
+ * the copy is one code point and that code point finishes the field.
+ */
+function repeatedJoinBlocksMatch(
+  transcript: string,
+  at: number,
+  fieldLength: number,
+  joins: readonly RepeatedFragmentJoin[],
+): boolean {
+  const end = at + fieldLength;
+  for (const join of joins) {
+    if (join.additionLength <= 0 || join.index < 0 || join.index > transcript.length) {
+      continue;
+    }
+    if (at === join.index) {
+      return true;
+    }
+    if (at < join.index && end > join.index) {
+      const additionEnd = join.index + join.additionLength;
+      const addition = transcript.slice(join.index, additionEnd);
+      if (!(isSingleCodePoint(addition) && end === additionEnd)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isSingleCodePoint(text: string): boolean {
+  if (text.length === 0 || text.length > 2) {
+    return false;
+  }
+  const point = text.codePointAt(0);
+  if (point === undefined || (point >= 0xd800 && point <= 0xdfff)) {
+    return false;
+  }
+  return String.fromCodePoint(point) === text;
 }
 
 /**

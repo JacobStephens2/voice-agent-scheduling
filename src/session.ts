@@ -1,3 +1,4 @@
+import type { RepeatedFragmentJoin } from "./calendar/booking-proposal.js";
 import { SCHEDULING_TIMEZONE } from "./calendar/policy.js";
 
 export interface ToolDefinition {
@@ -40,7 +41,11 @@ export interface BookingTool {
    */
   finishReadbackIfCovered?(
     callId: string,
-    response: { readonly status: string; readonly sources: readonly string[] },
+    response: {
+      readonly status: string;
+      readonly sources: readonly string[];
+      readonly repeatedJoins?: readonly (readonly RepeatedFragmentJoin[])[];
+    },
   ): void;
   reconcileUnresolvedOperations?(): Promise<readonly BookingReconciliation[]>;
 }
@@ -270,48 +275,96 @@ function stringField(value: unknown): string {
   return asOptionalString(value) ?? "";
 }
 
+interface TranscriptAssembly {
+  readonly text: string;
+  readonly repeatedJoins: readonly RepeatedFragmentJoin[];
+}
+
 /**
  * Join two fragments of one assistant transcript source. Append the later
  * fragment unless it already contains the text held for that source, in
- * which case keep the fragment. A repeated fragment is still appended, so
- * it can extend a field. The streamed output-audio transcript and the
- * completed response payload are separate sources and must not be passed
- * here together.
+ * which case keep the fragment. A fragment already contained in the held
+ * text is still appended, and that join is recorded so a copied fragment
+ * cannot mint a readback field. The streamed output-audio transcript and
+ * the completed response payload are separate sources and must not be
+ * passed here together.
  */
-function mergeTranscript(current: string, addition: string): string {
-  if (!addition) {
+function mergeTranscript(
+  current: TranscriptAssembly,
+  addition: TranscriptAssembly,
+): TranscriptAssembly {
+  if (!addition.text) {
     return current;
   }
-  if (addition.includes(current)) {
-    return addition;
+  if (addition.text.includes(current.text)) {
+    if (!current.text) {
+      return addition;
+    }
+    const offset = addition.text.indexOf(current.text);
+    return {
+      text: addition.text,
+      repeatedJoins: [
+        ...addition.repeatedJoins,
+        ...current.repeatedJoins.map((join) => ({
+          index: join.index + offset,
+          additionLength: join.additionLength,
+        })),
+      ],
+    };
   }
-  return current + addition;
+  const shift = current.text.length;
+  const shifted = addition.repeatedJoins.map((join) => ({
+    index: join.index + shift,
+    additionLength: join.additionLength,
+  }));
+  if (current.text.includes(addition.text)) {
+    return {
+      text: current.text + addition.text,
+      repeatedJoins: [
+        ...current.repeatedJoins,
+        { index: shift, additionLength: addition.text.length },
+        ...shifted,
+      ],
+    };
+  }
+  return {
+    text: current.text + addition.text,
+    repeatedJoins: [...current.repeatedJoins, ...shifted],
+  };
+}
+
+function transcriptPiece(text: string): TranscriptAssembly {
+  return { text, repeatedJoins: [] };
 }
 
 function rememberOutputTranscript(
-  transcripts: Map<string, string>,
+  transcripts: Map<string, TranscriptAssembly>,
   event: { readonly [key: string]: unknown },
 ): void {
   const responseId = stringField(event.response_id);
   if (!responseId) {
     return;
   }
-  const piece = mergeTranscript(stringField(event.delta), stringField(event.transcript));
-  if (!piece) {
+  const piece = mergeTranscript(
+    transcriptPiece(stringField(event.delta)),
+    transcriptPiece(stringField(event.transcript)),
+  );
+  if (!piece.text) {
     return;
   }
-  transcripts.set(responseId, mergeTranscript(transcripts.get(responseId) ?? "", piece));
+  const held = transcripts.get(responseId) ?? transcriptPiece("");
+  transcripts.set(responseId, mergeTranscript(held, piece));
 }
 
-function completedPayloadTranscript(response: unknown): string {
+function completedPayloadTranscript(response: unknown): TranscriptAssembly {
   if (!response || typeof response !== "object") {
-    return "";
+    return transcriptPiece("");
   }
   const output = (response as { output?: unknown }).output;
   if (!Array.isArray(output)) {
-    return "";
+    return transcriptPiece("");
   }
-  let text = "";
+  let text = transcriptPiece("");
   for (const item of output) {
     if (!item || typeof item !== "object") {
       continue;
@@ -324,7 +377,8 @@ function completedPayloadTranscript(response: unknown): string {
       if (!part || typeof part !== "object") {
         continue;
       }
-      text = mergeTranscript(text, stringField((part as { transcript?: unknown }).transcript));
+      const partTranscript = stringField((part as { transcript?: unknown }).transcript);
+      text = mergeTranscript(text, transcriptPiece(partTranscript));
     }
   }
   return text;
@@ -415,7 +469,7 @@ export function createTelephoneSession(options: {
         };
 
         const limitLabel = callLimitLabel(maxDurationMs);
-        const assistantTranscripts = new Map<string, string>();
+        const assistantTranscripts = new Map<string, TranscriptAssembly>();
 
         warningTimeout = setTimeout(() => {
           if (finished) {
@@ -528,14 +582,22 @@ export function createTelephoneSession(options: {
                   : undefined;
               const status = stringField(response?.status);
               const responseId = stringField(response?.id);
-              const streamed = responseId ? (assistantTranscripts.get(responseId) ?? "") : "";
+              const streamed = responseId
+                ? (assistantTranscripts.get(responseId) ?? transcriptPiece(""))
+                : transcriptPiece("");
+              const payload = completedPayloadTranscript(response);
               // Two sources of this response. Do not concatenate them:
               // near-copies can form a readback field only at the join.
-              const sources = [streamed, completedPayloadTranscript(response)];
+              const sources = [streamed.text, payload.text];
+              const repeatedJoins = [streamed.repeatedJoins, payload.repeatedJoins];
               if (responseId) {
                 assistantTranscripts.delete(responseId);
               }
-              options.booking?.finishReadbackIfCovered?.(options.callId, { status, sources });
+              options.booking?.finishReadbackIfCovered?.(options.callId, {
+                status,
+                sources,
+                repeatedJoins,
+              });
               break;
             }
             case "response.function_call_arguments.done": {
