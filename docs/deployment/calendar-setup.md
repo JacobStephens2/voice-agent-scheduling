@@ -136,8 +136,10 @@ On the host, credential and selection files live under
   events and from the completed response payload. Those are two sources of
   that response. They are compared in memory and not written to the
   appointment ledger, operational evidence, or logs. Distinct fragments of
-  one source are joined. A source that already contains the other is not
-  appended. When the two sources are near-copies and neither contains the
+  one source are joined. A later fragment is appended unless it already
+  contains the text held for that source, in which case the fragment is
+  kept. A source that already contains the other is not appended. When the
+  two sources are near-copies and neither contains the
   other, each source is compared on its own and they are not concatenated.
   A returned field counts only when it appears as its own value in one of
   those sources, so a field cannot be formed by gluing the end of one

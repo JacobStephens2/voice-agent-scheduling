@@ -271,18 +271,16 @@ function stringField(value: unknown): string {
 }
 
 /**
- * Join two fragments of one assistant transcript source. A fragment already
- * contained in the other is not appended, so two copies cannot form a field
- * at the join. Distinct fragments are still concatenated. The streamed
- * output-audio transcript and the completed response payload are separate
- * sources and must not be passed here together.
+ * Join two fragments of one assistant transcript source. Append the later
+ * fragment unless it already contains the text held for that source, in
+ * which case keep the fragment. A repeated fragment is still appended, so
+ * it can extend a field. The streamed output-audio transcript and the
+ * completed response payload are separate sources and must not be passed
+ * here together.
  */
 function mergeTranscript(current: string, addition: string): string {
   if (!addition) {
     return current;
-  }
-  if (!current || current.includes(addition)) {
-    return current || addition;
   }
   if (addition.includes(current)) {
     return addition;
