@@ -155,17 +155,19 @@ interface TranscriptWitness {
 }
 
 /**
- * The assistant output covers the proposal when each returned readback field
- * appears as its own value in one transcript source. Sources are not
- * concatenated. A source already contained in another is not a separate
- * witness, so its cut cannot open a field inside a longer word or number.
- * A repeated fragment can extend a field that already ends at its join. A
- * field that appears only across that join does not count unless the fragment
- * is one code point that finishes the field, and a field opened only at the
+ * The assistant output covers the proposal when one transcript source
+ * contains every returned readback field as its own contiguous value.
+ * Each source is checked on its own. A field in one source does not
+ * supply a field missing from another, and sources are not concatenated.
+ * A source already contained in another is not a separate witness, so its
+ * cut cannot open a field inside a longer word or number. A repeated
+ * fragment can extend a field that already ends at its join. A field that
+ * appears only across that join does not count unless the fragment is one
+ * code point that finishes the field, and a field opened only at the
  * fragment's leading edge does not count. A field inside a longer word or
- * number does not count. A Unicode format character continues a field, so it
- * does not end one. Purpose is required only when the proposal has one. The
- * transcript itself is not retained.
+ * number does not count. A Unicode format character continues a field, so
+ * it does not end one. Purpose is required only when the proposal has one.
+ * The transcript itself is not retained.
  */
 export function transcriptCoversReadback(
   proposal: AppointmentProposal,
@@ -189,8 +191,8 @@ export function transcriptCoversReadback(
       repeatedJoins: repeatedJoins[index] ?? [],
     })),
   );
-  return fields.every((field) =>
-    witnesses.some((source) => containsField(source.text, field, source.repeatedJoins)),
+  return witnesses.some((source) =>
+    fields.every((field) => containsField(source.text, field, source.repeatedJoins)),
   );
 }
 

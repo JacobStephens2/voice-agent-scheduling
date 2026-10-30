@@ -36,8 +36,8 @@ export interface BookingTool {
   ): unknown | Promise<unknown>;
   /**
    * Mark the current readback finished when this assistant response
-   * completed and each returned field appears in one of its transcript
-   * sources. The transcript is not stored or logged.
+   * completed and one of its transcript sources contains every returned
+   * field. The transcript is not stored or logged.
    */
   finishReadbackIfCovered?(
     callId: string,
@@ -586,8 +586,10 @@ export function createTelephoneSession(options: {
                 ? (assistantTranscripts.get(responseId) ?? transcriptPiece(""))
                 : transcriptPiece("");
               const payload = completedPayloadTranscript(response);
-              // Two sources of this response. Do not concatenate them:
-              // near-copies can form a readback field only at the join.
+              // Two copies of this response. Check each on its own. Do not
+              // concatenate them: a near-copy join can mint a field that
+              // neither copy contains. Do not take a field from one copy
+              // to fill the other.
               const sources = [streamed.text, payload.text];
               const repeatedJoins = [streamed.repeatedJoins, payload.repeatedJoins];
               if (responseId) {
