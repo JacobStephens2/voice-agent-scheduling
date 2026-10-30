@@ -107,11 +107,14 @@ describe("controlled inbound call with appointment booking", () => {
     expect(proposed.readback.startTime).toBe("10:00");
     expect(proposed.readback.endTime).toBe("10:30");
 
+    // Delta and done are one streamed copy. That copy has to contain every
+    // returned field, including purpose. The payload is a second copy.
     receiveAssistantResponse(socket, {
       responseId: "resp-readback-1",
       transcriptDelta: "Ada Lovelace, callback +15551239876, 2026-09-11 ",
-      transcriptDone: "10:00 to 10:30 ",
-      payloadTranscript: "America/New_York. Purpose: Website review.",
+      transcriptDone: "10:00 to 10:30 America/New_York. Purpose: Website review.",
+      payloadTranscript:
+        "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York. Purpose: Website review!",
     });
     await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
       confirmed: true,
@@ -719,7 +722,60 @@ describe("controlled inbound call with appointment booking", () => {
     expect(google.writes).toEqual([]);
   });
 
-  it("finishes a readback when each field appears in one of two near-copy transcript sources", async () => {
+  it("does not finish a readback when no single copy of the speech contains every returned field", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-split-copies",
+      webhookId: "evt_book_split_copies",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+      purpose: "Website review",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    // Each returned field is a contiguous value in one copy. Neither copy
+    // contains the other, and neither contains every field.
+    const streamed =
+      "Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30.";
+    const payload = "America/New_York. Purpose: Website review.";
+    const fields = [
+      "Ada Lovelace",
+      "+15551239876",
+      "2026-09-11",
+      "10:00",
+      "10:30",
+      "America/New_York",
+      "Website review",
+    ];
+    expect(streamed.includes(payload)).toBe(false);
+    expect(payload.includes(streamed)).toBe(false);
+    expect(fields.every((field) => streamed.includes(field) || payload.includes(field))).toBe(
+      true,
+    );
+    expect(fields.every((field) => streamed.includes(field))).toBe(false);
+    expect(fields.every((field) => payload.includes(field))).toBe(false);
+    receiveAssistantResponse(socket, {
+      responseId: "resp-split-copies",
+      status: "completed",
+      transcriptDelta: streamed,
+      payloadTranscript: payload,
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
+  it("finishes a readback when each near-copy of the speech contains every returned field", async () => {
     const sockets: FakeRealtimeSocket[] = [];
     const google = fakeGoogleCalendar({});
     const { manager } = createBookingManager(sockets, google);

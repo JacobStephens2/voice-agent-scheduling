@@ -128,7 +128,7 @@ On the host, credential and selection files live under
   and a completed assistant response has already read that proposal back.
   Otherwise it returns `readback_incomplete` and creates no appointment.
   The readback counts as finished only when `response.done` reports status
-  `completed` and that response's assistant output transcript contains each
+  `completed` and one copy of that response's assistant speech contains every
   returned readback field as its own value: caller name, callback number,
   date, start time, end time, timezone, and purpose when the proposal
   includes one. A field inside a longer word or number does not count.
@@ -145,9 +145,10 @@ On the host, credential and selection files live under
   count. A source that already contains the other is not appended. When the
   two sources are near-copies and neither contains the
   other, each source is compared on its own and they are not concatenated.
-  A returned field counts only when it appears as its own value in one of
-  those sources, so a field cannot be formed by gluing the end of one
-  source to the start of the other.
+  The readback is finished only when one of those sources contains every
+  returned field as its own value. A field in one source does not supply a
+  field missing from the other, and a field cannot be formed by gluing the
+  end of one source to the start of the other.
   Input transcription stays off. A response that is not a completed readback
   of the current proposal does not create an appointment. Replacing the
   proposal clears the finished readback and requires a new completed readback
