@@ -285,13 +285,17 @@ interface TranscriptAssembly {
  * fragment unless it already contains the text held for that source, in
  * which case keep the fragment. A fragment already contained in the held
  * text is still appended, and that join is recorded so a copied fragment
- * cannot mint a readback field. The streamed output-audio transcript and
+ * cannot mint a readback field. A done transcript that is a small edit of
+ * the streamed deltas is appended the same way, and that join is recorded
+ * too. A done transcript that continues the deltas, and distinct delta
+ * fragments, stay ordinary joins. The streamed output-audio transcript and
  * the completed response payload are separate sources and must not be
  * passed here together.
  */
 function mergeTranscript(
   current: TranscriptAssembly,
   addition: TranscriptAssembly,
+  options?: { readonly restatement?: boolean },
 ): TranscriptAssembly {
   if (!addition.text) {
     return current;
@@ -317,7 +321,10 @@ function mergeTranscript(
     index: join.index + shift,
     additionLength: join.additionLength,
   }));
-  if (current.text.includes(addition.text)) {
+  const repeated =
+    current.text.includes(addition.text) ||
+    (options?.restatement === true && isSmallEdit(current.text, addition.text));
+  if (repeated) {
     return {
       text: current.text + addition.text,
       repeatedJoins: [
@@ -333,6 +340,53 @@ function mergeTranscript(
   };
 }
 
+/**
+ * A done transcript is a small edit of the streamed deltas when the
+ * code-point edits that turn one into the other are at most one eighth of
+ * the shorter text. A longer continuation is not a small edit.
+ */
+function isSmallEdit(left: string, right: string): boolean {
+  const leftPoints = Array.from(left);
+  const rightPoints = Array.from(right);
+  const shorter = Math.min(leftPoints.length, rightPoints.length);
+  const longer = Math.max(leftPoints.length, rightPoints.length);
+  const budget = Math.floor(shorter / 8);
+  if (budget < 1 || longer - shorter > budget) {
+    return false;
+  }
+  return editDistanceAtMost(leftPoints, rightPoints, budget);
+}
+
+function editDistanceAtMost(
+  left: readonly string[],
+  right: readonly string[],
+  budget: number,
+): boolean {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    const current: number[] = [row];
+    let rowBest = row;
+    const leftPoint = left[row - 1];
+    for (let column = 1; column <= right.length; column += 1) {
+      const substitution = leftPoint === right[column - 1] ? 0 : 1;
+      const value = Math.min(
+        (current[column - 1] ?? budget + 1) + 1,
+        (previous[column] ?? budget + 1) + 1,
+        (previous[column - 1] ?? budget + 1) + substitution,
+      );
+      current.push(value);
+      if (value < rowBest) {
+        rowBest = value;
+      }
+    }
+    if (rowBest > budget) {
+      return false;
+    }
+    previous = current;
+  }
+  return (previous[right.length] ?? budget + 1) <= budget;
+}
+
 function transcriptPiece(text: string): TranscriptAssembly {
   return { text, repeatedJoins: [] };
 }
@@ -345,15 +399,24 @@ function rememberOutputTranscript(
   if (!responseId) {
     return;
   }
-  const piece = mergeTranscript(
-    transcriptPiece(stringField(event.delta)),
-    transcriptPiece(stringField(event.transcript)),
-  );
-  if (!piece.text) {
+  const delta = stringField(event.delta);
+  const doneTranscript = stringField(event.transcript);
+  if (!delta && !doneTranscript) {
     return;
   }
-  const held = transcripts.get(responseId) ?? transcriptPiece("");
-  transcripts.set(responseId, mergeTranscript(held, piece));
+  let held = transcripts.get(responseId) ?? transcriptPiece("");
+  if (delta) {
+    held = mergeTranscript(held, transcriptPiece(delta));
+  }
+  if (doneTranscript) {
+    held = mergeTranscript(held, transcriptPiece(doneTranscript), {
+      restatement: event.type === "response.output_audio_transcript.done",
+    });
+  }
+  if (!held.text) {
+    return;
+  }
+  transcripts.set(responseId, held);
 }
 
 function completedPayloadTranscript(response: unknown): TranscriptAssembly {

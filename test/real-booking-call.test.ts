@@ -585,6 +585,135 @@ describe("controlled inbound call with appointment booking", () => {
     expect(google.writes).toEqual([]);
   });
 
+  it("does not finish a readback when a small edit of the streamed deltas forms the callback number only at that join", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-done-small-edit",
+      webhookId: "evt_book_done_small_edit",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    // One letter differs, so neither string contains the other. Neither
+    // contains the callback number. Appending the done transcript forms it.
+    const deltas = "9876 Ada Lovelace 2026-09-11 10:00 10:30 America/New_York +1555123";
+    const doneTranscript = "9876 Ada Lovlace 2026-09-11 10:00 10:30 America/New_York +1555123";
+    expect(deltas.includes("+15551239876")).toBe(false);
+    expect(doneTranscript.includes("+15551239876")).toBe(false);
+    expect(deltas.includes(doneTranscript)).toBe(false);
+    expect(doneTranscript.includes(deltas)).toBe(false);
+    expect(`${deltas}${doneTranscript}`.includes("+15551239876")).toBe(true);
+    receiveAssistantResponse(socket, {
+      responseId: "resp-done-small-edit",
+      status: "completed",
+      transcriptDelta: deltas,
+      transcriptDone: doneTranscript,
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
+  it("finishes a readback when a small edit of the streamed deltas still contains every returned field", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-done-small-edit-covered",
+      webhookId: "evt_book_done_small_edit_covered",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    // Two small edits. The caller name is its own value only in the done
+    // transcript, and the timezone is its own value only in the deltas.
+    const deltas =
+      "Hello Ada Lovlace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York thanks";
+    const doneTranscript =
+      "Hello Ada Lovelace, callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_Yrok thanks";
+    expect(deltas.includes("Ada Lovelace")).toBe(false);
+    expect(doneTranscript.includes("America/New_York")).toBe(false);
+    expect(deltas.includes("America/New_York")).toBe(true);
+    expect(doneTranscript.includes("Ada Lovelace")).toBe(true);
+    expect(deltas.includes(doneTranscript)).toBe(false);
+    expect(doneTranscript.includes(deltas)).toBe(false);
+    receiveAssistantResponse(socket, {
+      responseId: "resp-done-small-edit-covered",
+      status: "completed",
+      transcriptDelta: deltas,
+      transcriptDone: doneTranscript,
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({
+      status: "booked",
+      eventExists: true,
+    });
+    expect(google.writes).toHaveLength(1);
+  });
+
+  it("finishes a readback when a done transcript continues the streamed deltas and the start time is formed at that join", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-done-continues",
+      webhookId: "evt_book_done_continues",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    // The done transcript is the rest of the utterance, not another copy.
+    // "10:00" exists only across that ordinary join.
+    const deltas = "Ada Lovelace, callback +15551239876, 2026-09-11 10:";
+    const doneTranscript = "00 to 10:30 America/New_York.";
+    expect(deltas.includes("10:00")).toBe(false);
+    expect(doneTranscript.includes("10:00")).toBe(false);
+    expect(`${deltas}${doneTranscript}`.includes("10:00")).toBe(true);
+    expect(deltas.includes(doneTranscript)).toBe(false);
+    expect(doneTranscript.includes(deltas)).toBe(false);
+    receiveAssistantResponse(socket, {
+      responseId: "resp-done-continues",
+      status: "completed",
+      transcriptDelta: deltas,
+      transcriptDone: doneTranscript,
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({
+      status: "booked",
+      eventExists: true,
+    });
+    expect(google.writes).toHaveLength(1);
+  });
+
   it("does not finish a readback when near-copies of the two transcript sources form a field only at the join", async () => {
     const sockets: FakeRealtimeSocket[] = [];
     const google = fakeGoogleCalendar({});
