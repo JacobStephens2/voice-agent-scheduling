@@ -144,10 +144,13 @@ On the host, credential and selection files live under
   and a field opened only at the repeated fragment's leading edge does not
   count. An output-audio done transcript that is a small edit of the
   streamed deltas is appended even when one string contains the other, and
-  that join is a repeated-fragment join. The edit is small when the
-  code-point edits are at most one eighth of the shorter text. A done
-  transcript that continues the deltas rather than restating them, and
-  distinct delta fragments of that streamed source, stay ordinary joins.
+  that join is a repeated-fragment join. When that appended copy contains
+  the streamed deltas, a later fragment that contains the copy replaces
+  the appended copy instead of joining onto the doubled text. The edit is
+  small when the code-point edits are at most one eighth of the shorter
+  text. A done transcript that continues the deltas rather than restating
+  them, and distinct delta fragments of that streamed source, stay ordinary
+  joins.
   A source that already contains the other is not appended, except for that
   small-edit done transcript. When the
   two sources are near-copies and neither contains the

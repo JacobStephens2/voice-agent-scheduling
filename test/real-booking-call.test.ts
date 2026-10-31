@@ -1183,6 +1183,69 @@ describe("controlled inbound call with appointment booking", () => {
     expect(google.writes).toHaveLength(1);
   });
 
+  it("does not finish a readback when a later copy of a contained done transcript forms the start time only at that boundary", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-done-contained-later-copy",
+      webhookId: "evt_book_done_contained_later_copy",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    // The done transcript contains the deltas and differs by one leading
+    // code point. A later delta contains that done transcript, not the
+    // doubled text. "10:00" is in none of the three fragments.
+    const doneTranscript =
+      "00 Ada Lovelace, callback +15551239876, 2026-09-11 10:30 America/New_York 10:";
+    const deltas = doneTranscript.slice(1);
+    const laterCopy = `${doneTranscript}.`;
+    expect(doneTranscript.includes(deltas)).toBe(true);
+    expect(deltas.includes(doneTranscript)).toBe(false);
+    expect(laterCopy.includes(doneTranscript)).toBe(true);
+    expect(laterCopy.includes(`${deltas}${doneTranscript}`)).toBe(false);
+    expect(deltas.includes("10:00")).toBe(false);
+    expect(doneTranscript.includes("10:00")).toBe(false);
+    expect(laterCopy.includes("10:00")).toBe(false);
+    expect(`${deltas}${doneTranscript}${laterCopy}`.includes("10:00")).toBe(true);
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-done-contained-later-copy",
+      delta: deltas,
+    });
+    socket.receive({
+      type: "response.output_audio_transcript.done",
+      response_id: "resp-done-contained-later-copy",
+      transcript: doneTranscript,
+    });
+    socket.receive({
+      type: "response.output_audio_transcript.delta",
+      response_id: "resp-done-contained-later-copy",
+      delta: laterCopy,
+    });
+    socket.receive({
+      type: "response.done",
+      response: {
+        id: "resp-done-contained-later-copy",
+        object: "realtime.response",
+        status: "completed",
+      },
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+  });
+
   it("finishes a readback when a repeated one-character fragment completes the start time", async () => {
     const sockets: FakeRealtimeSocket[] = [];
     const google = fakeGoogleCalendar({});

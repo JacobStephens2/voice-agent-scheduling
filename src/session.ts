@@ -278,6 +278,12 @@ function stringField(value: unknown): string {
 interface TranscriptAssembly {
   readonly text: string;
   readonly repeatedJoins: readonly RepeatedFragmentJoin[];
+  /**
+   * When `text` ends with a done transcript that already contains the
+   * streamed prefix, later fragments are compared to this suffix. The
+   * doubled text must not become the containment key.
+   */
+  readonly containmentSuffix?: string;
 }
 
 /**
@@ -287,10 +293,12 @@ interface TranscriptAssembly {
  * text is still appended, and that join is recorded so a copied fragment
  * cannot mint a readback field. A done transcript that is a small edit of
  * the streamed deltas is appended even when one string contains the other,
- * and that join is recorded too. A done transcript that continues the
- * deltas, and distinct delta fragments, stay ordinary joins. The streamed
- * output-audio transcript and the completed response payload are separate
- * sources and must not be passed here together.
+ * and that join is recorded too. When that appended copy contains the
+ * streamed text, a later fragment that contains the copy replaces it
+ * instead of joining onto the doubled text. A done transcript that
+ * continues the deltas, and distinct delta fragments, stay ordinary joins.
+ * The streamed output-audio transcript and the completed response payload
+ * are separate sources and must not be passed here together.
  */
 function mergeTranscript(
   current: TranscriptAssembly,
@@ -300,12 +308,24 @@ function mergeTranscript(
   if (!addition.text) {
     return current;
   }
+  const containedCopy = containedDoneSuffix(current);
+  if (
+    containedCopy &&
+    addition.text.includes(containedCopy) &&
+    !addition.text.includes(current.text)
+  ) {
+    return replaceContainedDoneSuffix(current, addition, containedCopy);
+  }
   if (
     current.text &&
     options?.doneTranscript === true &&
     isSmallEdit(current.text, addition.text)
   ) {
-    return appendTranscript(current, addition, true);
+    const appended = appendTranscript(current, addition, true);
+    if (addition.text.includes(current.text)) {
+      return { ...appended, containmentSuffix: addition.text };
+    }
+    return appended;
   }
   if (addition.text.includes(current.text)) {
     if (!current.text) {
@@ -346,6 +366,47 @@ function appendTranscript(
         ]
       : [...current.repeatedJoins, ...shifted],
   };
+}
+
+/**
+ * The doubled text ends with the done transcript. Return that copy only
+ * while it is still the suffix the next fragment would join onto.
+ */
+function containedDoneSuffix(current: TranscriptAssembly): string | undefined {
+  const suffix = current.containmentSuffix;
+  if (!suffix || !current.text.endsWith(suffix)) {
+    return undefined;
+  }
+  return suffix;
+}
+
+/**
+ * Drop the appended done transcript and keep the streamed prefix beside
+ * the later fragment. The boundary stays a repeated-fragment join, so the
+ * copy seam cannot mint a field, and a field that was valid only on the
+ * streamed prefix still has its original boundary.
+ */
+function replaceContainedDoneSuffix(
+  current: TranscriptAssembly,
+  addition: TranscriptAssembly,
+  suffix: string,
+): TranscriptAssembly {
+  const prefixLength = current.text.length - suffix.length;
+  if (prefixLength <= 0) {
+    return addition;
+  }
+  const prefixJoins = current.repeatedJoins.filter(
+    (join) =>
+      join.index >= 0 &&
+      join.additionLength > 0 &&
+      join.index + join.additionLength <= prefixLength,
+  );
+  const appended = appendTranscript(
+    { text: current.text.slice(0, prefixLength), repeatedJoins: prefixJoins },
+    addition,
+    true,
+  );
+  return { ...appended, containmentSuffix: addition.text };
 }
 
 /**
