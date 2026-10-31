@@ -1146,6 +1146,43 @@ describe("controlled inbound call with appointment booking", () => {
     expect(google.writes).toEqual([]);
   });
 
+  it("finishes a readback when a one-code-point prefix makes the done transcript a small edit that still contains the deltas", async () => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const google = fakeGoogleCalendar({});
+    const { manager } = createBookingManager(sockets, google);
+    const socket = await openTelephoneSession(sockets, manager, {
+      callId: "call-book-done-prefix-edit",
+      webhookId: "evt_book_done_prefix_edit",
+    });
+    await toolRoundTrip(socket, "tool-propose", "propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    });
+    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    const deltas =
+      "10:00 Ada Lovelace, callback +15551239876, 2026-09-11 10:30 America/New_York";
+    const doneTranscript = `1${deltas}`;
+    receiveAssistantResponse(socket, {
+      responseId: "resp-done-prefix-edit",
+      status: "completed",
+      transcriptDelta: deltas,
+      transcriptDone: doneTranscript,
+    });
+    await toolRoundTrip(socket, "tool-confirm", "confirm_appointment", {
+      confirmed: true,
+      proposalId: proposed.proposalId,
+    });
+    socket.close();
+    expect(toolOutputs(socket)[1]).toMatchObject({
+      status: "booked",
+      eventExists: true,
+    });
+    expect(google.writes).toHaveLength(1);
+  });
+
   it("finishes a readback when a repeated one-character fragment completes the start time", async () => {
     const sockets: FakeRealtimeSocket[] = [];
     const google = fakeGoogleCalendar({});

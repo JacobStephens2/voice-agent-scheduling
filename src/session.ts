@@ -286,19 +286,26 @@ interface TranscriptAssembly {
  * which case keep the fragment. A fragment already contained in the held
  * text is still appended, and that join is recorded so a copied fragment
  * cannot mint a readback field. A done transcript that is a small edit of
- * the streamed deltas is appended the same way, and that join is recorded
- * too. A done transcript that continues the deltas, and distinct delta
- * fragments, stay ordinary joins. The streamed output-audio transcript and
- * the completed response payload are separate sources and must not be
- * passed here together.
+ * the streamed deltas is appended even when one string contains the other,
+ * and that join is recorded too. A done transcript that continues the
+ * deltas, and distinct delta fragments, stay ordinary joins. The streamed
+ * output-audio transcript and the completed response payload are separate
+ * sources and must not be passed here together.
  */
 function mergeTranscript(
   current: TranscriptAssembly,
   addition: TranscriptAssembly,
-  options?: { readonly restatement?: boolean },
+  options?: { readonly doneTranscript?: boolean },
 ): TranscriptAssembly {
   if (!addition.text) {
     return current;
+  }
+  if (
+    current.text &&
+    options?.doneTranscript === true &&
+    isSmallEdit(current.text, addition.text)
+  ) {
+    return appendTranscript(current, addition, true);
   }
   if (addition.text.includes(current.text)) {
     if (!current.text) {
@@ -316,27 +323,28 @@ function mergeTranscript(
       ],
     };
   }
+  return appendTranscript(current, addition, current.text.includes(addition.text));
+}
+
+function appendTranscript(
+  current: TranscriptAssembly,
+  addition: TranscriptAssembly,
+  repeated: boolean,
+): TranscriptAssembly {
   const shift = current.text.length;
   const shifted = addition.repeatedJoins.map((join) => ({
     index: join.index + shift,
     additionLength: join.additionLength,
   }));
-  const repeated =
-    current.text.includes(addition.text) ||
-    (options?.restatement === true && isSmallEdit(current.text, addition.text));
-  if (repeated) {
-    return {
-      text: current.text + addition.text,
-      repeatedJoins: [
-        ...current.repeatedJoins,
-        { index: shift, additionLength: addition.text.length },
-        ...shifted,
-      ],
-    };
-  }
   return {
     text: current.text + addition.text,
-    repeatedJoins: [...current.repeatedJoins, ...shifted],
+    repeatedJoins: repeated
+      ? [
+          ...current.repeatedJoins,
+          { index: shift, additionLength: addition.text.length },
+          ...shifted,
+        ]
+      : [...current.repeatedJoins, ...shifted],
   };
 }
 
@@ -410,7 +418,7 @@ function rememberOutputTranscript(
   }
   if (doneTranscript) {
     held = mergeTranscript(held, transcriptPiece(doneTranscript), {
-      restatement: event.type === "response.output_audio_transcript.done",
+      doneTranscript: event.type === "response.output_audio_transcript.done",
     });
   }
   if (!held.text) {
