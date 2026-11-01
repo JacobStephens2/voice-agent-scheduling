@@ -165,8 +165,9 @@ interface TranscriptWitness {
  * appears only across that join does not count unless the fragment is one
  * code point that finishes the field, and a field opened only at the
  * fragment's leading edge does not count. A field inside a longer word or
- * number does not count. A Unicode format character continues a field, so
- * it does not end one. Purpose is required only when the proposal has one.
+ * number does not count. A Unicode format character or variation selector
+ * continues a field, so it does not end one. Purpose is required only when
+ * the proposal has one.
  * The transcript itself is not retained.
  */
 export function transcriptCoversReadback(
@@ -314,7 +315,7 @@ function codePointStartingAt(text: string, index: number): string {
   return String.fromCodePoint(point);
 }
 
-/** Letters, numbers, underscore, and Unicode format characters continue a field. `Ada` does not match inside `Adam`. */
+/** Letters, numbers, underscore, Unicode format characters, and variation selectors continue a field. `Ada` does not match inside `Adam`. */
 function isFieldCharacter(char: string): boolean {
-  return char !== "" && /^[\p{L}\p{N}\p{Cf}_]$/u.test(char);
+  return char !== "" && /^[\p{L}\p{N}\p{Cf}\p{Variation_Selector}_]$/u.test(char);
 }
