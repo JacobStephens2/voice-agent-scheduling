@@ -79,4 +79,24 @@ describe("readback field boundaries", () => {
     expect(result.status).toBe("readback_incomplete");
     expect(writes).toEqual([]);
   });
+
+  it("does not accept a caller name that continues through a Unicode variation selector", async () => {
+    const { result, writes } = await confirmCallerName(
+      "Ada\uFE00m Smith",
+      "call-variation-name",
+      "scheduling-variation-",
+    );
+    expect(result.status).toBe("readback_incomplete");
+    expect(writes).toEqual([]);
+  });
+
+  it("does not accept a caller name that continues through a supplementary-plane variation selector", async () => {
+    const { result, writes } = await confirmCallerName(
+      "Ada\u{E0100}m Smith",
+      "call-variation-pair-name",
+      "scheduling-variation-pair-",
+    );
+    expect(result.status).toBe("readback_incomplete");
+    expect(writes).toEqual([]);
+  });
 });
