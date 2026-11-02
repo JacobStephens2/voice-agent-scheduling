@@ -99,4 +99,34 @@ describe("readback field boundaries", () => {
     expect(result.status).toBe("readback_incomplete");
     expect(writes).toEqual([]);
   });
+
+  it("does not accept a caller name that continues through a combining grapheme joiner", async () => {
+    const { result, writes } = await confirmCallerName(
+      "Ada\u034Fm Smith",
+      "call-cgj-name",
+      "scheduling-cgj-",
+    );
+    expect(result.status).toBe("readback_incomplete");
+    expect(writes).toEqual([]);
+  });
+
+  it("does not accept a caller name that continues through Khmer vowel inherent AQ", async () => {
+    const { result, writes } = await confirmCallerName(
+      "Ada\u17B4m Smith",
+      "call-khmer-17b4",
+      "scheduling-khmer-17b4-",
+    );
+    expect(result.status).toBe("readback_incomplete");
+    expect(writes).toEqual([]);
+  });
+
+  it("does not accept a caller name that continues through Khmer vowel inherent AA", async () => {
+    const { result, writes } = await confirmCallerName(
+      "Ada\u17B5m Smith",
+      "call-khmer-17b5",
+      "scheduling-khmer-17b5-",
+    );
+    expect(result.status).toBe("readback_incomplete");
+    expect(writes).toEqual([]);
+  });
 });
