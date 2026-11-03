@@ -129,4 +129,24 @@ describe("readback field boundaries", () => {
     expect(result.status).toBe("readback_incomplete");
     expect(writes).toEqual([]);
   });
+
+  it("does not accept a caller name that continues through an unassigned default-ignorable code point", async () => {
+    const { result, writes } = await confirmCallerName(
+      "Ada\u2065m Smith",
+      "call-unassigned-di-name",
+      "scheduling-unassigned-di-",
+    );
+    expect(result.status).toBe("readback_incomplete");
+    expect(writes).toEqual([]);
+  });
+
+  it("does not accept a caller name that continues through a supplementary-plane unassigned default-ignorable code point", async () => {
+    const { result, writes } = await confirmCallerName(
+      "Ada\u{E0002}m Smith",
+      "call-unassigned-di-pair-name",
+      "scheduling-unassigned-di-pair-",
+    );
+    expect(result.status).toBe("readback_incomplete");
+    expect(writes).toEqual([]);
+  });
 });
