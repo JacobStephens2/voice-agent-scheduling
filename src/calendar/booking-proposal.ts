@@ -165,9 +165,10 @@ interface TranscriptWitness {
  * appears only across that join does not count unless the fragment is one
  * code point that finishes the field, and a field opened only at the
  * fragment's leading edge does not count. A field inside a longer word or
- * number does not count. A Unicode format character, variation selector, or
- * default-ignorable mark continues a field, so it does not end one. Purpose
- * is required only when the proposal has one.
+ * number does not count. A Unicode format character, variation selector,
+ * default-ignorable mark, or unassigned default-ignorable code point
+ * continues a field, so it does not end one. Purpose is required only when
+ * the proposal has one.
  * The transcript itself is not retained.
  */
 export function transcriptCoversReadback(
@@ -315,7 +316,7 @@ function codePointStartingAt(text: string, index: number): string {
   return String.fromCodePoint(point);
 }
 
-/** Letters, numbers, underscore, Unicode format characters, variation selectors, and default-ignorable marks continue a field. `Ada` does not match inside `Adam`. */
+/** Letters, numbers, underscore, Unicode format characters, variation selectors, default-ignorable marks, and unassigned default-ignorable code points continue a field. `Ada` does not match inside `Adam`. */
 function isFieldCharacter(char: string): boolean {
   if (char === "") {
     return false;
@@ -323,5 +324,8 @@ function isFieldCharacter(char: string): boolean {
   if (/^[\p{L}\p{N}\p{Cf}\p{Variation_Selector}_]$/u.test(char)) {
     return true;
   }
-  return /^\p{M}$/u.test(char) && /^\p{Default_Ignorable_Code_Point}$/u.test(char);
+  if (/^\p{M}$/u.test(char) && /^\p{Default_Ignorable_Code_Point}$/u.test(char)) {
+    return true;
+  }
+  return /^\p{Cn}$/u.test(char) && /^\p{Default_Ignorable_Code_Point}$/u.test(char);
 }
