@@ -117,4 +117,89 @@ describe("restore durable state", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("leaves a destination symlink the backup does not restore", () => {
+    const root = mkdtempSync(join(tmpdir(), "scheduling-restore-extra-link-"));
+    try {
+      const source = join(root, "src");
+      const dest = join(root, "state");
+      const outside = join(root, "outside");
+      mkdirSync(source);
+      mkdirSync(dest);
+      mkdirSync(outside);
+      writeFileSync(join(source, "f"), "from-backup\n");
+      const sentinel = join(outside, "secret");
+      writeFileSync(sentinel, "sentinel\n");
+      symlinkSync(sentinel, join(dest, "extra-link"));
+      writeFileSync(join(dest, "extra.json"), "keep\n");
+
+      restoreDurableTree(source, dest);
+
+      expect(lstatSync(join(dest, "extra-link")).isSymbolicLink()).toBe(true);
+      expect(readFileSync(sentinel, "utf8")).toBe("sentinel\n");
+      expect(readFileSync(join(dest, "extra.json"), "utf8")).toBe("keep\n");
+      expect(readFileSync(join(dest, "f"), "utf8")).toBe("from-backup\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a symlinked durable-state directory before stopping the service or copying credentials", () => {
+    const root = mkdtempSync(join(tmpdir(), "scheduling-restore-partial-"));
+    try {
+      const bin = join(root, "bin");
+      const backup = join(root, "backup");
+      const etc = join(root, "etc", "scheduling-agent");
+      const stateParent = join(root, "var", "lib");
+      const outside = join(root, "outside");
+      const state = join(stateParent, "scheduling-agent");
+      const log = join(root, "actions.log");
+      mkdirSync(bin);
+      mkdirSync(join(backup, "etc-scheduling-agent"), { recursive: true });
+      mkdirSync(join(backup, "var-lib-scheduling-agent"), { recursive: true });
+      mkdirSync(etc, { recursive: true });
+      mkdirSync(stateParent, { recursive: true });
+      mkdirSync(outside);
+      const systemctl = join(bin, "systemctl");
+      writeFileSync(systemctl, `#!/bin/sh\necho "SYSTEMCTL $*" >> ${JSON.stringify(log)}\nexit 0\n`);
+      chmodSync(systemctl, 0o755);
+      writeFileSync(join(backup, "etc-scheduling-agent", "scheduling-agent.env"), "NEW_ENV=1\n");
+      writeFileSync(join(backup, "var-lib-scheduling-agent", "budget-ledger.json"), "from-backup\n");
+      writeFileSync(join(etc, "scheduling-agent.env"), "OLD_ENV=1\n");
+      writeFileSync(join(outside, "secret"), "do-not-follow\n");
+      symlinkSync(outside, state);
+
+      const rewritten = join(root, "restore.sh");
+      const sourceScript = readFileSync(script, "utf8")
+        .replaceAll("/etc/scheduling-agent", etc)
+        .replaceAll("/var/lib/scheduling-agent", state)
+        .replaceAll(/^sudo /gm, "")
+        .replaceAll(" sudo ", " ");
+      writeFileSync(rewritten, sourceScript, { mode: 0o755 });
+
+      let restoreExit = 0;
+      try {
+        execFileSync("bash", [rewritten, backup], {
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, FAKE_LOG: log },
+          stdio: "pipe",
+        });
+      } catch (error) {
+        restoreExit = 1;
+        if (typeof error === "object" && error !== null && "status" in error && typeof error.status === "number") {
+          restoreExit = error.status;
+        }
+      }
+
+      const actions = existsSync(log) ? readFileSync(log, "utf8") : "";
+      expect(restoreExit).not.toBe(0);
+      expect(actions).not.toContain("SYSTEMCTL stop scheduling-agent");
+      expect(actions).not.toContain("SYSTEMCTL start scheduling-agent");
+      expect(readFileSync(join(etc, "scheduling-agent.env"), "utf8")).toBe("OLD_ENV=1\n");
+      expect(lstatSync(state).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(outside, "secret"), "utf8")).toBe("do-not-follow\n");
+      expect(existsSync(join(outside, "budget-ledger.json"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

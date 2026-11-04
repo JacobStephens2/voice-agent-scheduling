@@ -3,17 +3,23 @@ set -euo pipefail
 
 # Copy a durable-state tree onto dest. The caller creates dest.
 # cp follows an existing destination symlink and writes its target. Remove
-# that name first so the backup is created in its place.
+# only that name, parents before children, so the backup is created in its place.
 restore_durable_tree() {
   local src="$1"
   local dest="$2"
+  local rel target
   if [ -L "${dest}" ]; then
     echo "Refusing restore: ${dest} is a symlink." >&2
     return 1
   fi
-  # -P so a directory symlink is removed, not descended into.
-  find -P "${dest}" -type l -exec rm -- {} +
-  cp -a --remove-destination "${src}/." "${dest}/"
+  while IFS= read -r -d '' rel; do
+    rel="${rel#./}"
+    target="${dest}/${rel}"
+    if [ -L "${target}" ]; then
+      rm -- "${target}"
+    fi
+  done < <(cd "${src}" && find -P . -mindepth 1 -print0 | sort -z)
+  cp -a "${src}/." "${dest}/"
 }
 
 main() {
@@ -28,6 +34,13 @@ main() {
   if [ ! -d "${ETC_SRC}" ] || [ ! -d "${STATE_SRC}" ]; then
     echo "Backup ${SOURCE} is missing etc-scheduling-agent or var-lib-scheduling-agent." >&2
     echo "Admission will stay unavailable until a complete restore is provided." >&2
+    exit 1
+  fi
+
+  # Refuse before stopping the service or copying credentials. mkdir -p would
+  # leave this symlink in place, and the state copy would not run.
+  if [ -L /var/lib/scheduling-agent ]; then
+    echo "Refusing restore: /var/lib/scheduling-agent is a symlink." >&2
     exit 1
   fi
 
