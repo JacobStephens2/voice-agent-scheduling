@@ -101,7 +101,9 @@ def copy_file(src: str, dirfd: int, name: str) -> None:
         data = read_all(src_fd)
     finally:
         os.close(src_fd)
-    mode = stat.S_IMODE(info.st_mode)
+    # The service user can set these bits on its own state file. This restore
+    # runs as root, and copying them would install a set-id root executable.
+    mode = stat.S_IMODE(info.st_mode) & ~(stat.S_ISUID | stat.S_ISGID)
     dest_fd = open_replaced_file(dirfd, name, mode)
     try:
         write_all(dest_fd, data)

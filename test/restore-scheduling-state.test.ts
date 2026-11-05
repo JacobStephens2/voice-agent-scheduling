@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -240,6 +241,43 @@ describe("restore durable state", () => {
           replacer.kill("SIGKILL");
         }
       }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not install a set-id executable as root", () => {
+    const root = mkdtempSync(join(tmpdir(), "scheduling-restore-setid-"));
+    try {
+      const source = join(root, "src");
+      const dest = join(root, "state");
+      mkdirSync(source);
+      mkdirSync(dest);
+      // A real ELF. Linux does not honor set-id on scripts, and the bytes are
+      // the caller's: /bin/true exits 0 if it is ever executed.
+      const name = "state-helper";
+      copyFileSync("/bin/true", join(source, name));
+      chmodSync(join(source, name), 0o6755);
+
+      execFileSync(
+        "sudo",
+        [
+          "-n",
+          "bash",
+          "-c",
+          'set -euo pipefail; source "$1"; restore_durable_tree "$2" "$3"',
+          "bash",
+          script,
+          source,
+          dest,
+        ],
+        { stdio: "pipe" },
+      );
+
+      const restored = lstatSync(join(dest, name));
+      expect(restored.isSymbolicLink()).toBe(false);
+      expect(restored.uid === 0 && (restored.mode & 0o4000) !== 0).toBe(false);
+      expect(restored.gid === 0 && (restored.mode & 0o2000) !== 0).toBe(false);
+    } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
