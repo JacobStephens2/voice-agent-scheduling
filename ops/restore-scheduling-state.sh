@@ -2,24 +2,15 @@
 set -euo pipefail
 
 # Copy a durable-state tree onto dest. The caller creates dest.
-# cp follows an existing destination symlink and writes its target. Remove
-# only that name, parents before children, so the backup is created in its place.
+# Each restored name is opened relative to its parent directory fd. That open
+# fails closed when the final name is a symlink, so the backup is not written
+# through the link. Names the backup does not restore stay in place.
+_restore_durable_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/restore_durable_tree.py"
+
 restore_durable_tree() {
   local src="$1"
   local dest="$2"
-  local rel target
-  if [ -L "${dest}" ]; then
-    echo "Refusing restore: ${dest} is a symlink." >&2
-    return 1
-  fi
-  while IFS= read -r -d '' rel; do
-    rel="${rel#./}"
-    target="${dest}/${rel}"
-    if [ -L "${target}" ]; then
-      rm -- "${target}"
-    fi
-  done < <(cd "${src}" && find -P . -mindepth 1 -print0 | sort -z)
-  cp -a "${src}/." "${dest}/"
+  PYTHONDONTWRITEBYTECODE=1 python3 "${_restore_durable_helper}" "${src}" "${dest}"
 }
 
 main() {
