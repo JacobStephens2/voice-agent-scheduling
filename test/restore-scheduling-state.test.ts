@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -199,6 +199,47 @@ describe("restore durable state", () => {
       expect(readFileSync(join(outside, "secret"), "utf8")).toBe("do-not-follow\n");
       expect(existsSync(join(outside, "budget-ledger.json"))).toBe(false);
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not write through a final name that is a symlink when the open runs", () => {
+    const root = mkdtempSync(join(tmpdir(), "scheduling-restore-open-symlink-"));
+    const source = join(root, "src");
+    const dest = join(root, "state");
+    const outside = join(root, "outside");
+    mkdirSync(source);
+    mkdirSync(dest);
+    mkdirSync(outside);
+    writeFileSync(join(source, "budget-ledger.json"), "from-backup\n");
+    for (let index = 0; index < 200; index += 1) {
+      writeFileSync(join(source, `z-${index}`), "x\n");
+    }
+    const sentinel = join(outside, "secret");
+    writeFileSync(sentinel, "do-not-follow\n");
+    const link = join(dest, "budget-ledger.json");
+    symlinkSync(sentinel, link);
+    const replacer = spawn(
+      "bash",
+      ["-c", 'while true; do ln -sfn "$1" "$2" 2>/dev/null || true; done', "bash", sentinel, link],
+      { stdio: "ignore", detached: true },
+    );
+    try {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      try {
+        restoreDurableTree(source, dest);
+      } catch {
+        // A failed open is the safe result. Following the symlink is not.
+      }
+      expect(readFileSync(sentinel, "utf8")).toBe("do-not-follow\n");
+    } finally {
+      if (replacer.pid !== undefined) {
+        try {
+          process.kill(-replacer.pid, "SIGKILL");
+        } catch {
+          replacer.kill("SIGKILL");
+        }
+      }
       rmSync(root, { recursive: true, force: true });
     }
   });
