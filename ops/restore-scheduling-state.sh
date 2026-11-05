@@ -10,10 +10,6 @@ _restore_durable_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/restore_d
 restore_durable_tree() {
   local src="$1"
   local dest="$2"
-  if [ -L "${dest}" ]; then
-    echo "Refusing restore: ${dest} is a symlink." >&2
-    return 1
-  fi
   PYTHONDONTWRITEBYTECODE=1 python3 "${_restore_durable_helper}" "${src}" "${dest}"
 }
 
