@@ -497,17 +497,32 @@ async function confirm(
     return limitRefusal(finalLimit);
   }
 
-  // Commit already read the stored event once, including when the insert
-  // timed out or conflicted. Confirmation does not read it again.
-  const committed = await commitStoredCalendarEvent(ctx.fetchFn, accessToken, {
+  // Re-read in this turn. An await between this check and the insert
+  // arguments would let a replacement proposal, or a cleared readback,
+  // be written. The pending row already holds the callback number, so a
+  // miss closes it with the existing failed result and leaves the stored
+  // proposal in place.
+  const current = ctx.proposals.current(execOptions.callId);
+  if (
+    !current ||
+    current.proposalId !== proposal.proposalId ||
+    !ctx.proposals.readbackFinished(execOptions.callId)
+  ) {
+    return failUnlessUnresolved(ctx.ledger, existing, identities);
+  }
+  const insert = {
     calendarId,
     eventId: generated.eventId,
-    callerName: proposal.callerName,
-    callbackNumber: proposal.callbackNumber,
-    purpose: proposal.purpose,
-    date: proposal.date,
-    startTime: proposal.startTime,
-  });
+    callerName: current.callerName,
+    callbackNumber: current.callbackNumber,
+    purpose: current.purpose,
+    date: current.date,
+    startTime: current.startTime,
+  };
+
+  // Commit already read the stored event once, including when the insert
+  // timed out or conflicted. Confirmation does not read it again.
+  const committed = await commitStoredCalendarEvent(ctx.fetchFn, accessToken, insert);
   return applyConfirmation(
     ctx.ledger,
     identities,

@@ -163,6 +163,80 @@ describe("appointment booking tool", () => {
     expect(google.writes).toEqual([]);
   });
 
+  it("does not insert when the current proposal is replaced before the calendar write", async () => {
+    const google = fakeGoogleCalendar({});
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-bookings-"));
+    let booking: ReturnType<typeof createAppointmentBooking> | undefined;
+    let replacedProposalId: string | undefined;
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("/freeBusy") && booking && !replacedProposalId) {
+        const replaced = await booking.execute(
+          "propose_appointment",
+          {
+            callerName: "Grace Hopper",
+            callbackNumber: "+15559876543",
+            callbackConfirmed: true,
+            date: "2026-09-11",
+            startTime: "14:00",
+          },
+          { callId: CALL_ID },
+        );
+        if (replaced.status !== "proposed" || !("proposalId" in replaced) || !replaced.proposalId) {
+          throw new Error("replacement proposal was not stored");
+        }
+        replacedProposalId = replaced.proposalId;
+      }
+      return google.fetchFn(input, init);
+    };
+    booking = createAppointmentBooking({
+      fetchFn,
+      tokenProvider: TOKEN_PROVIDER,
+      selection: SELECTION,
+      now: () => MONDAY_14H,
+      dataDir,
+      createIds: () => ({ operationId: TEST_OPERATION_ID, eventId: TEST_EVENT_ID }),
+      allowWrites: true,
+    });
+
+    const proposed = await proposedOn(booking);
+    booking.markReadbackFinished(CALL_ID);
+    const result = await booking.execute(
+      "confirm_appointment",
+      { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId },
+      { callId: CALL_ID },
+    );
+
+    expect(replacedProposalId).toEqual(expect.any(String));
+    expect(result).toMatchObject({
+      status: "failed",
+      operationId: TEST_OPERATION_ID,
+      eventId: TEST_EVENT_ID,
+      eventExists: false,
+      message:
+        "The calendar event could not be confirmed. Do not tell the caller the appointment is booked.",
+    });
+    expect(google.writes).toEqual([]);
+
+    const ledger = createAppointmentLedger({ dataDir });
+    const numberHash = ledger.hashCallbackNumber("+15551239876");
+    expect(numberHash).toEqual(expect.any(String));
+    expect(ledger.latestForOperation(TEST_OPERATION_ID)?.status).toBe("failed");
+    expect(ledger.operationsHoldingAppointment(numberHash as string)).toEqual([]);
+    const stored = readFileSync(join(dataDir, "bookings.jsonl"), "utf8");
+    expect(stored).not.toContain("+15551239876");
+    expect(stored).not.toContain("15551239876");
+
+    const stillThere = await booking.execute(
+      "confirm_appointment",
+      { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId },
+      { callId: CALL_ID },
+    );
+    expect(stillThere.status).toBe("readback_incomplete");
+    expect(stillThere.message).toContain("does not match the current proposal");
+    expect(google.writes).toEqual([]);
+  });
+
   it("does not write when calendar writes are disabled on this deployment", async () => {
     const google = fakeGoogleCalendar({});
     const booking = bookingWith(google, { allowWrites: false });
