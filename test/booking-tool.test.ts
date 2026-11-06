@@ -227,13 +227,13 @@ describe("appointment booking tool", () => {
     expect(stored).not.toContain("+15551239876");
     expect(stored).not.toContain("15551239876");
 
-    const stillThere = await booking.execute(
+    const originalAfterReplacement = await booking.execute(
       "confirm_appointment",
       { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId },
       { callId: CALL_ID },
     );
-    expect(stillThere.status).toBe("readback_incomplete");
-    expect(stillThere.message).toContain("does not match the current proposal");
+    expect(originalAfterReplacement.status).toBe("readback_incomplete");
+    expect(originalAfterReplacement.message).toContain("does not match the current proposal");
     expect(google.writes).toEqual([]);
   });
 
