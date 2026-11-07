@@ -123,6 +123,17 @@ describe("stored-event projection hold", () => {
     expect(project("missing").hold()).toBe("not_held");
   });
 
+  it("keeps holding a missing event while the appointment attempt is unresolved", () => {
+    expect(project("missing").holdWhileUnresolved()).toBe(true);
+  });
+
+  it("does not keep holding any other stored event while the attempt is unresolved", () => {
+    expect(project("cancelled").holdWhileUnresolved()).toBe(false);
+    expect(project("matching").holdWhileUnresolved()).toBe(false);
+    expect(project("mismatched").holdWhileUnresolved()).toBe(false);
+    expect(project("unreachable").holdWhileUnresolved()).toBe(false);
+  });
+
   it("reports an unknown callback hold when the calendar cannot be reached", () => {
     expect(project("unreachable").hold()).toBe("unknown");
   });
