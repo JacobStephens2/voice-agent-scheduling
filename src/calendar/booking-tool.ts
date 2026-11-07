@@ -457,11 +457,18 @@ async function confirm(
       calendarId,
       generated.eventId,
     );
-    // The projection decides a closed start. Missing is unavailable: no
-    // commit, drop the proposal, and say the time was taken. Every other
-    // kind appends the same commit confirm would, and the proposal stays.
+    // The projection decides a closed start. Missing is unavailable only
+    // when this attempt did not begin from an unresolved row: no commit,
+    // drop the proposal, and say the time was taken. A row that was
+    // already unresolved stays in place, so recovery can still settle the
+    // original appointment. Every other kind appends the same commit
+    // confirm would.
     const closed = project(own.kind).confirmClosedStart();
     if (closed.outcome === "unavailable") {
+      const held = heldUnresolved(existing);
+      if (held) {
+        return held;
+      }
       ctx.ledger.record({ ...identities, status: "unavailable" });
       ctx.proposals.drop(execOptions.callId);
       return {
@@ -688,6 +695,8 @@ function applyConfirmation(
  * callback number. The upcoming window, the excluded operation, and an
  * unparseable start stay here. The stored event's hold comes from the
  * projection: held blocks, not held does not, and unknown stops the scan.
+ * An unsettled attempt whose event still reads as missing also holds:
+ * that read can be stale after the insert this attempt already sent.
  */
 async function evaluateCallbackLimit(options: {
   readonly fetchFn: typeof fetch;
@@ -722,6 +731,9 @@ async function evaluateCallbackLimit(options: {
     );
     const hold = project(reading.kind).hold();
     if (hold === "not_held") {
+      if (reading.kind === "missing" && isUnresolvedBookingStatus(record.status)) {
+        return "blocked";
+      }
       continue;
     }
     if (hold === "unknown") {

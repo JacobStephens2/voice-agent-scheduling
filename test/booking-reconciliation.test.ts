@@ -144,6 +144,14 @@ function latestRecord(dataDir: string, operationId: string) {
   return createAppointmentLedger({ dataDir }).latestForOperation(operationId);
 }
 
+function sequencedIds(prefix: string) {
+  let created = 0;
+  return () => {
+    created += 1;
+    return { operationId: `${prefix}-op-${created}`, eventId: `${prefix}-ev-${created}` };
+  };
+}
+
 describe("confirmed booking reconciliation", () => {
   it("reconciles a timeout after Google accepted the insertion against the original identities", async () => {
     const calendar = controllableCalendar({ postBehavior: "timeout", recordPost: true });
@@ -455,6 +463,79 @@ describe("confirmed booking reconciliation", () => {
     const proposalId = await propose(booking, { startTime: "14:00" }, "call-after-cancel");
     const second = await confirm(booking, proposalId, "call-after-cancel");
     expect(second).toMatchObject({ status: "booked", eventExists: true });
+  });
+
+  it("holds the callback number so an unsettled attempt cannot create another appointment", async () => {
+    const calendar = controllableCalendar({
+      postBehavior: "timeout",
+      recordPost: true,
+      getBehavior: "missing",
+    });
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-reconcile-hold-"));
+    const booking = bookingWith(calendar, dataDir, sequencedIds("hold"));
+
+    const firstProposal = await propose(booking, {}, "call-hold-1");
+    const first = await confirm(booking, firstProposal, "call-hold-1");
+
+    expect(first).toMatchObject({
+      status: "inconclusive",
+      operationId: "hold-op-1",
+      eventId: "hold-ev-1",
+      eventExists: false,
+    });
+    expect(calendar.posts.map((post) => post.body.id)).toEqual(["hold-ev-1"]);
+    expect(latestRecord(dataDir, "hold-op-1")).toMatchObject({
+      status: "inconclusive",
+      eventId: "hold-ev-1",
+    });
+
+    const secondProposal = await propose(booking, { startTime: "14:00" }, "call-hold-2");
+    const second = await confirm(booking, secondProposal, "call-hold-2");
+
+    expect(second.status).not.toBe("booked");
+    expect(calendar.posts.map((post) => post.body.id)).toEqual(["hold-ev-1"]);
+    expect(calendar.landedCount()).toBe(1);
+
+    calendar.state.getBehavior = "stored";
+    const outcomes = await booking.reconcileUnresolvedOperations();
+    expect(outcomes).toEqual([
+      {
+        operationId: "hold-op-1",
+        eventId: "hold-ev-1",
+        status: "booked",
+        eventExists: true,
+      },
+    ]);
+  });
+
+  it("leaves the unresolved row in place when the offered start is no longer open", async () => {
+    const calendar = controllableCalendar({
+      postBehavior: "timeout",
+      recordPost: true,
+      getBehavior: "missing",
+    });
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-reconcile-busy-"));
+    const booking = bookingWith(calendar, dataDir, sequencedIds("busy"));
+
+    const proposalId = await propose(booking, {}, "call-busy-1");
+    const first = await confirm(booking, proposalId, "call-busy-1");
+    expect(first).toMatchObject({
+      status: "inconclusive",
+      operationId: "busy-op-1",
+      eventId: "busy-ev-1",
+    });
+    expect(calendar.posts.map((post) => post.body.id)).toEqual(["busy-ev-1"]);
+
+    calendar.state.busyAtTen = true;
+    const retried = await confirm(booking, proposalId, "call-busy-1");
+    const ledger = createAppointmentLedger({ dataDir });
+
+    expect(retried.status).not.toBe("unavailable");
+    expect(calendar.posts.map((post) => post.body.id)).toEqual(["busy-ev-1"]);
+    expect(ledger.latestForOperation("busy-op-1")?.status).toBe("inconclusive");
+    expect(ledger.unresolvedOperations()).toEqual([
+      expect.objectContaining({ operationId: "busy-op-1", status: "inconclusive" }),
+    ]);
   });
 
   it("reports unresolved when Calendar cannot be reached during restart recovery", async () => {
