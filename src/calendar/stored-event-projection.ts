@@ -53,6 +53,12 @@ export interface RecoveryDecision {
 export interface StoredEventProjection {
   /** Held blocks the callback number, not held does not, unknown stops the scan. */
   hold(): "held" | "not_held" | "unknown";
+  /**
+   * True only when an unresolved attempt still holds the callback number
+   * after hold() says not held. A missing event can be a stale read after
+   * the insert. A cancelled event does not.
+   */
+  holdWhileUnresolved(): boolean;
   confirm(): Confirmation;
   confirmClosedStart(): ClosedStartConfirmation;
   recover(previous: UnresolvedRow): RecoveryDecision;
@@ -65,6 +71,11 @@ interface KindRow {
   /** A stored event was read: matching, mismatched, or cancelled. */
   readonly eventStored: boolean;
   readonly callbackHold: "held" | "not_held" | "unknown";
+  /**
+   * Keeps the callback number while the ledger row is unresolved, even
+   * though callbackHold is not held. Only a missing event.
+   */
+  readonly holdWhileUnresolved: boolean;
   /**
    * Explicit closed-start fact. Only `missing` is unavailable. Not derived
    * from "event not stored" and "hold not held": unreachable is also not
@@ -84,6 +95,7 @@ const ROWS: { readonly [kind in StoredEventKind]: KindRow } = {
     tellCaller: true,
     eventStored: true,
     callbackHold: "held",
+    holdWhileUnresolved: false,
     closedStart: "commit",
   },
   mismatched: {
@@ -92,6 +104,7 @@ const ROWS: { readonly [kind in StoredEventKind]: KindRow } = {
     tellCaller: false,
     eventStored: true,
     callbackHold: "held",
+    holdWhileUnresolved: false,
     closedStart: "commit",
   },
   cancelled: {
@@ -100,6 +113,7 @@ const ROWS: { readonly [kind in StoredEventKind]: KindRow } = {
     tellCaller: false,
     eventStored: true,
     callbackHold: "not_held",
+    holdWhileUnresolved: false,
     closedStart: "commit",
   },
   missing: {
@@ -108,6 +122,7 @@ const ROWS: { readonly [kind in StoredEventKind]: KindRow } = {
     tellCaller: false,
     eventStored: false,
     callbackHold: "not_held",
+    holdWhileUnresolved: true,
     closedStart: "unavailable",
   },
   unreachable: {
@@ -116,6 +131,7 @@ const ROWS: { readonly [kind in StoredEventKind]: KindRow } = {
     tellCaller: false,
     eventStored: false,
     callbackHold: "unknown",
+    holdWhileUnresolved: false,
     closedStart: "commit",
   },
 };
@@ -132,6 +148,9 @@ export function project(kind: StoredEventKind): StoredEventProjection {
   return {
     hold() {
       return row.callbackHold;
+    },
+    holdWhileUnresolved() {
+      return row.holdWhileUnresolved;
     },
     confirm() {
       return confirmationFrom(row);

@@ -695,8 +695,9 @@ function applyConfirmation(
  * callback number. The upcoming window, the excluded operation, and an
  * unparseable start stay here. The stored event's hold comes from the
  * projection: held blocks, not held does not, and unknown stops the scan.
- * An unsettled attempt whose event still reads as missing also holds:
- * that read can be stale after the insert this attempt already sent.
+ * An unsettled attempt also holds when the projection says the event
+ * holds while unresolved: a missing read can be stale after the insert
+ * this attempt already sent.
  */
 async function evaluateCallbackLimit(options: {
   readonly fetchFn: typeof fetch;
@@ -729,9 +730,10 @@ async function evaluateCallbackLimit(options: {
       record.calendarId,
       record.eventId,
     );
-    const hold = project(reading.kind).hold();
+    const stored = project(reading.kind);
+    const hold = stored.hold();
     if (hold === "not_held") {
-      if (reading.kind === "missing" && isUnresolvedBookingStatus(record.status)) {
+      if (stored.holdWhileUnresolved() && isUnresolvedBookingStatus(record.status)) {
         return "blocked";
       }
       continue;
