@@ -94,26 +94,24 @@ function declaredBodyExceedsCeiling(req: http.IncomingMessage): boolean {
   return Number.isFinite(declared) && declared > SIP_WEBHOOK_BODY_CEILING_BYTES;
 }
 
-// 413 goes out before the socket is destroyed, and the oversized chunks are
-// dropped here so they are never concatenated or passed to the webhook.
+// The route calls this after readBody rejects. 413 is written before the
+// socket is destroyed, and the oversized chunks are already dropped.
 function refuseOversizedBody(req: http.IncomingMessage, res: http.ServerResponse): void {
-  if (!res.headersSent) {
-    const body = JSON.stringify({ error: "payload_too_large" });
-    res.writeHead(413, {
-      "content-type": "application/json",
-      "content-length": Buffer.byteLength(body),
-      connection: "close",
-    });
-    res.end(body);
-  }
+  const body = JSON.stringify({ error: "payload_too_large" });
+  res.writeHead(413, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(body),
+    connection: "close",
+  });
+  res.end(body);
   req.on("error", () => {});
   req.destroy();
 }
 
-function readBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<string> {
+function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     if (declaredBodyExceedsCeiling(req)) {
-      refuseOversizedBody(req, res);
+      req.pause();
       reject(new PayloadTooLargeError());
       return;
     }
@@ -132,10 +130,12 @@ function readBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<
       received += chunk.length;
       if (received > SIP_WEBHOOK_BODY_CEILING_BYTES) {
         chunks.length = 0;
-        detach();
-        settled = true;
-        refuseOversizedBody(req, res);
-        reject(new PayloadTooLargeError());
+        if (!settled) {
+          settled = true;
+          detach();
+          req.pause();
+          reject(new PayloadTooLargeError());
+        }
         return;
       }
       chunks.push(chunk);
@@ -342,7 +342,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
     }
 
     if (req.method === "POST" && url.pathname === "/xai/sip-webhook") {
-      void readBody(req, res)
+      void readBody(req)
         .then(async (rawBody) => {
           const result = await lifecycleManager.handleWebhook({
             id: headerValue(req.headers["webhook-id"]),
@@ -350,21 +350,17 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
             signature: headerValue(req.headers["webhook-signature"]),
             rawBody,
           });
-          if (res.headersSent) {
-            return;
-          }
           res.writeHead(result.statusCode, { "content-type": "application/json" });
           res.end(result.body);
         })
         .catch((error: unknown) => {
-          if (res.headersSent) {
-            return;
-          }
           if (error instanceof PayloadTooLargeError) {
             refuseOversizedBody(req, res);
             return;
           }
-          json(res, 500, { error: "internal_server_error" });
+          if (!res.headersSent) {
+            json(res, 500, { error: "internal_server_error" });
+          }
         });
       return;
     }
