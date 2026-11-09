@@ -74,14 +74,94 @@ function evidenceAuthorized(req: http.IncomingMessage, token: string): boolean {
   );
 }
 
-function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => {
-      chunks.push(chunk);
+// A realtime.call.incoming body is a short JSON event. 64 KiB stays above
+// any honest SIP header set and is the most this process will buffer.
+export const SIP_WEBHOOK_BODY_CEILING_BYTES = 64 * 1024;
+
+class PayloadTooLargeError extends Error {
+  constructor() {
+    super("payload_too_large");
+    this.name = "PayloadTooLargeError";
+  }
+}
+
+function declaredBodyExceedsCeiling(req: http.IncomingMessage): boolean {
+  const raw = headerValue(req.headers["content-length"]);
+  if (raw === undefined) {
+    return false;
+  }
+  const declared = Number(raw);
+  return Number.isFinite(declared) && declared > SIP_WEBHOOK_BODY_CEILING_BYTES;
+}
+
+// 413 goes out before the socket is destroyed, and the oversized chunks are
+// dropped here so they are never concatenated or passed to the webhook.
+function refuseOversizedBody(req: http.IncomingMessage, res: http.ServerResponse): void {
+  if (!res.headersSent) {
+    const body = JSON.stringify({ error: "payload_too_large" });
+    res.writeHead(413, {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body),
+      connection: "close",
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    res.end(body);
+  }
+  req.on("error", () => {});
+  req.destroy();
+}
+
+function readBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (declaredBodyExceedsCeiling(req)) {
+      refuseOversizedBody(req, res);
+      reject(new PayloadTooLargeError());
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let received = 0;
+    let settled = false;
+
+    const detach = () => {
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+    };
+
+    const onData = (chunk: Buffer) => {
+      received += chunk.length;
+      if (received > SIP_WEBHOOK_BODY_CEILING_BYTES) {
+        chunks.length = 0;
+        detach();
+        settled = true;
+        refuseOversizedBody(req, res);
+        reject(new PayloadTooLargeError());
+        return;
+      }
+      chunks.push(chunk);
+    };
+
+    const onEnd = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      detach();
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    };
+
+    const onError = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      detach();
+      reject(error);
+    };
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
   });
 }
 
@@ -262,7 +342,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
     }
 
     if (req.method === "POST" && url.pathname === "/xai/sip-webhook") {
-      void readBody(req)
+      void readBody(req, res)
         .then(async (rawBody) => {
           const result = await lifecycleManager.handleWebhook({
             id: headerValue(req.headers["webhook-id"]),
@@ -270,10 +350,20 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
             signature: headerValue(req.headers["webhook-signature"]),
             rawBody,
           });
+          if (res.headersSent) {
+            return;
+          }
           res.writeHead(result.statusCode, { "content-type": "application/json" });
           res.end(result.body);
         })
-        .catch(() => {
+        .catch((error: unknown) => {
+          if (res.headersSent) {
+            return;
+          }
+          if (error instanceof PayloadTooLargeError) {
+            refuseOversizedBody(req, res);
+            return;
+          }
           json(res, 500, { error: "internal_server_error" });
         });
       return;
