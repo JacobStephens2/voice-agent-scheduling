@@ -74,14 +74,94 @@ function evidenceAuthorized(req: http.IncomingMessage, token: string): boolean {
   );
 }
 
+// A realtime.call.incoming body is a short JSON event. 64 KiB stays above
+// any honest SIP header set and is the most this process will buffer.
+export const SIP_WEBHOOK_BODY_CEILING_BYTES = 64 * 1024;
+
+class PayloadTooLargeError extends Error {
+  constructor() {
+    super("payload_too_large");
+    this.name = "PayloadTooLargeError";
+  }
+}
+
+function declaredBodyExceedsCeiling(req: http.IncomingMessage): boolean {
+  const raw = headerValue(req.headers["content-length"]);
+  if (raw === undefined) {
+    return false;
+  }
+  const declared = Number(raw);
+  return Number.isFinite(declared) && declared > SIP_WEBHOOK_BODY_CEILING_BYTES;
+}
+
+// The route calls this after readBody rejects. 413 is written before the
+// socket is destroyed, and the oversized chunks are already dropped.
+function refuseOversizedBody(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const body = JSON.stringify({ error: "payload_too_large" });
+  res.writeHead(413, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(body),
+    connection: "close",
+  });
+  res.end(body);
+  req.on("error", () => {});
+  req.destroy();
+}
+
 function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (declaredBodyExceedsCeiling(req)) {
+      req.pause();
+      reject(new PayloadTooLargeError());
+      return;
+    }
+
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => {
+    let received = 0;
+    let settled = false;
+
+    const detach = () => {
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+    };
+
+    const onData = (chunk: Buffer) => {
+      received += chunk.length;
+      if (received > SIP_WEBHOOK_BODY_CEILING_BYTES) {
+        chunks.length = 0;
+        if (!settled) {
+          settled = true;
+          detach();
+          req.pause();
+          reject(new PayloadTooLargeError());
+        }
+        return;
+      }
       chunks.push(chunk);
-    });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    };
+
+    const onEnd = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      detach();
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    };
+
+    const onError = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      detach();
+      reject(error);
+    };
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
   });
 }
 
@@ -273,8 +353,14 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
           res.writeHead(result.statusCode, { "content-type": "application/json" });
           res.end(result.body);
         })
-        .catch(() => {
-          json(res, 500, { error: "internal_server_error" });
+        .catch((error: unknown) => {
+          if (error instanceof PayloadTooLargeError) {
+            refuseOversizedBody(req, res);
+            return;
+          }
+          if (!res.headersSent) {
+            json(res, 500, { error: "internal_server_error" });
+          }
         });
       return;
     }

@@ -1,6 +1,10 @@
 import http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createSchedulingServer, type SchedulingServer } from "../src/server.js";
+import {
+  createSchedulingServer,
+  SIP_WEBHOOK_BODY_CEILING_BYTES,
+  type SchedulingServer,
+} from "../src/server.js";
 import { FakeRealtimeSocket } from "./fake-socket.js";
 import {
   WEBHOOK_SECRET,
@@ -104,6 +108,67 @@ describe("scheduling HTTP boundary", () => {
       body: "{}",
     });
     expect(response.status).toBe(401);
+  });
+
+  it("rejects an oversized POST /xai/sip-webhook with 413 before the webhook is handled", async () => {
+    expect(SIP_WEBHOOK_BODY_CEILING_BYTES).toBe(64 * 1024);
+    const response = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
+      let settled = false;
+      const fail = (error: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(error);
+      };
+      const succeed = (value: { statusCode: number; body: string }) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(value);
+      };
+      const request = http.request(
+        {
+          host: "127.0.0.1",
+          port: PORT,
+          path: "/xai/sip-webhook",
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "webhook-id": "msg_oversize_1",
+            "webhook-timestamp": Math.floor(Date.now() / 1000).toString(),
+            "webhook-signature": "v1,not-a-valid-mac",
+            connection: "close",
+          },
+        },
+        (incoming) => {
+          const chunks: Buffer[] = [];
+          incoming.on("data", (chunk: Buffer) => {
+            chunks.push(chunk);
+          });
+          incoming.on("end", () => {
+            succeed({
+              statusCode: incoming.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString("utf8"),
+            });
+          });
+        },
+      );
+      request.setTimeout(2000, () => {
+        request.destroy();
+        fail(new Error("timed out waiting for 413 before the webhook body finished"));
+      });
+      request.on("error", (error) => {
+        fail(error);
+      });
+      // One byte past the ceiling, then pause. The remainder is never written,
+      // so a handler that waits for the full body cannot answer this request.
+      request.write(Buffer.alloc(SIP_WEBHOOK_BODY_CEILING_BYTES + 1, 0x78));
+    });
+
+    expect(response.statusCode).toBe(413);
+    expect(JSON.parse(response.body)).toEqual({ error: "payload_too_large" });
   });
 
   it("disables operator setup pages without an operator token", async () => {
