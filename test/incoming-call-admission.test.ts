@@ -133,6 +133,56 @@ describe("incoming call admission", () => {
     }
   });
 
+  it("uses the sip or sips From user for the allowlist, not a display-name number", () => {
+    for (const [label, from] of [
+      ["sip", '"+15550001111" <sip:+19995550000@sip.telnyx.com>'],
+      ["sips", '"+15550001111" <sips:+19995550000@sip.telnyx.com>'],
+      [
+        "quoted-sip",
+        '"<sip:+15550001111@evil.example>" <sip:+19995550000@sip.telnyx.com>',
+      ],
+    ] as const) {
+      const displayNameAllowlist = createIncomingCallAdmission({
+        webhookSecret: WEBHOOK_SECRET,
+        maxConcurrentCalls: 1,
+        allowedCallerNumbers: ["+15550001111"],
+      });
+      expect(
+        displayNameAllowlist.admit(
+          signedHeaders(
+            incomingCallPayload({ callId: `call-${label}-display`, callerNumber: from }),
+            { webhookId: `msg_${label}_display` },
+          ),
+        ),
+        label,
+      ).toEqual({
+        admitted: false,
+        reason: "unauthorized_caller",
+        callId: `call-${label}-display`,
+      });
+
+      const sipUserAllowlist = createIncomingCallAdmission({
+        webhookSecret: WEBHOOK_SECRET,
+        maxConcurrentCalls: 1,
+        allowedCallerNumbers: ["+19995550000"],
+      });
+      expect(
+        sipUserAllowlist.admit(
+          signedHeaders(
+            incomingCallPayload({ callId: `call-${label}-user`, callerNumber: from }),
+            { webhookId: `msg_${label}_user` },
+          ),
+        ),
+        label,
+      ).toEqual({
+        admitted: true,
+        callId: `call-${label}-user`,
+        callerNumber: "+19995550000",
+        calledNumber: "+18005550199",
+      });
+    }
+  });
+
   it("rejects callers outside the smoke-mode allowlist", () => {
     const admission = createIncomingCallAdmission({
       webhookSecret: WEBHOOK_SECRET,

@@ -98,6 +98,36 @@ function sipHeader(headers: readonly SipHeader[] | undefined, name: string): str
   return typeof match?.value === "string" ? match.value : "";
 }
 
+function callerNumberFromSipFrom(from: string): string {
+  const user = sipOrSipsUser(from);
+  if (user === undefined) {
+    return extractE164(from);
+  }
+  return extractE164(user);
+}
+
+function sipOrSipsUser(from: string): string | undefined {
+  const addr = unquotedAngleAddr(from);
+  if (addr === undefined) {
+    return undefined;
+  }
+  const matched = /^sips?:([^@]*)@/i.exec(addr.trim());
+  if (!matched) {
+    return undefined;
+  }
+  return matched[1] ?? "";
+}
+
+function unquotedAngleAddr(value: string): string | undefined {
+  const pattern = /"(?:[^"\\]|\\.)*"|<([^>]*)>/g;
+  for (const match of value.matchAll(pattern)) {
+    if (match[1] !== undefined) {
+      return match[1];
+    }
+  }
+  return undefined;
+}
+
 export function createIncomingCallAdmission(
   options: IncomingCallAdmissionOptions,
 ): IncomingCallAdmission {
@@ -151,7 +181,9 @@ export function createIncomingCallAdmission(
         return { admitted: false, reason: "duplicate_delivery" };
       }
 
-      const callerNumber = extractE164(sipHeader(payload.data?.sip_headers, "from"));
+      const callerNumber = callerNumberFromSipFrom(
+        sipHeader(payload.data?.sip_headers, "from"),
+      );
       const calledNumber = extractE164(sipHeader(payload.data?.sip_headers, "to"));
 
       if (allowed && allowed.length > 0 && !allowed.includes(callerNumber)) {
