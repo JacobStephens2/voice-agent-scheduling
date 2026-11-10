@@ -204,6 +204,46 @@ describe("incoming call admission", () => {
     });
   });
 
+  it("uses a later sip angle-addr when an earlier angle is not sip or sips", () => {
+    const from = "sip:5555550177@evil.example <x> <sip:+19995550000@sip.telnyx.com>";
+    const rejected = createIncomingCallAdmission({
+      webhookSecret: WEBHOOK_SECRET,
+      maxConcurrentCalls: 1,
+      allowedCallerNumbers: ["+15555550177"],
+    });
+    expect(
+      rejected.admit(
+        signedHeaders(
+          incomingCallPayload({ callId: "call-later-angle-reject", callerNumber: from }),
+          { webhookId: "msg_later_angle_reject" },
+        ),
+      ),
+    ).toEqual({
+      admitted: false,
+      reason: "unauthorized_caller",
+      callId: "call-later-angle-reject",
+    });
+
+    const admitted = createIncomingCallAdmission({
+      webhookSecret: WEBHOOK_SECRET,
+      maxConcurrentCalls: 1,
+      allowedCallerNumbers: ["+19995550000"],
+    });
+    expect(
+      admitted.admit(
+        signedHeaders(
+          incomingCallPayload({ callId: "call-later-angle-admit", callerNumber: from }),
+          { webhookId: "msg_later_angle_admit" },
+        ),
+      ),
+    ).toEqual({
+      admitted: true,
+      callId: "call-later-angle-admit",
+      callerNumber: "+19995550000",
+      calledNumber: "+18005550199",
+    });
+  });
+
   it("rejects callers outside the smoke-mode allowlist", () => {
     const admission = createIncomingCallAdmission({
       webhookSecret: WEBHOOK_SECRET,

@@ -108,23 +108,21 @@ function callerNumberFromSipFrom(from: string): string {
 
 function sipOrSipsUser(from: string): string | undefined {
   const visible = from.replace(/"(?:[^"\\]|\\.)*"/g, " ");
-  const angled = angleAddr(visible);
-  if (angled !== undefined) {
-    const angledUser = sipUserIn(angled.trim());
+  // A non-sip angle must not send the search back to an earlier sip: user.
+  let rest = visible;
+  while (rest.includes("<")) {
+    const open = rest.indexOf("<");
+    const close = rest.indexOf(">", open + 1);
+    if (close === -1) {
+      break;
+    }
+    const angledUser = sipUserIn(rest.slice(open + 1, close).trim());
     if (angledUser !== undefined) {
       return angledUser;
     }
+    rest = rest.slice(close + 1);
   }
   return sipUserIn(visible);
-}
-
-function angleAddr(value: string): string | undefined {
-  const open = value.indexOf("<");
-  const close = open === -1 ? -1 : value.indexOf(">", open + 1);
-  if (open === -1 || close === -1) {
-    return undefined;
-  }
-  return value.slice(open + 1, close);
 }
 
 function sipUserIn(value: string): string | undefined {
