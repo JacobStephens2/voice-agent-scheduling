@@ -107,25 +107,32 @@ function callerNumberFromSipFrom(from: string): string {
 }
 
 function sipOrSipsUser(from: string): string | undefined {
-  const addr = unquotedAngleAddr(from);
-  if (addr === undefined) {
+  const visible = from.replace(/"(?:[^"\\]|\\.)*"/g, " ");
+  const angled = angleAddr(visible);
+  if (angled !== undefined) {
+    const angledUser = sipUserIn(angled.trim());
+    if (angledUser !== undefined) {
+      return angledUser;
+    }
+  }
+  return sipUserIn(visible);
+}
+
+function angleAddr(value: string): string | undefined {
+  const open = value.indexOf("<");
+  const close = open === -1 ? -1 : value.indexOf(">", open + 1);
+  if (open === -1 || close === -1) {
     return undefined;
   }
-  const matched = /^sips?:([^@]*)@/i.exec(addr.trim());
+  return value.slice(open + 1, close);
+}
+
+function sipUserIn(value: string): string | undefined {
+  const matched = /(?:^|[^A-Za-z0-9])sips?:([^@]*)@/i.exec(value);
   if (!matched) {
     return undefined;
   }
   return matched[1] ?? "";
-}
-
-function unquotedAngleAddr(value: string): string | undefined {
-  const pattern = /"(?:[^"\\]|\\.)*"|<([^>]*)>/g;
-  for (const match of value.matchAll(pattern)) {
-    if (match[1] !== undefined) {
-      return match[1];
-    }
-  }
-  return undefined;
 }
 
 export function createIncomingCallAdmission(

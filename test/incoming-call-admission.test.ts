@@ -183,6 +183,27 @@ describe("incoming call admission", () => {
     }
   });
 
+  it("uses an unbracketed sip user, not a later plus-digit run", () => {
+    const from = "sip:5555550177@sip.telnyx.com;tag=+15550001111";
+    const admission = createIncomingCallAdmission({
+      webhookSecret: WEBHOOK_SECRET,
+      maxConcurrentCalls: 1,
+      allowedCallerNumbers: ["+15550001111"],
+    });
+    expect(
+      admission.admit(
+        signedHeaders(
+          incomingCallPayload({ callId: "call-addr-spec", callerNumber: from }),
+          { webhookId: "msg_addr_spec" },
+        ),
+      ),
+    ).toEqual({
+      admitted: false,
+      reason: "unauthorized_caller",
+      callId: "call-addr-spec",
+    });
+  });
+
   it("rejects callers outside the smoke-mode allowlist", () => {
     const admission = createIncomingCallAdmission({
       webhookSecret: WEBHOOK_SECRET,
