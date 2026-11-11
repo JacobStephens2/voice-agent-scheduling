@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAppointmentLedger, type AppointmentLedger } from "../src/calendar/appointment-ledger.js";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
-import { TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
+import { completeReadback, TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
 
 const MONDAY_14H = new Date("2026-09-07T14:00:00-04:00");
 const SELECTION = {
@@ -128,6 +128,7 @@ async function propose(
   if (result.status !== "proposed" || !("proposalId" in result) || !result.proposalId) {
     throw new Error(`Expected a proposal, got ${result.status}`);
   }
+  completeReadback(booking, callId, result);
   return result.proposalId as string;
 }
 
@@ -136,7 +137,6 @@ async function confirm(
   proposalId: string,
   callId = CALL_ID,
 ) {
-  booking.markReadbackFinished(callId);
   return booking.execute("confirm_appointment", { confirmed: true, proposalId }, { callId });
 }
 
@@ -250,7 +250,6 @@ describe("confirmed booking reconciliation", () => {
     const booking = bookingWith(calendar, dataDir);
 
     const proposalId = await propose(booking);
-    booking.markReadbackFinished(CALL_ID);
     const [first, second] = await Promise.all([
       booking.execute("confirm_appointment", { confirmed: true, proposalId }, { callId: CALL_ID }),
       booking.execute("confirm_appointment", { confirmed: true, proposalId }, { callId: CALL_ID }),
@@ -351,7 +350,6 @@ describe("confirmed booking reconciliation", () => {
     expect(taken.message).toContain("fresh alternatives");
     expect(calendar.posts).toHaveLength(0);
 
-    booking.markReadbackFinished(CALL_ID);
     const stale = await booking.execute(
       "confirm_appointment",
       { confirmed: true, proposalId },

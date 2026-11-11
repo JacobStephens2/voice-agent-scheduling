@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
-import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
-import { fakeGoogleCalendar, TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
+import { createAppointmentBooking, type BookingToolResult } from "../src/calendar/booking-tool.js";
+import { assistantResponseEvents, completeReadback, fakeGoogleCalendar, readbackText, TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
 
 const MONDAY_14H = new Date("2026-09-07T14:00:00-04:00");
 const SELECTION = {
@@ -48,11 +48,11 @@ async function proposedOn(
 
 async function confirmCurrent(
   booking: ReturnType<typeof createAppointmentBooking>,
-  proposed: { proposalId?: string } | { status: string },
+  proposed: BookingToolResult,
   extra: Record<string, unknown> = {},
   callId = CALL_ID,
 ) {
-  booking.markReadbackFinished(callId);
+  completeReadback(booking, callId, proposed);
   const proposalId = "proposalId" in proposed ? proposed.proposalId : undefined;
   return booking.execute(
     "confirm_appointment",
@@ -62,6 +62,126 @@ async function confirmCurrent(
 }
 
 describe("appointment booking tool", () => {
+  it("isolates call-scoped handles with coincident response identities", async () => {
+    const google = fakeGoogleCalendar({});
+    const booking = bookingWith(google);
+    const first = await proposedOn(booking);
+    const second = await proposedOn(booking, {}, "other-call");
+    if (first.status !== "proposed" || !first.readback) {
+      throw new Error("Expected Readback fields");
+    }
+    const one = booking.openReadback(CALL_ID);
+    const two = booking.openReadback("other-call");
+    const events = assistantResponseEvents({ responseId: "same", transcriptDelta: readbackText(first.readback) });
+    one.observe(events[0]!);
+    two.observe(events[1]!);
+    expect(await booking.execute("confirm_appointment", {
+      confirmed: true, proposalId: "proposalId" in second ? second.proposalId : undefined,
+    }, { callId: "other-call" })).toMatchObject({ status: "readback_incomplete" });
+    one.observe(events[1]!);
+    one.close();
+    two.close();
+    expect(await booking.execute("confirm_appointment", {
+      confirmed: true, proposalId: first.proposalId,
+    }, { callId: CALL_ID })).toMatchObject({ status: "booked" });
+    expect(google.writes).toHaveLength(1);
+  });
+
+  it("does not share assembly between handles for the same call or reuse a closed handle", async () => {
+    const google = fakeGoogleCalendar({});
+    const booking = bookingWith(google);
+    const proposed = await proposedOn(booking);
+    if (proposed.status !== "proposed" || !proposed.readback) {
+      throw new Error("Expected Readback fields");
+    }
+    const one = booking.openReadback(CALL_ID);
+    const two = booking.openReadback(CALL_ID);
+    const events = assistantResponseEvents({ responseId: "same", transcriptDelta: readbackText(proposed.readback) });
+    one.observe(events[0]!);
+    two.observe(events[1]!);
+    one.close();
+    for (const event of events) one.observe(event);
+    expect(await booking.execute("confirm_appointment", {
+      confirmed: true, proposalId: proposed.proposalId,
+    }, { callId: CALL_ID })).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+    two.close();
+  });
+
+  it("accepts payload completion without an identity and preserves earned readiness", async () => {
+    const google = fakeGoogleCalendar({});
+    const booking = bookingWith(google);
+    const proposed = await proposedOn(booking);
+    if (proposed.status !== "proposed" || !proposed.readback) {
+      throw new Error("Expected Readback fields");
+    }
+    const handle = booking.openReadback(CALL_ID);
+    handle.observe({ type: "response.done", response: {
+      status: "completed", output: [{ content: [{ transcript: readbackText(proposed.readback) }] }],
+    } });
+    handle.observe({ type: "response.done", response: { status: "cancelled" } });
+    handle.observe({ type: "response.done", response: { status: "completed" } });
+    expect(await proposedOn(booking, { callerName: "" })).toMatchObject({ status: "invalid" });
+    expect(await booking.execute("confirm_appointment", {
+      confirmed: false, proposalId: proposed.proposalId,
+    }, { callId: CALL_ID })).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+    handle.close();
+    expect(await booking.execute("confirm_appointment", {
+      confirmed: true, proposalId: proposed.proposalId,
+    }, { callId: CALL_ID })).toMatchObject({ status: "booked" });
+    expect(google.writes).toHaveLength(1);
+  });
+
+  it("resets readiness after a valid replacement until that proposal is read back", async () => {
+    const google = fakeGoogleCalendar({});
+    const booking = bookingWith(google);
+    const first = await proposedOn(booking);
+    completeReadback(booking, CALL_ID, first);
+    const replacement = await proposedOn(booking, { callerName: "Grace Hopper" });
+    expect(await booking.execute("confirm_appointment", {
+      confirmed: true, proposalId: "proposalId" in replacement ? replacement.proposalId : undefined,
+    }, { callId: CALL_ID })).toMatchObject({ status: "readback_incomplete" });
+    completeReadback(booking, CALL_ID, first);
+    expect(await booking.execute("confirm_appointment", {
+      confirmed: true, proposalId: "proposalId" in replacement ? replacement.proposalId : undefined,
+    }, { callId: CALL_ID })).toMatchObject({ status: "readback_incomplete" });
+    expect(google.writes).toEqual([]);
+    expect(await confirmCurrent(booking, replacement)).toMatchObject({ status: "booked" });
+  });
+
+  it("finishes an authorized write when its handle closes before the final insertion recheck", async () => {
+    const google = fakeGoogleCalendar({});
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { reached = resolve; });
+    const booking = bookingWith({ ...google, fetchFn: async (input, init) => {
+      if (String(input).includes("/freeBusy")) {
+        reached();
+        await gate;
+      }
+      return google.fetchFn(input, init);
+    } });
+    const proposed = await proposedOn(booking);
+    if (proposed.status !== "proposed" || !proposed.readback) {
+      throw new Error("Expected Readback fields");
+    }
+    const handle = booking.openReadback(CALL_ID);
+    for (const event of assistantResponseEvents({ responseId: "authorized", transcriptDelta: readbackText(proposed.readback) })) {
+      handle.observe(event);
+    }
+    const pending = booking.execute("confirm_appointment", {
+      confirmed: true, proposalId: proposed.proposalId,
+    }, { callId: CALL_ID });
+    await started;
+    handle.close();
+    handle.close();
+    release();
+    expect(await pending).toMatchObject({ status: "booked", eventExists: true });
+    expect(google.writes).toHaveLength(1);
+  });
+
   it("proposes a chosen appointment with a confirmed callback number and does not write", async () => {
     const google = fakeGoogleCalendar({});
     const booking = bookingWith(google);
@@ -153,7 +273,7 @@ describe("appointment booking tool", () => {
     expect(interrupted.status).toBe("readback_incomplete");
     expect(google.writes).toEqual([]);
 
-    booking.markReadbackFinished(CALL_ID);
+    completeReadback(booking, CALL_ID, proposed);
     const stale = await booking.execute(
       "confirm_appointment",
       { confirmed: true, proposalId: "not-the-current-proposal" },
@@ -200,7 +320,7 @@ describe("appointment booking tool", () => {
     });
 
     const proposed = await proposedOn(booking);
-    booking.markReadbackFinished(CALL_ID);
+    completeReadback(booking, CALL_ID, proposed);
     const result = await booking.execute(
       "confirm_appointment",
       { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId },

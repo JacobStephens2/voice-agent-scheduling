@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
+import { completeReadback } from "./helpers.js";
 
 const MONDAY_14H = new Date("2026-09-07T14:00:00-04:00");
 const AFTER_APPOINTMENT = new Date("2026-09-12T10:00:00-04:00");
@@ -148,7 +149,7 @@ async function proposeAndConfirm(
   if (proposed.status !== "proposed" || !proposed.proposalId) {
     return proposed;
   }
-  booking.markReadbackFinished(options.callId);
+  completeReadback(booking, options.callId, proposed);
   return booking.execute(
     "confirm_appointment",
     { confirmed: true, proposalId: proposed.proposalId },
@@ -232,8 +233,8 @@ describe("one upcoming appointment per callback number", () => {
     if (firstProposed.status !== "proposed" || secondProposed.status !== "proposed") {
       throw new Error("Expected both proposals to be recorded");
     }
-    booking.markReadbackFinished("call-limit-race-1");
-    booking.markReadbackFinished("call-limit-race-2");
+    completeReadback(booking, "call-limit-race-1", firstProposed);
+    completeReadback(booking, "call-limit-race-2", secondProposed);
 
     const [first, second] = await Promise.all([
       booking.execute(
