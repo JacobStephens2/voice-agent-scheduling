@@ -1,152 +1,39 @@
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
-import { fakeGoogleCalendar, TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
+import type { AppointmentProposal } from "../src/calendar/booking-proposal.js";
+import { createBookingReadback } from "../src/calendar/booking-readback.js";
 
-const MONDAY_14H = new Date("2026-09-07T14:00:00-04:00");
-const SELECTION = {
-  primaryCalendarId: "primary",
-  conflictCalendarIds: ["team"],
-  updatedAt: "2026-09-07T00:00:00.000Z",
+const PROPOSAL: AppointmentProposal = {
+  proposalId: "proposal-1",
+  callId: "call-1",
+  callerName: "Ada",
+  callbackNumber: "+15551239876",
+  date: "2026-09-11",
+  startTime: "10:00",
+  endTime: "10:30",
+  timezone: "America/New_York",
 };
+const READBACK_TAIL = ", callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York.";
 
-const READBACK_TAIL =
-  ", callback +15551239876, 2026-09-11 10:00 to 10:30 America/New_York.";
-
-async function confirmCallerName(transcriptName: string, callId: string, dirPrefix: string) {
-  const google = fakeGoogleCalendar({});
-  const booking = createAppointmentBooking({
-    fetchFn: google.fetchFn,
-    tokenProvider: { getAccessToken: async () => "test-access-token" },
-    selection: SELECTION,
-    now: () => MONDAY_14H,
-    dataDir: mkdtempSync(join(tmpdir(), dirPrefix)),
-    createIds: () => ({ operationId: TEST_OPERATION_ID, eventId: TEST_EVENT_ID }),
-    allowWrites: true,
-  });
-  const proposed = (await booking.execute(
-    "propose_appointment",
-    {
-      callerName: "Ada",
-      callbackNumber: "+15551239876",
-      callbackConfirmed: true,
-      date: "2026-09-11",
-      startTime: "10:00",
-    },
-    { callId },
-  )) as { proposalId: string };
-  booking.finishReadbackIfCovered(callId, {
-    status: "completed",
-    sources: [`${transcriptName}${READBACK_TAIL}`],
-  });
-  const result = await booking.execute(
-    "confirm_appointment",
-    { confirmed: true, proposalId: proposed.proposalId },
-    { callId },
-  );
-  return { result, writes: google.writes };
-}
-
-describe("readback field boundaries", () => {
-  it("does not accept a caller name that appears only inside another word", async () => {
-    const { result, writes } = await confirmCallerName(
-      "Adam Smith",
-      "call-substring-name",
-      "scheduling-substring-",
-    );
-    expect(result.status).toBe("readback_incomplete");
-    expect(writes).toEqual([]);
-  });
-
-  it("does not accept a caller name that continues through a Unicode format character", async () => {
-    const { result, writes } = await confirmCallerName(
-      "Ada\u200Bm Smith",
-      "call-format-name",
-      "scheduling-format-",
-    );
-    expect(result.status).toBe("readback_incomplete");
-    expect(writes).toEqual([]);
-  });
-
-  it("does not accept a caller name that continues through a supplementary-plane format character", async () => {
-    const { result, writes } = await confirmCallerName(
-      "Ada\u{E0020}m Smith",
-      "call-format-pair-name",
-      "scheduling-format-pair-",
-    );
-    expect(result.status).toBe("readback_incomplete");
-    expect(writes).toEqual([]);
-  });
-
-  it("does not accept a caller name that continues through a Unicode variation selector", async () => {
-    const { result, writes } = await confirmCallerName(
-      "Ada\uFE00m Smith",
-      "call-variation-name",
-      "scheduling-variation-",
-    );
-    expect(result.status).toBe("readback_incomplete");
-    expect(writes).toEqual([]);
-  });
-
-  it("does not accept a caller name that continues through a supplementary-plane variation selector", async () => {
-    const { result, writes } = await confirmCallerName(
-      "Ada\u{E0100}m Smith",
-      "call-variation-pair-name",
-      "scheduling-variation-pair-",
-    );
-    expect(result.status).toBe("readback_incomplete");
-    expect(writes).toEqual([]);
-  });
-
-  it("does not accept a caller name that continues through a combining grapheme joiner", async () => {
-    const { result, writes } = await confirmCallerName(
-      "Ada\u034Fm Smith",
-      "call-cgj-name",
-      "scheduling-cgj-",
-    );
-    expect(result.status).toBe("readback_incomplete");
-    expect(writes).toEqual([]);
-  });
-
-  it("does not accept a caller name that continues through Khmer vowel inherent AQ", async () => {
-    const { result, writes } = await confirmCallerName(
-      "Ada\u17B4m Smith",
-      "call-khmer-17b4",
-      "scheduling-khmer-17b4-",
-    );
-    expect(result.status).toBe("readback_incomplete");
-    expect(writes).toEqual([]);
-  });
-
-  it("does not accept a caller name that continues through Khmer vowel inherent AA", async () => {
-    const { result, writes } = await confirmCallerName(
-      "Ada\u17B5m Smith",
-      "call-khmer-17b5",
-      "scheduling-khmer-17b5-",
-    );
-    expect(result.status).toBe("readback_incomplete");
-    expect(writes).toEqual([]);
-  });
-
-  it("does not accept a caller name that continues through an unassigned default-ignorable code point", async () => {
-    const { result, writes } = await confirmCallerName(
-      "Ada\u2065m Smith",
-      "call-unassigned-di-name",
-      "scheduling-unassigned-di-",
-    );
-    expect(result.status).toBe("readback_incomplete");
-    expect(writes).toEqual([]);
-  });
-
-  it("does not accept a caller name that continues through a supplementary-plane unassigned default-ignorable code point", async () => {
-    const { result, writes } = await confirmCallerName(
-      "Ada\u{E0002}m Smith",
-      "call-unassigned-di-pair-name",
-      "scheduling-unassigned-di-pair-",
-    );
-    expect(result.status).toBe("readback_incomplete");
-    expect(writes).toEqual([]);
+describe("Readback field boundaries", () => {
+  it.each([
+    ["another word", "Adam Smith"],
+    ["Unicode format character", "Ada\u200Bm Smith"],
+    ["supplementary-plane format character", "Ada\u{E0020}m Smith"],
+    ["Unicode variation selector", "Ada\uFE00m Smith"],
+    ["supplementary-plane variation selector", "Ada\u{E0100}m Smith"],
+    ["combining grapheme joiner", "Ada\u034Fm Smith"],
+    ["Khmer vowel inherent AQ", "Ada\u17B4m Smith"],
+    ["Khmer vowel inherent AA", "Ada\u17B5m Smith"],
+    ["unassigned default-ignorable code point", "Ada\u2065m Smith"],
+    ["supplementary-plane unassigned default-ignorable code point", "Ada\u{E0002}m Smith"],
+  ])("rejects a name continued through %s", (_label, transcriptName) => {
+    const readback = createBookingReadback();
+    expect(readback.observe({
+      type: "response.done",
+      response: {
+        status: "completed",
+        output: [{ content: [{ transcript: `${transcriptName}${READBACK_TAIL}` }] }],
+      },
+    }, PROPOSAL)).toBe(false);
   });
 });

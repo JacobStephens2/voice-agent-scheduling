@@ -9,7 +9,7 @@ import {
   type BookingRecordStatus,
 } from "../src/calendar/appointment-ledger.js";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
-import { TEST_EVENT_ID, fakeGoogleCalendar } from "./helpers.js";
+import { completeReadback, TEST_EVENT_ID, fakeGoogleCalendar } from "./helpers.js";
 
 const MONDAY_14H = new Date("2026-09-07T14:00:00-04:00");
 const FRIDAY_10H_UTC = "2026-09-11T14:00:00.000Z";
@@ -242,7 +242,7 @@ describe("booking retries through the appointment ledger", () => {
         { callId: "call-retry" },
       );
       const proposalId = (proposed as { proposalId: string }).proposalId;
-      booking.markReadbackFinished("call-retry");
+      completeReadback(booking, "call-retry", proposed);
 
       const failed = await booking.execute(
         "confirm_appointment",

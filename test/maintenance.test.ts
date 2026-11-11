@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
+import { completeReadback } from "./helpers.js";
 import { createAppointmentLedger, type AppointmentLedger } from "../src/calendar/appointment-ledger.js";
 import {
   DIRECT_SIP_MICRO_USD_PER_MINUTE,
@@ -184,7 +185,7 @@ async function proposeAndConfirm(
   if (proposed.status !== "proposed" || !proposed.proposalId) {
     return proposed;
   }
-  booking.markReadbackFinished(options.callId);
+  completeReadback(booking, options.callId, proposed);
   return booking.execute(
     "confirm_appointment",
     { confirmed: true, proposalId: proposed.proposalId },

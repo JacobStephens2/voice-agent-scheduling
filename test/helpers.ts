@@ -2,6 +2,8 @@ import { computeWebhookSignature } from "../src/admission.js";
 import type { StructuredCallEvidence } from "../src/evidence.js";
 import type { CallLifecycleManager } from "../src/lifecycle.js";
 import type { FakeRealtimeSocket } from "./fake-socket.js";
+import type { ProposeResult } from "../src/calendar/booking-proposal.js";
+import type { AppointmentBooking, BookingToolResult } from "../src/calendar/booking-tool.js";
 
 export const WEBHOOK_SECRET = "whsec_dGVzdHNlY3JldGZvcnNpZ25pbmd3ZWI=";
 export const REQUIRED_MODEL = "grok-voice-think-fast-2.0";
@@ -146,10 +148,9 @@ export async function openTelephoneSession(
  * One provider assistant response. Transcript text from
  * `response.output_audio_transcript` events stays separate from transcript
  * text on the completed response payload, matching the two places the
- * session is allowed to read.
+ * Readback verifier is allowed to read.
  */
-export function receiveAssistantResponse(
-  socket: FakeRealtimeSocket,
+export function assistantResponseEvents(
   options: {
     responseId: string;
     status?: string;
@@ -157,9 +158,10 @@ export function receiveAssistantResponse(
     transcriptDone?: string;
     payloadTranscript?: string;
   },
-): void {
+): Array<Record<string, unknown>> {
+  const events: Array<Record<string, unknown>> = [];
   if (options.transcriptDelta) {
-    socket.receive({
+    events.push({
       type: "response.output_audio_transcript.delta",
       response_id: options.responseId,
       item_id: `${options.responseId}-msg`,
@@ -167,7 +169,7 @@ export function receiveAssistantResponse(
     });
   }
   if (options.transcriptDone !== undefined) {
-    socket.receive({
+    events.push({
       type: "response.output_audio_transcript.done",
       response_id: options.responseId,
       item_id: `${options.responseId}-msg`,
@@ -175,7 +177,7 @@ export function receiveAssistantResponse(
     });
   }
   const payloadTranscript = options.payloadTranscript ?? "";
-  socket.receive({
+  events.push({
     type: "response.done",
     response: {
       id: options.responseId,
@@ -195,6 +197,47 @@ export function receiveAssistantResponse(
         : {}),
     },
   });
+  return events;
+}
+
+export function receiveAssistantResponse(
+  socket: FakeRealtimeSocket,
+  options: Parameters<typeof assistantResponseEvents>[0],
+): void {
+  for (const event of assistantResponseEvents(options)) {
+    socket.receive(event);
+  }
+}
+
+/** Speak the exact returned fields through the same events production observes. */
+export function completeReadback(
+  booking: AppointmentBooking,
+  callId: string,
+  proposed: BookingToolResult,
+): void {
+  if (proposed.status !== "proposed" || !("readback" in proposed) || !proposed.readback) {
+    throw new Error("Expected returned Readback fields");
+  }
+  const handle = booking.openReadback(callId);
+  for (const event of assistantResponseEvents({
+    responseId: "test-readback",
+    transcriptDelta: readbackText(proposed.readback),
+  })) {
+    handle.observe(event);
+  }
+  handle.close();
+}
+
+export function readbackText(fields: NonNullable<ProposeResult["readback"]>): string {
+  return [
+    fields.callerName,
+    fields.callbackNumber,
+    fields.date,
+    fields.startTime,
+    fields.endTime,
+    fields.timezone,
+    ...(fields.purpose ? [fields.purpose] : []),
+  ].join(", ");
 }
 
 export async function toolRoundTrip(

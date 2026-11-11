@@ -35,6 +35,12 @@ _Avoid_: Working hours
 The caller's explicit agreement to the appointment details read back by the scheduling agent, authorizing the appointment to be created.
 _Avoid_: Booking success
 
+**Appointment proposal**:
+The current Scheduling call's chosen Appointment details awaiting complete Readback and Booking confirmation; a valid replacement receives a new identity and resets Readback completion.
+
+**Readback**:
+The scheduling agent's complete spoken repetition of the current Appointment proposal's returned fields before asking for Booking confirmation.
+
 **Appointment ledger**:
 The scheduler's durable record of each attempt to create an appointment and its outcome. It holds identities, start time, status and a salted callback-number hash, never caller speech, names or raw numbers.
 _Avoid_: Booking store

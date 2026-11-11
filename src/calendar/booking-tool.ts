@@ -7,13 +7,11 @@ import {
   type GoogleOAuthCredentials,
 } from "./auth.js";
 import {
-  createProposalStore,
   proposeAppointment,
-  transcriptCoversReadback,
+  type AppointmentProposal,
   type ProposeResult,
-  type ProposalStore,
-  type RepeatedFragmentJoin,
 } from "./booking-proposal.js";
+import { createBookingReadback, type ReadbackHandle } from "./booking-readback.js";
 import {
   createAppointmentLedger,
   isUnresolvedBookingStatus,
@@ -94,15 +92,7 @@ export interface AppointmentBooking {
     args: Record<string, unknown>,
     options: { callId: string; referenceTime?: Date },
   ): Promise<BookingToolResult>;
-  markReadbackFinished(callId: string): void;
-  finishReadbackIfCovered(
-    callId: string,
-    response: {
-      readonly status: string;
-      readonly sources: readonly string[];
-      readonly repeatedJoins?: readonly (readonly RepeatedFragmentJoin[])[];
-    },
-  ): void;
+  openReadback(callId: string): ReadbackHandle;
   /**
    * Reconcile every pending/inconclusive durable operation against its
    * stored event identity. Establishes a single matching event or a
@@ -132,6 +122,40 @@ export interface BookingToolOptions {
 
 function newHexId(): string {
   return randomBytes(16).toString("hex");
+}
+
+interface ProposalStore {
+  save(proposal: AppointmentProposal): void;
+  current(callId: string): AppointmentProposal | undefined;
+  drop(callId: string): void;
+  markReadbackFinished(callId: string): void;
+  readbackFinished(callId: string): boolean;
+}
+
+function createProposalStore(): ProposalStore {
+  const proposals = new Map<string, AppointmentProposal>();
+  const finishedReadbacks = new Set<string>();
+  return {
+    save(proposal) {
+      proposals.set(proposal.callId, proposal);
+      finishedReadbacks.delete(proposal.callId);
+    },
+    current(callId) {
+      return proposals.get(callId);
+    },
+    drop(callId) {
+      proposals.delete(callId);
+      finishedReadbacks.delete(callId);
+    },
+    markReadbackFinished(callId) {
+      if (proposals.has(callId)) {
+        finishedReadbacks.add(callId);
+      }
+    },
+    readbackFinished(callId) {
+      return finishedReadbacks.has(callId);
+    },
+  };
 }
 
 export function createAppointmentBooking(
@@ -257,22 +281,18 @@ export function createAppointmentBooking(
       };
     },
 
-    markReadbackFinished(callId) {
-      proposals.markReadbackFinished(callId);
-    },
-
-    finishReadbackIfCovered(callId, response) {
-      if (response.status !== "completed") {
-        return;
-      }
-      const proposal = proposals.current(callId);
-      if (
-        !proposal ||
-        !transcriptCoversReadback(proposal, response.sources, response.repeatedJoins)
-      ) {
-        return;
-      }
-      proposals.markReadbackFinished(callId);
+    openReadback(callId) {
+      const readback = createBookingReadback();
+      return {
+        observe(event) {
+          if (readback.observe(event, proposals.current(callId))) {
+            proposals.markReadbackFinished(callId);
+          }
+        },
+        close() {
+          readback.close();
+        },
+      };
     },
 
     reconcileUnresolvedOperations() {

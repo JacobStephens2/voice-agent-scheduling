@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
+import { completeReadback } from "./helpers.js";
 import { createAppointmentLedger, type BookingRecord } from "../src/calendar/appointment-ledger.js";
 import { runRetentionCleanup } from "../src/maintenance.js";
 
@@ -166,6 +167,7 @@ async function propose(
   if (result.status !== "proposed" || !("proposalId" in result) || !result.proposalId) {
     throw new Error(`expected a proposal, got ${result.status}`);
   }
+  completeReadback(booking, callId, result);
   return result.proposalId;
 }
 
@@ -174,7 +176,6 @@ async function confirm(
   callId: string,
   proposalId: string,
 ) {
-  booking.markReadbackFinished(callId);
   return booking.execute(
     "confirm_appointment",
     { confirmed: true, proposalId },
