@@ -47,11 +47,7 @@ export function createBookingReadback(): {
       }
       const payload = completedPayloadTranscript(response);
       // Stream and payload are separate witnesses, never a concatenated utterance.
-      return transcriptCoversReadback(
-        currentProposal,
-        [streamed.text, payload.text],
-        [streamed.repeatedJoins, payload.repeatedJoins],
-      );
+      return transcriptCoversReadback(currentProposal, [streamed, payload]);
     },
     close() {
       closed = true;
@@ -338,8 +334,7 @@ interface TranscriptWitness {
  */
 function transcriptCoversReadback(
   proposal: AppointmentProposal,
-  sources: readonly string[],
-  repeatedJoins: readonly (readonly RepeatedFragmentJoin[])[] = [],
+  sources: readonly TranscriptWitness[],
 ): boolean {
   const fields = [
     proposal.callerName,
@@ -352,12 +347,7 @@ function transcriptCoversReadback(
   if (proposal.purpose) {
     fields.push(proposal.purpose);
   }
-  const witnesses = uncontainedSources(
-    sources.map((text, index) => ({
-      text,
-      repeatedJoins: repeatedJoins[index] ?? [],
-    })),
-  );
+  const witnesses = uncontainedSources(sources);
   return witnesses.some((source) =>
     fields.every((field) => containsField(source.text, field, source.repeatedJoins)),
   );
