@@ -1,20 +1,39 @@
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
+function isAbsentFile(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+/**
+ * A missing file is an empty ledger. Any other read or parse failure must
+ * surface: retention cleanup rewrites from this result, and a failed load
+ * is not an empty ledger.
+ */
 export function loadJsonl<T>(path: string): T[] {
+  let text: string;
   try {
-    const text = readFileSync(path, "utf8");
-    const records: T[] = [];
-    for (const line of text.split("\n")) {
-      if (!line.trim()) {
-        continue;
-      }
-      records.push(JSON.parse(line) as T);
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    if (isAbsentFile(error)) {
+      return [];
     }
-    return records;
-  } catch {
-    return [];
+    throw error;
   }
+  const records: T[] = [];
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line?.trim()) {
+      continue;
+    }
+    try {
+      records.push(JSON.parse(line) as T);
+    } catch (error) {
+      throw new Error(`Failed to load ${path} at line ${index + 1}`, { cause: error });
+    }
+  }
+  return records;
 }
 
 export function appendJsonl(path: string, record: unknown, fileMode?: number): void {

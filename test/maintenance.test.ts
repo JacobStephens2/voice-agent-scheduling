@@ -265,6 +265,162 @@ function assertSafeOperationalPayload(value: unknown) {
   expect(serialized).not.toMatch(/"recording"/);
 }
 
+const AVAILABILITY_TOOL = {
+  definition: () => ({
+    type: "function" as const,
+    name: "check_availability",
+    description: "Check availability.",
+    parameters: { type: "object" as const, properties: {}, required: [] },
+  }),
+  execute: async () => ({ status: "available", starts: [] }),
+};
+
+function startWithDataDir(dataDir: string) {
+  return createCallLifecycleManager({
+    webhookSecret: WEBHOOK_SECRET,
+    apiKey: "test-xai-key",
+    availabilityTool: AVAILABILITY_TOOL,
+    dataDir,
+  });
+}
+
+describe("startup retention cleanup when a durable load fails", () => {
+  it("does not replace a failed appointment-ledger load with an empty ledger", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-ledger-load-"));
+    const bookingsPath = join(dataDir, "bookings.jsonl");
+    const original = `${JSON.stringify({
+      operationId: "op-kept",
+      eventId: "ev-kept",
+      callId: "call-kept",
+      proposalId: "proposal-kept",
+      calendarId: "primary",
+      startUtc: "2026-09-11T14:00:00.000Z",
+      status: "pending",
+      recordedAt: "2026-09-01T14:00:00.000Z",
+    })}\n{"operationId":\n`;
+    writeFileSync(bookingsPath, original, { mode: 0o600 });
+    writeFileSync(join(dataDir, "budget-ledger.json"), "{}\n", { mode: 0o600 });
+
+    expect(() => startWithDataDir(dataDir)).toThrow();
+    expect(readFileSync(bookingsPath, "utf8")).toBe(original);
+  });
+
+  it("does not replace operational records when their load fails", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-ops-load-"));
+    const bookingsPath = join(dataDir, "bookings.jsonl");
+    const bookings = `${JSON.stringify({
+      operationId: "op-kept",
+      eventId: "ev-kept",
+      callId: "call-kept",
+      proposalId: "proposal-kept",
+      calendarId: "primary",
+      startUtc: "2026-09-11T14:00:00.000Z",
+      status: "pending",
+      recordedAt: "2026-09-01T14:00:00.000Z",
+    })}\n${JSON.stringify({
+      operationId: "op-settled",
+      eventId: "ev-settled",
+      callId: "call-settled",
+      proposalId: "proposal-settled",
+      calendarId: "primary",
+      startUtc: "2026-08-01T14:00:00.000Z",
+      status: "failed",
+      recordedAt: "2026-08-01T14:00:00.000Z",
+    })}\n`;
+    writeFileSync(bookingsPath, bookings, { mode: 0o600 });
+    const operationalPath = join(dataDir, OPERATIONAL_RECORDS_FILE);
+    const operational = `${JSON.stringify({
+      callId: "call-kept",
+      connectionRoute: "direct_sip",
+      callerNumberMasked: "+1***9876",
+      calledNumber: "+18005550199",
+      status: "completed",
+      durationMs: 1000,
+      toolRoundTrips: 0,
+      estimatedCostMicroUsd: 1,
+      recordedAt: "2026-09-07T14:00:00.000Z",
+    })}\n{"callId":\n`;
+    writeFileSync(operationalPath, operational, { mode: 0o600 });
+    writeFileSync(join(dataDir, "budget-ledger.json"), "{}\n", { mode: 0o600 });
+
+    expect(() => startWithDataDir(dataDir)).toThrow();
+    expect(readFileSync(operationalPath, "utf8")).toBe(operational);
+    expect(readFileSync(bookingsPath, "utf8")).toBe(bookings);
+  });
+
+  it("does not drop a failed load of the previous operational-records file", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-legacy-load-"));
+    const legacyPath = join(dataDir, "smoke-evidence.jsonl");
+    const legacy = `${JSON.stringify({
+      callId: "call-legacy",
+      connectionRoute: "direct_sip",
+      callerNumberMasked: "+1***9876",
+      calledNumber: "+18005550199",
+      status: "completed",
+      durationMs: 1000,
+      toolRoundTrips: 0,
+      estimatedCostMicroUsd: 1,
+      recordedAt: "2026-09-07T14:00:00.000Z",
+    })}\n{"callId":\n`;
+    writeFileSync(legacyPath, legacy, { mode: 0o600 });
+    writeFileSync(join(dataDir, "budget-ledger.json"), "{}\n", { mode: 0o600 });
+
+    expect(() => startWithDataDir(dataDir)).toThrow();
+    expect(readFileSync(legacyPath, "utf8")).toBe(legacy);
+    expect(existsSync(join(dataDir, OPERATIONAL_RECORDS_FILE))).toBe(false);
+  });
+
+  it("treats an absent appointment ledger and absent operational records as empty", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-absent-load-"));
+    const ledger = createAppointmentLedger({ dataDir });
+    expect(ledger.hasRecords()).toBe(false);
+    expect(ledger.unresolvedOperations()).toEqual([]);
+
+    const manager = startWithDataDir(dataDir);
+    expect(manager.listEvidence()).toEqual([]);
+    expect(manager.recoveryStatus().admissionAvailable).toBe(true);
+  });
+
+  it("does not rewrite operational records when a later cleanup cannot load them", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-cleanup-load-"));
+    const operationalPath = join(dataDir, OPERATIONAL_RECORDS_FILE);
+    const original = `${JSON.stringify({
+      callId: "call-kept",
+      connectionRoute: "direct_sip",
+      callerNumberMasked: "+1***9876",
+      calledNumber: "+18005550199",
+      status: "completed",
+      durationMs: 1000,
+      toolRoundTrips: 0,
+      estimatedCostMicroUsd: 1,
+      recordedAt: "2026-09-07T14:00:00.000Z",
+    })}\n`;
+    writeFileSync(operationalPath, original, { mode: 0o600 });
+    const app = createSchedulingServer({
+      port: 3601,
+      webhookSecret: WEBHOOK_SECRET,
+      apiKey: "test-xai-key",
+      evidenceToken: EVIDENCE_TOKEN,
+      dataDir,
+      connectWebSocket: (url, headers) => new FakeRealtimeSocket(url, headers),
+      hangupCall: async () => undefined,
+    });
+    await app.start();
+    try {
+      const failed = `${original}{"callId":\n`;
+      writeFileSync(operationalPath, failed, { mode: 0o600 });
+      const response = await fetch("http://127.0.0.1:3601/maintenance/cleanup", {
+        method: "POST",
+        headers: { authorization: `Bearer ${EVIDENCE_TOKEN}` },
+      });
+      expect(response.status).toBe(500);
+      expect(readFileSync(operationalPath, "utf8")).toBe(failed);
+    } finally {
+      await app.stop();
+    }
+  });
+});
+
 describe("retention cleanup and recovery", () => {
   it("drops operational records after 30 days and keeps recent bounded outcomes", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-ops-"));

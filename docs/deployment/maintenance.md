@@ -57,8 +57,11 @@ Cleanup removes operational records older than 30 days and compacts booking
 history down to unresolved operations and still-upcoming appointments. It does
 not touch the usage ledger and does not call Calendar.
 
-The process runs cleanup on a complete start. A maintainer can also run it
-without a restart:
+The process runs cleanup on a complete start. A failed load of the appointment
+ledger (`bookings.jsonl`) or operational records (`operational-records.jsonl`,
+including a leftover `smoke-evidence.jsonl`) is not an empty ledger: startup
+refuses that load and does not rewrite the file. A missing file is an empty
+ledger. A maintainer can also run cleanup without a restart:
 
 ```bash
 curl -fsS -X POST -H "Authorization: Bearer $EVIDENCE_TOKEN" \

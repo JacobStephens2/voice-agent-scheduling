@@ -328,14 +328,20 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         json(res, 401, { error: "unauthorized" });
         return;
       }
-      const result = config.dataDir
-        ? runRetentionCleanup({ dataDir: config.dataDir, ledger })
-        : {
-            operationalRecordsRemoved: 0,
-            operationalRecordsKept: lifecycleManager.listEvidence().length,
-            bookingRecordsRemoved: 0,
-            bookingRecordsKept: 0,
-          };
+      let result;
+      try {
+        result = config.dataDir
+          ? runRetentionCleanup({ dataDir: config.dataDir, ledger })
+          : {
+              operationalRecordsRemoved: 0,
+              operationalRecordsKept: lifecycleManager.listEvidence().length,
+              bookingRecordsRemoved: 0,
+              bookingRecordsKept: 0,
+            };
+      } catch {
+        json(res, 500, { error: "internal_server_error" });
+        return;
+      }
       lifecycleManager.reloadDurableViews();
       json(res, 200, result);
       return;
