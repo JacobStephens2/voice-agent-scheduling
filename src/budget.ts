@@ -110,6 +110,101 @@ function ledgerPath(dataDir: string): string {
   return join(dataDir, LEDGER_FILE);
 }
 
+const PERIOD_ID = /^\d{4}-\d{2}$/;
+
+function isAbsentFile(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNonNegative(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+interface ParsedLedger {
+  periodId: string;
+  fixedMicroUsd?: number;
+  spentMicroUsd: number;
+  reservations: Record<string, number>;
+}
+
+function parsePersistedLedger(value: unknown): ParsedLedger | undefined {
+  if (!isPlainObject(value)) {
+    return undefined;
+  }
+  if (typeof value.periodId !== "string" || !PERIOD_ID.test(value.periodId)) {
+    return undefined;
+  }
+  if (!isFiniteNonNegative(value.spentMicroUsd)) {
+    return undefined;
+  }
+  if (!isPlainObject(value.reservations)) {
+    return undefined;
+  }
+  const reservations: Record<string, number> = {};
+  for (const [callId, amount] of Object.entries(value.reservations)) {
+    if (!isFiniteNonNegative(amount)) {
+      return undefined;
+    }
+    reservations[callId] = amount;
+  }
+  if ("fixedMicroUsd" in value && value.fixedMicroUsd !== undefined) {
+    if (!isFiniteNonNegative(value.fixedMicroUsd)) {
+      return undefined;
+    }
+    return {
+      periodId: value.periodId,
+      fixedMicroUsd: value.fixedMicroUsd,
+      spentMicroUsd: value.spentMicroUsd,
+      reservations,
+    };
+  }
+  return {
+    periodId: value.periodId,
+    spentMicroUsd: value.spentMicroUsd,
+    reservations,
+  };
+}
+
+type BudgetLedgerRead =
+  | { readonly kind: "absent" }
+  | { readonly kind: "unusable" }
+  | { readonly kind: "usable"; readonly ledger: ParsedLedger };
+
+/**
+ * A missing file is an empty ledger. A present file that cannot be read, or
+ * that is not a ledger, is unusable: it is not zero spend.
+ */
+function readPersistedBudgetLedger(dataDir: string): BudgetLedgerRead {
+  let text: string;
+  try {
+    text = readFileSync(ledgerPath(dataDir), "utf8");
+  } catch (error) {
+    if (isAbsentFile(error)) {
+      return { kind: "absent" };
+    }
+    return { kind: "unusable" };
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const ledger = parsePersistedLedger(parsed);
+    if (!ledger) {
+      return { kind: "unusable" };
+    }
+    return { kind: "usable", ledger };
+  } catch {
+    return { kind: "unusable" };
+  }
+}
+
+/** Whether `budget-ledger.json` is absent, unusable, or a usable ledger. */
+export function budgetLedgerFileState(dataDir: string): "absent" | "unusable" | "usable" {
+  return readPersistedBudgetLedger(dataDir).kind;
+}
+
 export function createBudgetLedger(options: BudgetLedgerOptions = {}): BudgetLedger {
   const now = options.now ?? (() => new Date());
   const monthlyTargetMicroUsd =
@@ -143,9 +238,10 @@ export function createBudgetLedger(options: BudgetLedgerOptions = {}): BudgetLed
   });
 
   let state: PersistedLedger = freshState();
+  let ledgerUnusable = false;
 
   const save = (): void => {
-    if (!options.dataDir) {
+    if (!options.dataDir || ledgerUnusable) {
       return;
     }
     try {
@@ -162,27 +258,19 @@ export function createBudgetLedger(options: BudgetLedgerOptions = {}): BudgetLed
     if (!options.dataDir) {
       return;
     }
-    try {
-      const parsed = JSON.parse(
-        readFileSync(ledgerPath(options.dataDir), "utf8"),
-      ) as Partial<PersistedLedger>;
-      if (
-        typeof parsed.periodId === "string" &&
-        typeof parsed.spentMicroUsd === "number" &&
-        parsed.reservations &&
-        typeof parsed.reservations === "object"
-      ) {
-        state = {
-          periodId: parsed.periodId,
-          fixedMicroUsd:
-            typeof parsed.fixedMicroUsd === "number" ? parsed.fixedMicroUsd : fixedMicroUsd,
-          spentMicroUsd: parsed.spentMicroUsd,
-          reservations: { ...parsed.reservations },
-        };
-      }
-    } catch {
-      // Missing or unreadable ledger starts empty; reservations cannot be
-      // bypassed because every spend below is re-derived from this state.
+    const read = readPersistedBudgetLedger(options.dataDir);
+    if (read.kind === "unusable") {
+      // Do not adopt a zero total or write one over the file.
+      ledgerUnusable = true;
+      return;
+    }
+    if (read.kind === "usable") {
+      state = {
+        periodId: read.ledger.periodId,
+        fixedMicroUsd: read.ledger.fixedMicroUsd ?? fixedMicroUsd,
+        spentMicroUsd: read.ledger.spentMicroUsd,
+        reservations: { ...read.ledger.reservations },
+      };
     }
     if (state.periodId !== billingPeriodId(now())) {
       state = freshState();
@@ -194,7 +282,7 @@ export function createBudgetLedger(options: BudgetLedgerOptions = {}): BudgetLed
     Object.values(state.reservations).reduce((sum, amount) => sum + amount, 0);
 
   const pauseReason = (): BudgetBlockReason | undefined => {
-    if (!configured) {
+    if (!configured || ledgerUnusable) {
       return "budget_unavailable";
     }
     if (
@@ -210,17 +298,28 @@ export function createBudgetLedger(options: BudgetLedgerOptions = {}): BudgetLed
   // A restart never carries live sessions: any reservation left on disk
   // belongs to a call that can no longer settle, so count it as spent
   // rather than freeing it. This keeps a restart from bypassing the limit.
-  const staleOnLoad = Object.keys(state.reservations);
-  if (staleOnLoad.length > 0) {
-    for (const callId of staleOnLoad) {
-      state.spentMicroUsd += state.reservations[callId] ?? 0;
-      delete state.reservations[callId];
+  // Skip this when the file itself could not be trusted: converting an
+  // unreadable ledger into spend would invent a total and then persist it.
+  if (!ledgerUnusable) {
+    const staleOnLoad = Object.keys(state.reservations);
+    if (staleOnLoad.length > 0) {
+      for (const callId of staleOnLoad) {
+        state.spentMicroUsd += state.reservations[callId] ?? 0;
+        delete state.reservations[callId];
+      }
+      save();
     }
-    save();
   }
 
   return {
     tryReserve(callId: string): BudgetReserveResult {
+      if (ledgerUnusable) {
+        return {
+          admitted: false,
+          reason: "budget_unavailable",
+          detail: "The monthly budget ledger cannot be read.",
+        };
+      }
       if (state.periodId !== billingPeriodId(now())) {
         state = freshState();
       }
@@ -242,6 +341,9 @@ export function createBudgetLedger(options: BudgetLedgerOptions = {}): BudgetLed
     },
 
     settle(callId: string, durationMs: number): number {
+      if (ledgerUnusable) {
+        return 0;
+      }
       if (state.periodId !== billingPeriodId(now())) {
         state = freshState();
       }

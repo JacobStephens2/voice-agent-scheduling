@@ -1,3 +1,4 @@
+import { readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -453,6 +454,28 @@ describe("scheduling call bounds and monthly provider usage", () => {
     expect(JSON.parse(response.body)).toEqual({ error: "budget_unavailable" });
     expect(hangups).toEqual(["call-norate-1"]);
     expect(sockets).toHaveLength(0);
+  });
+
+  it("does not adopt or persist a zero spent total when the budget ledger is out of shape", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "scheduling-budget-bad-ledger-"));
+    const ledgerPath = join(dataDir, "budget-ledger.json");
+    const original = `{"periodId":"2026-11","spentMicroUsd":"12000000","reservations":{}}\n`;
+    writeFileSync(ledgerPath, original, { mode: 0o600 });
+
+    const ledger = createBudgetLedger({
+      dataDir,
+      monthlyTargetMicroUsd: 25_000_000,
+      fixedMonthlyMicroUsd: 0,
+    });
+    const reserved = ledger.tryReserve("call-corrupt-ledger");
+    ledger.settle("call-corrupt-ledger", TEN_MINUTES_MS);
+
+    expect(reserved.admitted).toBe(false);
+    if (!reserved.admitted) {
+      expect(reserved.reason).toBe("budget_unavailable");
+    }
+    expect(ledger.snapshot().admissionsPaused).toBe(true);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(original);
   });
 
   it("starts a new billing period without carrying last month's spend", async () => {
