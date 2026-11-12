@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -67,20 +67,21 @@ describe("appointment ledger", () => {
   it("records pending unless the operation's latest record is already unresolved", () => {
     const ledger = createAppointmentLedger({ dataDir: tempDir() });
     const fields = { ...row("op-1", "pending") };
+    const attempt = ledger.beginAttempt(fields);
 
-    ledger.recordPending(fields);
+    attempt.pending();
     const first = ledger.latestForOperation("op-1");
     expect(first?.status).toBe("pending");
 
-    ledger.recordPending(fields);
+    attempt.pending();
     expect(ledger.latestForOperation("op-1")).toBe(first);
 
     ledger.record(row("op-1", "inconclusive"));
-    ledger.recordPending(fields);
+    attempt.pending();
     expect(ledger.latestForOperation("op-1")?.status).toBe("inconclusive");
 
     ledger.record(row("op-1", "failed"));
-    ledger.recordPending(fields);
+    attempt.pending();
     expect(ledger.latestForOperation("op-1")?.status).toBe("pending");
   });
 
@@ -88,12 +89,144 @@ describe("appointment ledger", () => {
     const dataDir = tempDir();
     const ledger = createAppointmentLedger({ dataDir });
     const fields = { ...row("op-1", "pending") };
+    const attempt = ledger.beginAttempt(fields);
     const recordsPath = join(dataDir, "bookings.jsonl");
     mkdirSync(recordsPath);
-    expect(() => ledger.recordPending(fields)).toThrow();
+    expect(() => attempt.pending()).toThrow();
+    expect(ledger.latestForOperation("op-1")).toBeUndefined();
     rmSync(recordsPath, { recursive: true });
-    ledger.recordPending(fields);
+    attempt.pending();
     expect(createAppointmentLedger({ dataDir }).latestForOperation("op-1")?.status).toBe("pending");
+  });
+
+  it("opens an attempt without appending or allocating an identity", () => {
+    const dataDir = tempDir();
+    const ledger = createAppointmentLedger({ dataDir });
+    ledger.beginAttempt(row("op-1", "booked"));
+
+    expect(ledger.hasRecords()).toBe(false);
+    expect(existsSync(join(dataDir, "bookings.jsonl"))).toBe(false);
+  });
+
+  describe.each(["fail", "unavailable"] as const)("attempt %s", (transition) => {
+    it.each([undefined, "failed", "unavailable", "booked"] as const)(
+      "closes a %s start before and after its own pending row",
+      (status) => {
+        for (const afterPending of [false, true]) {
+          const dataDir = tempDir();
+          const ledger = createAppointmentLedger({ dataDir });
+          const identity = row("op-1", "pending", { numberHash: "hash-a" });
+          if (status) {
+            ledger.record({ ...identity, status });
+          }
+          const attempt = ledger.beginAttempt(identity);
+          if (afterPending) {
+            attempt.pending();
+          }
+
+          const outcome = attempt[transition]();
+          expect(outcome.status).toBe(transition === "fail" ? "failed" : "unavailable");
+          expect(ledger.latestForOperation("op-1")).toBe(outcome);
+          expect(ledger.operationsHoldingAppointment("hash-a")).toEqual([]);
+          expect(createAppointmentLedger({ dataDir }).latestForOperation("op-1")).toEqual(outcome);
+        }
+      },
+    );
+
+    it.each(["pending", "inconclusive"] as const)(
+      "preserves a prior %s row, shape mark and callback-number hold without appending",
+      (status) => {
+        const dataDir = tempDir();
+        const ledger = createAppointmentLedger({ dataDir });
+        const prior = ledger.record(row("op-1", status, {
+          storedShape: "mismatched",
+          numberHash: "hash-a",
+        }));
+        const before = readFileSync(join(dataDir, "bookings.jsonl"), "utf8");
+        const attempt = ledger.beginAttempt(prior);
+
+        expect(attempt[transition]()).toBe(prior);
+        attempt.pending();
+        expect(attempt[transition]()).toBe(prior);
+        expect(readFileSync(join(dataDir, "bookings.jsonl"), "utf8")).toBe(before);
+        expect(ledger.operationsHoldingAppointment("hash-a")).toEqual([prior]);
+        expect(createAppointmentLedger({ dataDir }).latestForOperation("op-1")).toEqual(prior);
+      },
+    );
+  });
+
+  it("captures the proposal's prior row separately from the operation's live pending row", () => {
+    const ledger = createAppointmentLedger({ dataDir: tempDir() });
+    const prior = ledger.record(row("old-op", "inconclusive", { proposalId: "shared-proposal" }));
+    const attempt = ledger.beginAttempt(row("new-op", "pending", { proposalId: "shared-proposal" }));
+    attempt.pending();
+    expect(ledger.latestForOperation("new-op")?.status).toBe("pending");
+    ledger.compact(MONDAY_14H);
+    expect(attempt.fail()).toBe(prior);
+    expect(attempt.unavailable()).toBe(prior);
+  });
+
+  it("commits only the captured identity and new outcome, clearing old shape marks", () => {
+    const dataDir = tempDir();
+    const ledger = createAppointmentLedger({ dataDir });
+    const handed = {
+      ...row("op-1", "inconclusive", {
+        recordedAt: "2020-01-01T00:00:00.000Z",
+        storedShape: "mismatched",
+        numberHash: "hash-a",
+      }),
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+    };
+    ledger.record(handed);
+    const attempt = ledger.beginAttempt(handed);
+    handed.eventId = "changed-after-open";
+    handed.numberHash = "changed-after-open";
+
+    const outcome = attempt.commit({ status: "booked" });
+    expect(outcome).toEqual({
+      operationId: "op-1",
+      eventId: "ev-op-1",
+      callId: "call-op-1",
+      proposalId: "proposal-op-1",
+      calendarId: "primary",
+      startUtc: FRIDAY_10H_UTC,
+      numberHash: "hash-a",
+      status: "booked",
+      recordedAt: expect.any(String),
+    });
+    expect(outcome.recordedAt).not.toBe(handed.recordedAt);
+    expect(attempt.commit({ status: "booked" })).not.toBe(outcome);
+    expect(attempt.commit({ status: "inconclusive", storedShape: "mismatched" }).storedShape).toBe(
+      "mismatched",
+    );
+    const cleared = attempt.commit({ status: "inconclusive" });
+    expect(cleared.storedShape).toBeUndefined();
+    expect(createAppointmentLedger({ dataDir }).latestForOperation("op-1")).toEqual(cleared);
+    const stored = readFileSync(join(dataDir, "bookings.jsonl"), "utf8");
+    expect(stored).not.toContain("Ada Lovelace");
+    expect(stored).not.toContain("15551239876");
+  });
+
+  it("does not claim booked in memory or on reopen after a commit append fails", () => {
+    const dataDir = tempDir();
+    const ledger = createAppointmentLedger({ dataDir });
+    const attempt = ledger.beginAttempt(row("op-1", "pending"));
+    attempt.pending();
+    const prior = ledger.latestForOperation("op-1");
+    const recordsPath = join(dataDir, "bookings.jsonl");
+    const savedPath = join(dataDir, "saved.jsonl");
+    renameSync(recordsPath, savedPath);
+    mkdirSync(recordsPath);
+
+    expect(() => attempt.commit({ status: "booked" })).toThrow();
+    expect(ledger.latestForOperation("op-1")).toBe(prior);
+    rmSync(recordsPath, { recursive: true });
+    renameSync(savedPath, recordsPath);
+    expect(createAppointmentLedger({ dataDir }).latestForOperation("op-1")).toEqual(prior);
+
+    const committed = attempt.commit({ status: "booked" });
+    expect(createAppointmentLedger({ dataDir }).latestForOperation("op-1")).toEqual(committed);
   });
 
   it("never stores a caller name handed to record", () => {

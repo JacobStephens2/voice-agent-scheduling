@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -23,7 +23,11 @@ type GetMode = "match" | "mismatch" | "missing" | "error" | "cancelled";
  * own write as busy. No request leaves the process.
  */
 function createFakeCalendar() {
-  const state: { getMode: GetMode; freeBusyMode: "ok" | "throw" } = {
+  const state: {
+    getMode: GetMode;
+    freeBusyMode: "ok" | "throw";
+    beforeFreeBusy?: () => Promise<void>;
+  } = {
     getMode: "match",
     freeBusyMode: "ok",
   };
@@ -34,6 +38,7 @@ function createFakeCalendar() {
     const method = (init as RequestInit | undefined)?.method ?? "GET";
     requests.push({ method, url: target });
     if (target.includes("/freeBusy")) {
+      await state.beforeFreeBusy?.();
       if (state.freeBusyMode === "throw") {
         throw new Error("freeBusy unavailable");
       }
@@ -196,6 +201,63 @@ function retainedAfterCleanup(dataDir: string, operationId: string): BookingReco
 }
 
 describe("booking confirmation records", () => {
+  it.each(["token", "free/busy", "proposal replacement", "closed start"] as const)(
+    "preserves prior pending identity, shape and hold after a %s stop",
+    async (stop) => {
+      const dataDir = mkdtempSync(join(tmpdir(), "scheduling-pending-stop-"));
+      const { calendar, booking, ledger, setTokenMode } = bookingAt(dataDir);
+      const callId = "call-pending-stop";
+      const proposalId = await propose(booking, callId);
+      const numberHash = ledger.hashCallbackNumber(CALLBACK);
+      if (!numberHash) {
+        throw new Error("Expected a callback-number hash");
+      }
+      const prior = ledger.record({
+        operationId: "original-op",
+        eventId: "original-event",
+        callId,
+        proposalId,
+        calendarId: "primary",
+        startUtc: "2026-09-11T14:00:00.000Z",
+        numberHash,
+        status: "pending",
+        storedShape: "mismatched",
+      });
+      const before = readFileSync(join(dataDir, "bookings.jsonl"), "utf8");
+      if (stop === "token") {
+        setTokenMode("throw");
+      } else if (stop === "free/busy") {
+        calendar.state.freeBusyMode = "throw";
+      } else if (stop === "proposal replacement") {
+        calendar.state.beforeFreeBusy = async () => {
+          await propose(booking, callId, { startTime: "14:00" });
+        };
+      } else {
+        calendar.stored.set("other-event", {
+          start: { dateTime: "2026-09-11T10:00:00" },
+          end: { dateTime: "2026-09-11T10:30:00" },
+        });
+      }
+
+      const result = await confirm(booking, callId, proposalId);
+      expect(result).toMatchObject({
+        status: "inconclusive",
+        operationId: "original-op",
+        eventId: "original-event",
+        eventExists: false,
+      });
+      expect(result.message).toContain("does not match the approved shape");
+      expect(ledger.latestForOperation("original-op")).toBe(prior);
+      expect(ledger.operationsHoldingAppointment(numberHash)).toEqual([prior]);
+      expect(readFileSync(join(dataDir, "bookings.jsonl"), "utf8")).toBe(before);
+      expect(latestRow(dataDir, "original-op")).toEqual(prior);
+      expect(eventPosts(calendar.requests)).toHaveLength(0);
+      if (stop === "closed start") {
+        expect((await confirm(booking, callId, proposalId)).status).toBe("inconclusive");
+      }
+    },
+  );
+
   it("does not book a cancelled stored event, even when the other fields match", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-cancelled-"));
     const { calendar, booking } = bookingAt(dataDir);
