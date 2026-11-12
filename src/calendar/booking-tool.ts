@@ -17,18 +17,14 @@ import {
   isUnresolvedBookingStatus,
   type AppointmentLedger,
   type BookingRecord,
-  type BookingRecordFields,
+  type LedgerAttempt,
 } from "./appointment-ledger.js";
 import {
   commitStoredCalendarEvent,
   queryBusyIntervals,
   readStoredCalendarEvent,
 } from "./client.js";
-import {
-  project,
-  type Confirmation,
-  type LedgerCommit,
-} from "./stored-event-projection.js";
+import { project, type Confirmation } from "./stored-event-projection.js";
 import {
   appointmentEndMs,
   computeAvailableStarts,
@@ -420,14 +416,13 @@ async function confirm(
     startUtc: start.toISOString(),
     numberHash,
   };
+  const attempt = ctx.ledger.beginAttempt(identities);
 
   let accessToken: string;
   try {
     accessToken = await ctx.tokenProvider.getAccessToken();
   } catch {
-    // A retry has not proved the earlier write is gone. Leave that
-    // unresolved row in place instead of hiding it behind failed.
-    return failUnlessUnresolved(ctx.ledger, existing, identities);
+    return stoppedAttemptResult(attempt.fail());
   }
 
   // Evaluate the per-number limit before presenting a booking as
@@ -442,11 +437,11 @@ async function confirm(
     excludeOperationId: generated.operationId,
   });
   if (limit !== "clear") {
-    recordFailedUnlessUnresolved(ctx.ledger, existing, identities);
+    attempt.fail();
     return limitRefusal(limit);
   }
 
-  ctx.ledger.recordPending(identities);
+  attempt.pending();
 
   // Recheck policy and availability inside the serialized operation, so a
   // slot taken after the proposal is never knowingly written.
@@ -458,9 +453,7 @@ async function confirm(
       timeMax: dayEnd,
     });
   } catch {
-    // Free/busy failed before this attempt could prove the event absent.
-    // A retry keeps the unresolved row that already blocks the callback number.
-    return failUnlessUnresolved(ctx.ledger, existing, identities);
+    return stoppedAttemptResult(attempt.fail());
   }
   const stillOpen = computeAvailableStarts({
     date: proposal.date,
@@ -477,19 +470,14 @@ async function confirm(
       calendarId,
       generated.eventId,
     );
-    // The projection decides a closed start. Missing is unavailable only
-    // when this attempt did not begin from an unresolved row: no commit,
-    // drop the proposal, and say the time was taken. A row that was
-    // already unresolved stays in place, so recovery can still settle the
-    // original appointment. Every other kind appends the same commit
-    // confirm would.
+    // The projection interprets the closed start; the ledger decides
+    // whether this attempt can settle it or must preserve earlier uncertainty.
     const closed = project(own.kind).confirmClosedStart();
     if (closed.outcome === "unavailable") {
-      const held = heldUnresolved(existing);
-      if (held) {
-        return held;
+      const recorded = attempt.unavailable();
+      if (recorded.status !== "unavailable") {
+        return stoppedAttemptResult(recorded);
       }
-      ctx.ledger.record({ ...identities, status: "unavailable" });
       ctx.proposals.drop(execOptions.callId);
       return {
         status: "unavailable",
@@ -501,8 +489,7 @@ async function confirm(
       };
     }
     return applyConfirmation(
-      ctx.ledger,
-      identities,
+      attempt,
       proposal.callbackNumber,
       closed.confirmation,
     );
@@ -520,7 +507,7 @@ async function confirm(
     excludeOperationId: generated.operationId,
   });
   if (finalLimit !== "clear") {
-    recordFailedUnlessUnresolved(ctx.ledger, existing, identities);
+    attempt.fail();
     return limitRefusal(finalLimit);
   }
 
@@ -535,7 +522,7 @@ async function confirm(
     current.proposalId !== proposal.proposalId ||
     !ctx.proposals.readbackFinished(execOptions.callId)
   ) {
-    return failUnlessUnresolved(ctx.ledger, existing, identities);
+    return stoppedAttemptResult(attempt.fail());
   }
   const insert = {
     calendarId,
@@ -551,8 +538,7 @@ async function confirm(
   // timed out or conflicted. Confirmation does not read it again.
   const committed = await commitStoredCalendarEvent(ctx.fetchFn, accessToken, insert);
   return applyConfirmation(
-    ctx.ledger,
-    identities,
+    attempt,
     proposal.callbackNumber,
     project(committed.kind).confirm(),
   );
@@ -586,21 +572,8 @@ const MISMATCHED_SHAPE_MESSAGE =
   "Do not tell the caller the appointment is booked. " +
   "This is not a missing event. The caller may confirm the same proposal again.";
 
-type OperationIdentities = BookingRecordFields & { readonly numberHash: string };
-
 const UNCONFIRMED_MESSAGE =
   "The calendar event could not be confirmed. Do not tell the caller the appointment is booked.";
-
-/** Return the prior unresolved outcome without appending a new row. */
-function heldUnresolved(beforeAttempt: BookingRecord | undefined): ConfirmResult | undefined {
-  if (!beforeAttempt || !isUnresolvedBookingStatus(beforeAttempt.status)) {
-    return undefined;
-  }
-  return inconclusiveResult(
-    beforeAttempt,
-    beforeAttempt.storedShape === "mismatched" ? MISMATCHED_SHAPE_MESSAGE : INCONCLUSIVE_MESSAGE,
-  );
-}
 
 function inconclusiveResult(
   identities: { operationId: string; eventId: string },
@@ -617,69 +590,18 @@ function inconclusiveResult(
   };
 }
 
-/**
- * Append the projection's commit from the operation identity alone.
- * A commit that omits `storedShape` does not copy a previous mark forward.
- */
-function recordCommit(
-  ledger: AppointmentLedger,
-  identity: Pick<
-    BookingRecord,
-    | "operationId"
-    | "eventId"
-    | "callId"
-    | "proposalId"
-    | "calendarId"
-    | "startUtc"
-    | "numberHash"
-  >,
-  commit: LedgerCommit,
-): BookingRecord {
-  return ledger.record({
-    operationId: identity.operationId,
-    eventId: identity.eventId,
-    callId: identity.callId,
-    proposalId: identity.proposalId,
-    calendarId: identity.calendarId,
-    startUtc: identity.startUtc,
-    status: commit.status,
-    ...(identity.numberHash === undefined ? {} : { numberHash: identity.numberHash }),
-    ...(commit.storedShape === undefined ? {} : { storedShape: commit.storedShape }),
-  });
-}
-
-/**
- * Close this attempt as failed unless it began from an unresolved record.
- * beforeAttempt is the proposal's latest record from before this attempt,
- * not the ledger's live latest: once recordPending has run, the live latest
- * is this attempt's own pending, which a failure before the insert must
- * still close.
- */
-function recordFailedUnlessUnresolved(
-  ledger: AppointmentLedger,
-  beforeAttempt: BookingRecord | undefined,
-  identities: OperationIdentities,
-): void {
-  if (beforeAttempt && isUnresolvedBookingStatus(beforeAttempt.status)) {
-    return;
+/** Map a failed or preserved attempt outcome to the existing caller speech. */
+function stoppedAttemptResult(record: BookingRecord): ConfirmResult {
+  if (isUnresolvedBookingStatus(record.status)) {
+    return inconclusiveResult(
+      record,
+      record.storedShape === "mismatched" ? MISMATCHED_SHAPE_MESSAGE : INCONCLUSIVE_MESSAGE,
+    );
   }
-  ledger.record({ ...identities, status: "failed" });
-}
-
-function failUnlessUnresolved(
-  ledger: AppointmentLedger,
-  beforeAttempt: BookingRecord | undefined,
-  identities: OperationIdentities,
-): ConfirmResult {
-  const held = heldUnresolved(beforeAttempt);
-  if (held) {
-    return held;
-  }
-  recordFailedUnlessUnresolved(ledger, beforeAttempt, identities);
   return {
     status: "failed",
-    operationId: identities.operationId,
-    eventId: identities.eventId,
+    operationId: record.operationId,
+    eventId: record.eventId,
     eventExists: false,
     message: UNCONFIRMED_MESSAGE,
   };
@@ -692,18 +614,17 @@ function failUnlessUnresolved(
  * appends and does not recover.
  */
 function applyConfirmation(
-  ledger: AppointmentLedger,
-  identities: OperationIdentities,
+  attempt: LedgerAttempt,
   callbackNumber: string,
   confirmation: Confirmation,
 ): ConfirmResult {
-  const recorded = recordCommit(ledger, identities, confirmation.commit);
+  const recorded = attempt.commit(confirmation.commit);
   if (confirmation.speechKey === "booked") {
     return { ...bookedResult(recorded, callbackNumber), eventExists: confirmation.tellCaller };
   }
   return {
     ...inconclusiveResult(
-      identities,
+      recorded,
       confirmation.speechKey === "mismatched" ? MISMATCHED_SHAPE_MESSAGE : INCONCLUSIVE_MESSAGE,
     ),
     eventExists: confirmation.tellCaller,
@@ -807,7 +728,7 @@ async function reconcileUnresolved(ctx: {
       ...(latest.storedShape === undefined ? {} : { storedShape: latest.storedShape }),
     });
     if (settlement.append) {
-      recordCommit(ctx.ledger, latest, settlement.append);
+      ctx.ledger.beginAttempt(latest).commit(settlement.append);
     }
     outcomes.push({
       ...identity,

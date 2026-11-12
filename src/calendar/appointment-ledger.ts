@@ -54,6 +54,25 @@ export type BookingRecordFields = Omit<BookingRecord, "recordedAt" | "status"> &
   readonly recordedAt?: string;
 };
 
+export type BookingIdentity = Pick<
+  BookingRecord,
+  "operationId" | "eventId" | "callId" | "proposalId" | "calendarId" | "startUtc" | "numberHash"
+>;
+
+export interface LedgerAttempt {
+  /** Append pending unless the operation's live latest row is already unresolved. */
+  pending(): void;
+  /** Close this attempt, preserving any uncertainty captured when it opened. */
+  fail(): BookingRecord;
+  /** Settle a closed start, preserving any uncertainty captured when it opened. */
+  unavailable(): BookingRecord;
+  /** Always append the projected outcome; an omitted shape mark clears an old one. */
+  commit(outcome: {
+    readonly status: "booked" | "inconclusive";
+    readonly storedShape?: "mismatched";
+  }): BookingRecord;
+}
+
 export function bookingRecord(
   fields: BookingRecordFields & { readonly status: BookingRecordStatus },
 ): BookingRecord {
@@ -95,13 +114,8 @@ export interface AppointmentLedger {
    * the record's own fields are stored, whatever else the caller passes.
    */
   record(fields: BookingRecordFields & { readonly status: BookingRecordStatus }): BookingRecord;
-  /**
-   * Record that a Calendar insert is about to start under these
-   * identities. Writes `pending` unless the operation's latest record is
-   * already unresolved, so a retry after a failed attempt is always
-   * reconcilable if the process stops mid-insert.
-   */
-  recordPending(fields: BookingRecordFields): void;
+  /** Capture the proposal's prior row and whitelisted identity without writing or allocating IDs. */
+  beginAttempt(identity: BookingIdentity): LedgerAttempt;
   /** The latest record for a proposal, across operations. */
   latestForProposal(proposalId: string): BookingRecord | undefined;
   /** The latest record for one operation. */
@@ -240,6 +254,14 @@ export function createAppointmentLedger(options: { readonly dataDir?: string } =
     records.push(record);
   };
 
+  const pending = (identity: BookingIdentity): void => {
+    const latest = latestForOperation(identity.operationId);
+    if (latest && isUnresolvedBookingStatus(latest.status)) {
+      return;
+    }
+    append(bookingRecord({ ...identity, status: "pending" }));
+  };
+
   return {
     record(fields) {
       const record = bookingRecord(fields);
@@ -247,12 +269,41 @@ export function createAppointmentLedger(options: { readonly dataDir?: string } =
       return record;
     },
 
-    recordPending(fields) {
-      const latest = latestForOperation(fields.operationId);
-      if (latest && isUnresolvedBookingStatus(latest.status)) {
-        return;
-      }
-      append(bookingRecord({ ...fields, status: "pending" }));
+    beginAttempt(fields) {
+      // This evidence precedes this attempt's pending row and remains valid
+      // even if compaction replaces the live records array.
+      const prior = findLatest(records, (record) => record.proposalId === fields.proposalId);
+      const identity: BookingIdentity = {
+        operationId: fields.operationId,
+        eventId: fields.eventId,
+        callId: fields.callId,
+        proposalId: fields.proposalId,
+        calendarId: fields.calendarId,
+        startUtc: fields.startUtc,
+        ...(fields.numberHash === undefined ? {} : { numberHash: fields.numberHash }),
+      };
+      const stop = (status: "failed" | "unavailable"): BookingRecord => {
+        if (prior && isUnresolvedBookingStatus(prior.status)) {
+          return prior;
+        }
+        const record = bookingRecord({ ...identity, status });
+        append(record);
+        return record;
+      };
+      return {
+        pending: () => pending(identity),
+        fail: () => stop("failed"),
+        unavailable: () => stop("unavailable"),
+        commit(outcome) {
+          const record = bookingRecord({
+            ...identity,
+            status: outcome.status,
+            ...(outcome.storedShape === undefined ? {} : { storedShape: outcome.storedShape }),
+          });
+          append(record);
+          return record;
+        },
+      };
     },
 
     latestForProposal(proposalId) {

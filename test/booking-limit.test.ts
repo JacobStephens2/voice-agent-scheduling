@@ -158,6 +158,85 @@ async function proposeAndConfirm(
 }
 
 describe("one upcoming appointment per callback number", () => {
+  describe.each(["initial", "final"] as const)("%s limit check", (phase) => {
+    it.each([undefined, "pending", "inconclusive"] as const)(
+      "closes a fresh attempt or preserves a prior %s row when refused",
+      async (status) => {
+        const calendar = controllableCalendar();
+        const dataDir = mkdtempSync(join(tmpdir(), "scheduling-limit-transition-"));
+        const ledger = createAppointmentLedger({ dataDir });
+        const numberHash = ledger.hashCallbackNumber(CALLBACK_NUMBER);
+        const competing = {
+          operationId: "other-op",
+          eventId: "other-event",
+          callId: "other-call",
+          proposalId: "other-proposal",
+          calendarId: "primary",
+          startUtc: "2026-09-11T18:00:00.000Z",
+          numberHash,
+          status: "pending",
+        } as const;
+        const availabilityStatuses: Array<string | undefined> = [];
+        const booking = createAppointmentBooking({
+          fetchFn: async (url, init) => {
+            if (String(url).includes("/freeBusy")) {
+              availabilityStatuses.push(ledger.latestForOperation("own-op")?.status);
+              ledger.record(competing);
+            }
+            return calendar.fetchFn(url, init);
+          },
+          tokenProvider: TOKEN_PROVIDER,
+          selection: SELECTION,
+          now: () => MONDAY_14H,
+          ledger,
+          createIds: () => ({ operationId: "own-op", eventId: "own-event" }),
+          allowWrites: true,
+        });
+        const proposed = await booking.execute("propose_appointment", {
+          callerName: "Ada Lovelace",
+          callbackNumber: CALLBACK_NUMBER,
+          callbackConfirmed: true,
+          date: FRIDAY_DATE,
+          startTime: "10:00",
+        }, { callId: "own-call" });
+        if (proposed.status !== "proposed" || !proposed.proposalId) {
+          throw new Error("Expected an appointment proposal");
+        }
+        completeReadback(booking, "own-call", proposed);
+        const prior = status ? ledger.record({
+          ...competing,
+          operationId: "own-op",
+          eventId: "own-event",
+          callId: "own-call",
+          proposalId: proposed.proposalId,
+          startUtc: "2026-09-11T14:00:00.000Z",
+          status,
+          storedShape: "mismatched",
+        }) : undefined;
+        if (phase === "initial") {
+          ledger.record(competing);
+        }
+
+        const refused = await booking.execute("confirm_appointment", {
+          confirmed: true,
+          proposalId: proposed.proposalId,
+        }, { callId: "own-call" });
+        expect(refused).toMatchObject({ status: "unavailable", eventExists: false });
+        expect(refused.message).toContain("already has an upcoming appointment");
+        expect(refused.message).toContain("contact Jacob directly");
+        expect(calendar.writes).toHaveLength(0);
+        expect(availabilityStatuses).toEqual(phase === "initial" ? [] : [status ?? "pending"]);
+        const latest = ledger.latestForOperation("own-op");
+        if (prior) {
+          expect(latest).toBe(prior);
+        } else {
+          expect(latest?.status).toBe("failed");
+        }
+        expect(createAppointmentLedger({ dataDir }).latestForOperation("own-op")).toEqual(latest);
+      },
+    );
+  });
+
   it("refuses a second upcoming appointment for an equivalently formatted number", async () => {
     const calendar = controllableCalendar();
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-limit-"));
