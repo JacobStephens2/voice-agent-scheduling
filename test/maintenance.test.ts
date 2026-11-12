@@ -1,4 +1,14 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -713,6 +723,114 @@ describe("retention cleanup and recovery", () => {
     expect(JSON.parse(response.body)).toEqual({ error: "restored_state_incomplete" });
     expect(hangups).toContain("call-stale-admit");
     expect(manager.recoveryStatus().admissionAvailable).toBe(false);
+  });
+
+  it("pauses admission when the budget ledger is present but out of shape", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-bad-ledger-"));
+    const ledgerPath = join(dataDir, "budget-ledger.json");
+    const original = `{"periodId":"2026-11","spentMicroUsd":"12000000","reservations":{}}\n`;
+    writeFileSync(ledgerPath, original, { mode: 0o600 });
+    persistEvidence(dataDir, {
+      callId: "call-spent-evidence",
+      connectionRoute: "direct_sip",
+      callerNumberMasked: "+1***9876",
+      calledNumber: "+18005550199",
+      status: "completed",
+      durationMs: 120_000,
+      toolRoundTrips: 0,
+      estimatedCostMicroUsd: 9_000_000,
+      recordedAt: "2026-11-02T15:00:00.000Z",
+    });
+
+    const sockets: FakeRealtimeSocket[] = [];
+    const hangups: string[] = [];
+    const manager = createManager({ sockets, hangups, dataDir });
+    const response = await manager.handleWebhook(
+      signedHeaders(incomingCallPayload({ callId: "call-bad-ledger" }), {
+        webhookId: "evt-bad-ledger",
+      }),
+    );
+
+    expect(response.statusCode).toBe(503);
+    expect(JSON.parse(response.body)).toEqual({ error: "restored_state_incomplete" });
+    expect(hangups).toContain("call-bad-ledger");
+    expect(sockets).toHaveLength(0);
+    expect(manager.recoveryStatus()).toMatchObject({
+      admissionAvailable: false,
+      reason: "restored_state_incomplete",
+      missing: ["budget-ledger.json"],
+    });
+    expect(readFileSync(ledgerPath, "utf8")).toBe(original);
+  });
+
+  it("pauses admission when the budget ledger is not valid JSON", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-invalid-ledger-"));
+    const ledgerPath = join(dataDir, "budget-ledger.json");
+    const original = "not-json{\n";
+    writeFileSync(ledgerPath, original, { mode: 0o600 });
+
+    const sockets: FakeRealtimeSocket[] = [];
+    const hangups: string[] = [];
+    const manager = createManager({ sockets, hangups, dataDir });
+    const response = await manager.handleWebhook(
+      signedHeaders(incomingCallPayload({ callId: "call-invalid-ledger" }), {
+        webhookId: "evt-invalid-ledger",
+      }),
+    );
+
+    expect(response.statusCode).toBe(503);
+    expect(JSON.parse(response.body)).toEqual({ error: "restored_state_incomplete" });
+    expect(hangups).toContain("call-invalid-ledger");
+    expect(readFileSync(ledgerPath, "utf8")).toBe(original);
+  });
+
+  it("pauses admission when the budget ledger is present but unreadable", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-unreadable-ledger-"));
+    const ledgerPath = join(dataDir, "budget-ledger.json");
+    const original = `{"periodId":"2026-11","spentMicroUsd":18000000,"reservations":{}}\n`;
+    writeFileSync(ledgerPath, original, { mode: 0o600 });
+    chmodSync(ledgerPath, 0o000);
+    let blockedByMode = false;
+    try {
+      readFileSync(ledgerPath);
+    } catch (error) {
+      blockedByMode =
+        error instanceof Error && "code" in error && error.code === "EACCES";
+    }
+    // Root can read mode 000. A directory in the ledger path is unreadable
+    // for every user and must pause the same way.
+    if (!blockedByMode) {
+      chmodSync(ledgerPath, 0o600);
+      rmSync(ledgerPath);
+      mkdirSync(ledgerPath);
+    }
+
+    const sockets: FakeRealtimeSocket[] = [];
+    const hangups: string[] = [];
+    try {
+      const manager = createManager({ sockets, hangups, dataDir });
+      const response = await manager.handleWebhook(
+        signedHeaders(incomingCallPayload({ callId: "call-unreadable-ledger" }), {
+          webhookId: "evt-unreadable-ledger",
+        }),
+      );
+
+      expect(response.statusCode).toBe(503);
+      expect(JSON.parse(response.body)).toEqual({ error: "restored_state_incomplete" });
+      expect(hangups).toContain("call-unreadable-ledger");
+      expect(sockets).toHaveLength(0);
+      expect(manager.recoveryStatus().missing).toEqual(["budget-ledger.json"]);
+    } finally {
+      if (blockedByMode) {
+        chmodSync(ledgerPath, 0o600);
+      }
+    }
+
+    if (blockedByMode) {
+      expect(readFileSync(ledgerPath, "utf8")).toBe(original);
+    } else {
+      expect(statSync(ledgerPath).isDirectory()).toBe(true);
+    }
   });
 
   it("keeps admission unavailable until pending Calendar reconciliation can finish", async () => {

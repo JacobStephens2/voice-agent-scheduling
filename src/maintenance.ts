@@ -1,5 +1,6 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { budgetLedgerFileState } from "./budget.js";
 import type { AppointmentLedger } from "./calendar/appointment-ledger.js";
 import {
   OPERATIONAL_RETENTION_MS,
@@ -40,7 +41,13 @@ export function inspectDurableIntegrity(options: {
   const { dataDir, ledger } = options;
   const missing = ledger.missingFiles();
   const evidence = loadEvidence(dataDir);
-  if ((ledger.hasRecords() || evidence.length > 0) && !existsSync(join(dataDir, BUDGET_LEDGER_FILE))) {
+  const budgetFile = budgetLedgerFileState(dataDir);
+  // An unreadable or misshapen ledger is not an empty month. Pause admission
+  // the same way a missing ledger does, without rebuilding spend from evidence.
+  if (
+    budgetFile === "unusable" ||
+    (budgetFile === "absent" && (ledger.hasRecords() || evidence.length > 0))
+  ) {
     missing.push(BUDGET_LEDGER_FILE);
   }
   return { complete: missing.length === 0, missing };
