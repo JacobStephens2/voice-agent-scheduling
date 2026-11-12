@@ -172,7 +172,7 @@ function parsePersistedLedger(value: unknown): ParsedLedger | undefined {
 type BudgetLedgerRead =
   | { readonly kind: "absent" }
   | { readonly kind: "unusable" }
-  | { readonly kind: "loaded"; readonly ledger: ParsedLedger };
+  | { readonly kind: "usable"; readonly ledger: ParsedLedger };
 
 /**
  * A missing file is an empty ledger. A present file that cannot be read, or
@@ -194,16 +194,15 @@ function readPersistedBudgetLedger(dataDir: string): BudgetLedgerRead {
     if (!ledger) {
       return { kind: "unusable" };
     }
-    return { kind: "loaded", ledger };
+    return { kind: "usable", ledger };
   } catch {
     return { kind: "unusable" };
   }
 }
 
-/** Whether `budget-ledger.json` is missing, unreadable or out of shape, or usable. */
-export function budgetLedgerFileState(dataDir: string): "absent" | "unusable" | "readable" {
-  const read = readPersistedBudgetLedger(dataDir);
-  return read.kind === "loaded" ? "readable" : read.kind;
+/** Whether `budget-ledger.json` is absent, unusable, or a usable ledger. */
+export function budgetLedgerFileState(dataDir: string): "absent" | "unusable" | "usable" {
+  return readPersistedBudgetLedger(dataDir).kind;
 }
 
 export function createBudgetLedger(options: BudgetLedgerOptions = {}): BudgetLedger {
@@ -265,7 +264,7 @@ export function createBudgetLedger(options: BudgetLedgerOptions = {}): BudgetLed
       ledgerUnusable = true;
       return;
     }
-    if (read.kind === "loaded") {
+    if (read.kind === "usable") {
       state = {
         periodId: read.ledger.periodId,
         fixedMicroUsd: read.ledger.fixedMicroUsd ?? fixedMicroUsd,
