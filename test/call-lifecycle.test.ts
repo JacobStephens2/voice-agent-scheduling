@@ -65,20 +65,15 @@ describe("scheduling call lifecycle", () => {
       mkdirSync(path);
       vi.setSystemTime(Date.now() + 60_000);
       sockets[1]!.close();
-      // Repair after the first finalizer runs, before a chained rejection
-      // handler could fabricate a second failed outcome and settle again.
-      queueMicrotask(() => {
-        rmSync(path, { recursive: true });
-        writeFileSync(path, previousBytes, { mode: 0o600 });
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(manager.activeCallCount()).toBe(0);
+      await vi.waitFor(() => expect(manager.activeCallCount()).toBe(0));
       expect(existsSync(join(dataDir, "active-call.json"))).toBe(false);
       expect(manager.budgetSnapshot()).toMatchObject({
         reservedMicroUsd: 0,
         spentMicroUsd: spentBefore + 83_200,
       });
       expect(manager.listEvidence()).toEqual(previous);
+      rmSync(path, { recursive: true });
+      writeFileSync(path, previousBytes, { mode: 0o600 });
       expect(createCallEvidence({ dataDir }).list()).toEqual(previous);
 
       await manager.handleWebhook(signedHeaders(incomingCallPayload({ callId: "append-after" }), {
