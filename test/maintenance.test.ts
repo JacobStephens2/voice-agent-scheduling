@@ -23,12 +23,12 @@ import {
 } from "../src/budget.js";
 import {
   OPERATIONAL_RECORDS_FILE,
-  persistEvidence,
+  createCallEvidence,
+  type CallEvidence,
   type StructuredCallEvidence,
 } from "../src/evidence.js";
 import { createCallLifecycleManager } from "../src/lifecycle.js";
 import {
-  OPERATIONAL_RETENTION_MS,
   inspectDurableIntegrity,
   restoreDurableState,
   runRetentionCleanup,
@@ -207,6 +207,7 @@ function createManager(options: {
   sockets: FakeRealtimeSocket[];
   hangups?: string[];
   dataDir: string;
+  evidence?: CallEvidence;
   booking?: ReturnType<typeof createAppointmentBooking>;
   calendar?: ReturnType<typeof controllableCalendar>;
   monthlyTargetMicroUsd?: number;
@@ -242,6 +243,7 @@ function createManager(options: {
       options.hangups?.push(callId);
     },
     dataDir: options.dataDir,
+    evidence: options.evidence,
     monthlyTargetMicroUsd: options.monthlyTargetMicroUsd ?? 1_000_000_000,
     fixedMonthlyMicroUsd: options.fixedMonthlyMicroUsd ?? 0,
     referenceTime: MONDAY_14H,
@@ -251,18 +253,6 @@ function createManager(options: {
 
 function eventInserts(calendar: ReturnType<typeof controllableCalendar>) {
   return calendar.writes.filter((row) => row.method === "POST" && row.url.includes("/events"));
-}
-
-function operationalLines(dataDir: string): StructuredCallEvidence[] {
-  const path = join(dataDir, OPERATIONAL_RECORDS_FILE);
-  if (!existsSync(path)) {
-    return [];
-  }
-  return readFileSync(path, "utf8")
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as StructuredCallEvidence);
 }
 
 function assertSafeOperationalPayload(value: unknown) {
@@ -433,72 +423,76 @@ describe("startup retention cleanup when a durable load fails", () => {
 });
 
 describe("retention cleanup and recovery", () => {
-  it("drops operational records after 30 days and keeps recent bounded outcomes", () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-ops-"));
-    const now = new Date("2026-10-08T14:00:00-04:00");
-    persistEvidence(dataDir, {
-      callId: "call-old",
+  it("updates lifecycle evidence immediately through the shared owner without a reload", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-shared-"));
+    const evidence = createCallEvidence({ dataDir });
+    const ledger = createAppointmentLedger({ dataDir });
+    const manager = createCallLifecycleManager({
+      webhookSecret: WEBHOOK_SECRET,
+      apiKey: "test-xai-key",
+      availabilityTool: AVAILABILITY_TOOL,
+      dataDir,
+      evidence,
+      ledger,
+      now: () => MONDAY_14H,
+    });
+    evidence.record({
+      callId: "shared-old",
       connectionRoute: "direct_sip",
       callerNumberMasked: "+1***9876",
       calledNumber: "+18005550199",
       status: "completed",
-      durationMs: 12_000,
-      toolRoundTrips: 1,
-      estimatedCostMicroUsd: 17,
-      recordedAt: new Date(now.getTime() - OPERATIONAL_RETENTION_MS - 60_000).toISOString(),
+      durationMs: 1000,
+      toolRoundTrips: 0,
+      estimatedCostMicroUsd: 1,
+      recordedAt: "2026-08-01T14:00:00.000Z",
     });
-    persistEvidence(dataDir, {
-      callId: "call-recent",
+    expect(manager.listEvidence()).toHaveLength(1);
+    const result = runRetentionCleanup({ evidence, ledger, now: MONDAY_14H });
+    expect(result.operationalRecordsRemoved).toBe(1);
+    expect(manager.listEvidence()).toEqual([]);
+  });
+
+  it("keeps successful evidence compaction published when the Appointment ledger rewrite fails", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-partial-"));
+    const evidence = createCallEvidence({ dataDir });
+    const ledger = createAppointmentLedger({ dataDir });
+    const manager = createCallLifecycleManager({
+      webhookSecret: WEBHOOK_SECRET,
+      apiKey: "test-xai-key",
+      availabilityTool: AVAILABILITY_TOOL,
+      dataDir,
+      evidence,
+      ledger,
+      now: () => MONDAY_14H,
+    });
+    evidence.record({
+      callId: "expired-before-ledger-failure",
       connectionRoute: "direct_sip",
       callerNumberMasked: "+1***9876",
       calledNumber: "+18005550199",
-      status: "failed",
-      durationMs: 3_000,
+      status: "completed",
+      durationMs: 1000,
       toolRoundTrips: 0,
-      estimatedCostMicroUsd: 4,
-      error: "provider_error",
-      recordedAt: now.toISOString(),
+      estimatedCostMicroUsd: 1,
+      recordedAt: "2026-08-01T14:00:00.000Z",
     });
-
-    const result = runRetentionCleanup({ dataDir, ledger: createAppointmentLedger({ dataDir }), now });
-    expect(result.operationalRecordsRemoved).toBe(1);
-    expect(result.operationalRecordsKept).toBe(1);
-
-    const kept = operationalLines(dataDir);
-    expect(kept).toHaveLength(1);
-    expect(kept[0]?.callId).toBe("call-recent");
-    expect(kept[0]?.error).toBe("provider_error");
-    assertSafeOperationalPayload(kept);
-  });
-
-  it("reads operational records left in the previous filename and writes them to the current one", () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-legacy-ops-"));
-    const now = new Date("2026-10-08T14:00:00-04:00");
-    writeFileSync(
-      join(dataDir, "smoke-evidence.jsonl"),
-      `${JSON.stringify({
-        callId: "call-legacy",
-        connectionRoute: "direct_sip",
-        callerNumberMasked: "+1***9876",
-        calledNumber: "+18005550199",
-        status: "completed",
-        durationMs: 8_000,
-        toolRoundTrips: 0,
-        estimatedCostMicroUsd: 11,
-        recordedAt: now.toISOString(),
-      })}\n`,
-      { mode: 0o600 },
-    );
-
-    const result = runRetentionCleanup({ dataDir, ledger: createAppointmentLedger({ dataDir }), now });
-    expect(result.operationalRecordsKept).toBe(1);
-    expect(existsSync(join(dataDir, "smoke-evidence.jsonl"))).toBe(false);
-    expect(operationalLines(dataDir)[0]?.callId).toBe("call-legacy");
+    const bookingsPath = join(dataDir, "bookings.jsonl");
+    rmSync(bookingsPath, { force: true });
+    mkdirSync(bookingsPath);
+    try {
+      expect(() => runRetentionCleanup({ evidence, ledger, now: MONDAY_14H })).toThrow();
+      expect(manager.listEvidence()).toEqual([]);
+      expect(createCallEvidence({ dataDir }).list()).toEqual([]);
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   it("keeps an uncertain booking through cleanup so restart can still reconcile it", async () => {
     const calendar = controllableCalendar();
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-uncertain-"));
+    const evidence = createCallEvidence({ dataDir });
     const createIds = sequencedIds();
     const ledger = createAppointmentLedger({ dataDir });
     const before = bookingWith(calendar, dataDir, createIds, undefined, ledger);
@@ -507,7 +501,7 @@ describe("retention cleanup and recovery", () => {
     expect(uncertain.status).toBe("inconclusive");
     const postsBeforeCleanup = eventInserts(calendar).length;
 
-    const cleanup = runRetentionCleanup({ dataDir, ledger, now: MONDAY_14H });
+    const cleanup = runRetentionCleanup({ evidence, ledger, now: MONDAY_14H });
     expect(cleanup.bookingRecordsKept).toBeGreaterThan(0);
     expect(calendar.writes.filter((row) => row.method === "DELETE")).toHaveLength(0);
 
@@ -541,13 +535,14 @@ describe("retention cleanup and recovery", () => {
   it("does not let cleanup make a second upcoming appointment possible", async () => {
     const calendar = controllableCalendar();
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-upcoming-"));
+    const evidence = createCallEvidence({ dataDir });
     const createIds = sequencedIds();
     const ledger = createAppointmentLedger({ dataDir });
     const before = bookingWith(calendar, dataDir, createIds, undefined, ledger);
     const first = await proposeAndConfirm(before, { callId: "call-upcoming-1" });
     expect(first.status).toBe("booked");
 
-    runRetentionCleanup({ dataDir, ledger, now: MONDAY_14H });
+    runRetentionCleanup({ evidence, ledger, now: MONDAY_14H });
     expect(ledger.latestForOperation("op-maint-1")?.status).toBe("booked");
 
     const after = bookingWith(calendar, dataDir, createIds);
@@ -564,6 +559,7 @@ describe("retention cleanup and recovery", () => {
   it("keeps a booked record so a manual cancellation can still be reconciled after cleanup", async () => {
     const calendar = controllableCalendar();
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-cancel-"));
+    const evidence = createCallEvidence({ dataDir });
     const createIds = sequencedIds();
     const ledger = createAppointmentLedger({ dataDir });
     const before = bookingWith(calendar, dataDir, createIds, undefined, ledger);
@@ -571,7 +567,7 @@ describe("retention cleanup and recovery", () => {
     expect(first.status).toBe("booked");
     calendar.cancelEvent("ev-maint-1");
 
-    runRetentionCleanup({ dataDir, ledger, now: MONDAY_14H });
+    runRetentionCleanup({ evidence, ledger, now: MONDAY_14H });
     expect(ledger.latestForOperation("op-maint-1")?.status).toBe("booked");
 
     const after = bookingWith(calendar, dataDir, createIds);
@@ -584,6 +580,7 @@ describe("retention cleanup and recovery", () => {
   it("does not reset spend or an active monthly reservation during cleanup", async () => {
     const sockets: FakeRealtimeSocket[] = [];
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-budget-"));
+    const evidenceOwner = createCallEvidence({ dataDir });
     const reservation = fullCallReservationMicroUsd(
       10 * 60 * 1000,
       DIRECT_SIP_MICRO_USD_PER_MINUTE,
@@ -593,6 +590,7 @@ describe("retention cleanup and recovery", () => {
       sockets,
       dataDir,
       monthlyTargetMicroUsd: reservation * 10,
+      evidence: evidenceOwner,
     });
     const payload = incomingCallPayload({ callId: "call-budget-live" });
     const admitted = await manager.handleWebhook(
@@ -603,8 +601,7 @@ describe("retention cleanup and recovery", () => {
     expect(reserved.reservedMicroUsd).toBe(reservation);
     expect(reserved.spentMicroUsd).toBe(0);
 
-    runRetentionCleanup({ dataDir, ledger: createAppointmentLedger({ dataDir }), now: MONDAY_14H });
-    manager.reloadDurableViews();
+    runRetentionCleanup({ evidence: evidenceOwner, ledger: createAppointmentLedger({ dataDir }), now: MONDAY_14H });
     expect(manager.budgetSnapshot()).toMatchObject({
       reservedMicroUsd: reservation,
       spentMicroUsd: 0,
@@ -616,6 +613,7 @@ describe("retention cleanup and recovery", () => {
     expect(manager.budgetSnapshot().spentMicroUsd).toBe(
       estimateCallCostMicroUsd(evidence.durationMs),
     );
+    expect(createCallEvidence({ dataDir }).list()).toContainEqual(evidence);
   });
 
   it("restores isolated state so pending work, the callback limit, and exhausted budget still hold", async () => {
@@ -707,7 +705,7 @@ describe("retention cleanup and recovery", () => {
     restoreDurableState(dataDir, backupDir);
     rmSync(join(backupDir, "callback-salt"), { force: true });
     expect(
-      inspectDurableIntegrity({ dataDir: backupDir, ledger: createAppointmentLedger({ dataDir: backupDir }) })
+      inspectDurableIntegrity({ dataDir: backupDir, ledger: createAppointmentLedger({ dataDir: backupDir }), evidence: createCallEvidence({ dataDir: backupDir }) })
         .complete,
     ).toBe(false);
 
@@ -730,7 +728,7 @@ describe("retention cleanup and recovery", () => {
     const ledgerPath = join(dataDir, "budget-ledger.json");
     const original = `{"periodId":"2026-11","spentMicroUsd":"12000000","reservations":{}}\n`;
     writeFileSync(ledgerPath, original, { mode: 0o600 });
-    persistEvidence(dataDir, {
+    createCallEvidence({ dataDir }).record({
       callId: "call-spent-evidence",
       connectionRoute: "direct_sip",
       callerNumberMasked: "+1***9876",
@@ -892,10 +890,11 @@ describe("retention cleanup and recovery", () => {
   it("shows caller-facing booking behavior before and after cleanup on isolated storage", async () => {
     const calendar = controllableCalendar();
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-public-"));
+    const evidenceOwner = createCallEvidence({ dataDir });
     const createIds = sequencedIds();
     const booking = bookingWith(calendar, dataDir, createIds);
     const sockets: FakeRealtimeSocket[] = [];
-    const manager = createManager({ sockets, dataDir, booking, calendar });
+    const manager = createManager({ sockets, dataDir, booking, calendar, evidence: evidenceOwner });
 
     const socket = await openTelephoneSession(sockets, manager, {
       callId: "call-public-1",
@@ -929,7 +928,7 @@ describe("retention cleanup and recovery", () => {
     assertSafeOperationalPayload(evidence);
     expect(evidence.error).toBeUndefined();
 
-    runRetentionCleanup({ dataDir, ledger: createAppointmentLedger({ dataDir }), now: MONDAY_14H });
+    runRetentionCleanup({ evidence: evidenceOwner, ledger: createAppointmentLedger({ dataDir }), now: MONDAY_14H });
 
     const afterSockets: FakeRealtimeSocket[] = [];
     const afterBooking = bookingWith(calendar, dataDir, createIds);
@@ -983,7 +982,7 @@ describe("operator maintenance HTTP", () => {
     });
     ledger.tryReserve("http-warmup");
     ledger.settle("http-warmup", 0);
-    persistEvidence(dataDir, {
+    createCallEvidence({ dataDir }).record({
       callId: "call-http-recent",
       connectionRoute: "direct_sip",
       callerNumberMasked: "+1***1111",
@@ -1024,7 +1023,7 @@ describe("operator maintenance HTTP", () => {
   });
 
   it("runs retention cleanup and reports health", async () => {
-    persistEvidence(dataDir, {
+    createCallEvidence({ dataDir }).record({
       callId: "call-http-old",
       connectionRoute: "direct_sip",
       callerNumberMasked: "+1***0000",

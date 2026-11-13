@@ -6,6 +6,7 @@ import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
 import { completeReadback } from "./helpers.js";
 import { createAppointmentLedger, type BookingRecord } from "../src/calendar/appointment-ledger.js";
 import { runRetentionCleanup } from "../src/maintenance.js";
+import { createCallEvidence } from "../src/evidence.js";
 
 const REFERENCE = new Date("2026-09-07T14:00:00-04:00");
 const CALLBACK = "+15551230000";
@@ -192,8 +193,9 @@ function retainedAfterCleanup(dataDir: string, operationId: string): BookingReco
   const copyDir = mkdtempSync(join(tmpdir(), "scheduling-retention-"));
   cpSync(join(dataDir, "bookings.jsonl"), join(copyDir, "bookings.jsonl"));
   cpSync(join(dataDir, "callback-salt"), join(copyDir, "callback-salt"));
+  const evidence = createCallEvidence({ dataDir: copyDir });
   runRetentionCleanup({
-    dataDir: copyDir,
+    evidence,
     ledger: createAppointmentLedger({ dataDir: copyDir }),
     now: REFERENCE,
   });

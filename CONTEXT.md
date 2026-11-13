@@ -15,6 +15,9 @@ _Avoid_: Server agent, administrative agent
 **Scheduling call**:
 The inbound phone conversation in which a caller discusses availability and arranges an appointment with the scheduling agent.
 
+**Scheduling call evidence**:
+The scheduler's bounded operational record of a Scheduling call, containing identifiers, a masked caller number, the called number, outcome, timing, estimated usage and bounded error categories. It excludes names, raw callback numbers and speech, and is retained for 30 days.
+
 **Appointment**:
 A scheduled 30-minute phone conversation that Jacob initiates by calling the other person's callback number.
 _Avoid_: Meeting, booking

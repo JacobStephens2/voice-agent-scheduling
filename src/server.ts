@@ -14,6 +14,7 @@ import { createOAuthRouter } from "./calendar/oauth-routes.js";
 import { productionReadiness, type CallerAdmissionMode } from "./admission-policy.js";
 import { loadSelection } from "./calendar/selection.js";
 import { runRetentionCleanup } from "./maintenance.js";
+import { createCallEvidence } from "./evidence.js";
 import { renderLandingPage } from "./landing-page.js";
 import type { AvailabilityTool, BookingTool, ConnectWebSocket } from "./session.js";
 
@@ -176,6 +177,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
   // reconciliation and retention cleanup all read and write this instance,
   // so a cleanup can never leave the confirmation path a stale view.
   const ledger = createAppointmentLedger({ dataDir: config.dataDir });
+  const evidence = createCallEvidence({ dataDir: config.dataDir });
   const booking =
     config.booking ??
     createAppointmentBooking({
@@ -197,6 +199,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
       createCalendarAvailabilityTool({ fetchFn, dataDir: config.dataDir }),
     booking,
     ledger,
+    evidence,
     maxConcurrentCalls: config.maxConcurrentCalls ?? 1,
     allowedCallerNumbers: config.allowedCallerNumbers,
     maxCallDurationMs: config.maxCallDurationMs,
@@ -331,7 +334,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
       let result;
       try {
         result = config.dataDir
-          ? runRetentionCleanup({ dataDir: config.dataDir, ledger })
+          ? runRetentionCleanup({ ledger, evidence })
           : {
               operationalRecordsRemoved: 0,
               operationalRecordsKept: lifecycleManager.listEvidence().length,
@@ -342,7 +345,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         json(res, 500, { error: "internal_server_error" });
         return;
       }
-      lifecycleManager.reloadDurableViews();
+      lifecycleManager.reloadOperatorPause();
       json(res, 200, result);
       return;
     }
