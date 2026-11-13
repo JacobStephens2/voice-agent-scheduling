@@ -7,7 +7,7 @@ export const DIRECT_SIP_ROUTE = "direct_sip";
 export const OPERATIONAL_RECORDS_FILE = "operational-records.jsonl";
 /** Pre-maintenance filename; still read so existing data directories keep their records. */
 const LEGACY_OPERATIONAL_RECORDS_FILE = "smoke-evidence.jsonl";
-export const OPERATIONAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const OPERATIONAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const OPERATIONAL_ERROR_CATEGORIES = [
   "duration_limit_reached",
@@ -34,6 +34,47 @@ export interface StructuredCallEvidence {
   readonly durationWarningSent?: boolean;
   readonly error?: OperationalErrorCategory;
   readonly recordedAt: string;
+}
+
+export interface CallEvidence {
+  record(record: StructuredCallEvidence): void;
+  list(): readonly StructuredCallEvidence[];
+  compact(now: Date): { removed: number; kept: number };
+}
+
+function latestByCall(rows: readonly StructuredCallEvidence[]) {
+  return new Map(rows.map((row) => [row.callId, row]));
+}
+
+/** Owns the records and latest-per-call view of Scheduling call evidence. */
+export function createCallEvidence(options: { readonly dataDir?: string } = {}): CallEvidence {
+  const dataDir = options.dataDir;
+  let rows = dataDir ? loadEvidence(dataDir) : [];
+  let latest = latestByCall(rows);
+
+  return {
+    record(record: StructuredCallEvidence): void {
+      const copy = { ...record };
+      if (dataDir) {
+        persistEvidence(dataDir, copy);
+      }
+      rows.push(copy);
+      latest.set(copy.callId, copy);
+    },
+    list(): readonly StructuredCallEvidence[] {
+      return [...latest.values()].map((row) => ({ ...row }));
+    },
+    compact(now: Date) {
+      const physicalRows = dataDir ? loadEvidence(dataDir) : rows;
+      const kept = physicalRows.filter((row) => isRetainedOperationalRecord(row, now));
+      if (dataDir) {
+        replaceEvidence(dataDir, kept);
+      }
+      rows = kept;
+      latest = latestByCall(rows);
+      return { removed: physicalRows.length - kept.length, kept: kept.length };
+    },
+  };
 }
 
 // Per-call estimates use the combined direct-SIP rate (voice model plus
@@ -68,11 +109,11 @@ function legacyEvidenceFile(dataDir: string): string {
   return join(dataDir, LEGACY_OPERATIONAL_RECORDS_FILE);
 }
 
-export function persistEvidence(dataDir: string, evidence: StructuredCallEvidence): void {
+function persistEvidence(dataDir: string, evidence: StructuredCallEvidence): void {
   appendJsonl(evidenceFile(dataDir), evidence, 0o600);
 }
 
-export function loadEvidence(dataDir: string): StructuredCallEvidence[] {
+function loadEvidence(dataDir: string): StructuredCallEvidence[] {
   const current = loadJsonl<StructuredCallEvidence>(evidenceFile(dataDir));
   const legacy = loadJsonl<StructuredCallEvidence>(legacyEvidenceFile(dataDir));
   if (legacy.length === 0) {
@@ -81,7 +122,7 @@ export function loadEvidence(dataDir: string): StructuredCallEvidence[] {
   return [...legacy, ...current];
 }
 
-export function replaceEvidence(
+function replaceEvidence(
   dataDir: string,
   records: readonly StructuredCallEvidence[],
 ): void {
@@ -92,7 +133,7 @@ export function replaceEvidence(
   }
 }
 
-export function isRetainedOperationalRecord(
+function isRetainedOperationalRecord(
   record: StructuredCallEvidence,
   now: Date,
 ): boolean {

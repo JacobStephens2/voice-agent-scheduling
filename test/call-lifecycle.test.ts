@@ -1,8 +1,9 @@
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { OPERATIONAL_RECORDS_FILE } from "../src/evidence.js";
+import { describe, expect, it, vi } from "vitest";
+import { OPERATIONAL_RECORDS_FILE, createCallEvidence, type CallEvidence } from "../src/evidence.js";
 import { createCallLifecycleManager } from "../src/lifecycle.js";
 import { createSyntheticAvailabilityTool } from "../src/synthetic-calendar.js";
 import { FakeRealtimeSocket } from "./fake-socket.js";
@@ -20,6 +21,7 @@ function createManager(options: {
   hangups?: string[];
   dataDir?: string;
   maxCallDurationMs?: number;
+  evidence?: CallEvidence;
 }) {
   return createCallLifecycleManager({
     webhookSecret: WEBHOOK_SECRET,
@@ -35,12 +37,58 @@ function createManager(options: {
       options.hangups?.push(callId);
     },
     dataDir: options.dataDir,
+    evidence: options.evidence,
     maxCallDurationMs: options.maxCallDurationMs,
     referenceTime: new Date("2026-09-07T14:00:00-04:00"),
   });
 }
 
 describe("scheduling call lifecycle", () => {
+  it("releases a call and settles usage once when evidence append fails, without retrying finalization", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "scheduling-evidence-append-failure-"));
+    const sockets: FakeRealtimeSocket[] = [];
+    const evidence = createCallEvidence({ dataDir });
+    const manager = createManager({ sockets, dataDir, evidence });
+    const path = join(dataDir, OPERATIONAL_RECORDS_FILE);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      await manager.handleWebhook(signedHeaders(incomingCallPayload({ callId: "append-before" })));
+      sockets[0]!.close();
+      await recordedEvidence(() => manager.listEvidence(), "append-before");
+      const previous = manager.listEvidence();
+      const previousBytes = readFileSync(path, "utf8");
+      const spentBefore = manager.budgetSnapshot().spentMicroUsd;
+      await manager.handleWebhook(signedHeaders(incomingCallPayload({ callId: "append-failure" }), {
+        webhookId: "evt-append-failure",
+      }));
+      rmSync(path);
+      mkdirSync(path);
+      vi.setSystemTime(Date.now() + 60_000);
+      sockets[1]!.close();
+      await vi.waitFor(() => expect(manager.activeCallCount()).toBe(0));
+      expect(existsSync(join(dataDir, "active-call.json"))).toBe(false);
+      expect(manager.budgetSnapshot()).toMatchObject({
+        reservedMicroUsd: 0,
+        spentMicroUsd: spentBefore + 83_200,
+      });
+      expect(manager.listEvidence()).toEqual(previous);
+      rmSync(path, { recursive: true });
+      writeFileSync(path, previousBytes, { mode: 0o600 });
+      expect(createCallEvidence({ dataDir }).list()).toEqual(previous);
+
+      await manager.handleWebhook(signedHeaders(incomingCallPayload({ callId: "append-after" }), {
+        webhookId: "evt-append-after",
+      }));
+      sockets[2]!.close();
+      await recordedEvidence(() => manager.listEvidence(), "append-after");
+      expect(manager.listEvidence().map((row) => row.callId)).toEqual(["append-before", "append-after"]);
+    } finally {
+      for (const socket of sockets) socket.close();
+      vi.useRealTimers();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("admits a signed call, completes a synthetic availability round trip, records masked evidence, and releases the slot", async () => {
     const sockets: FakeRealtimeSocket[] = [];
     const hangups: string[] = [];

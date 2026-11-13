@@ -19,10 +19,10 @@ import {
 import {
   DIRECT_SIP_ROUTE,
   boundedErrorCategory,
+  createCallEvidence,
   estimateCostMicroUsd,
-  loadEvidence,
   maskPhoneNumber,
-  persistEvidence,
+  type CallEvidence,
   type StructuredCallEvidence,
 } from "./evidence.js";
 import {
@@ -73,7 +73,7 @@ export interface CallLifecycleManager {
   budgetSnapshot(): BudgetSnapshot;
   recoveredStaleAdmissions(): readonly string[];
   recoveryStatus(): RecoveryAssessment;
-  reloadDurableViews(): void;
+  reloadOperatorPause(): void;
   pauseAdmissions(): AdmissionsStatus;
   resumeAdmissions(): AdmissionsStatus;
   admissionsStatus(): AdmissionsStatus;
@@ -89,6 +89,8 @@ export interface CallLifecycleManagerOptions {
    * tool writes. Built from `dataDir` when absent.
    */
   readonly ledger?: AppointmentLedger;
+  /** The same Scheduling call evidence owner used by maintenance. */
+  readonly evidence?: CallEvidence;
   readonly maxConcurrentCalls?: number;
   readonly allowedCallerNumbers?: readonly string[];
   readonly connectWebSocket?: ConnectWebSocket;
@@ -247,8 +249,9 @@ export function createCallLifecycleManager(
   const warningLeadMs = options.warningLeadMs ?? DURATION_WARNING_LEAD_MS_DEFAULT;
   const perMinuteMicroUsd = options.perMinuteMicroUsd ?? DIRECT_SIP_MICRO_USD_PER_MINUTE;
   const ledger = options.ledger ?? createAppointmentLedger({ dataDir: options.dataDir });
+  const evidence = options.evidence ?? createCallEvidence({ dataDir: options.dataDir });
   const integrity = options.dataDir
-    ? inspectDurableIntegrity({ dataDir: options.dataDir, ledger })
+    ? inspectDurableIntegrity({ dataDir: options.dataDir, ledger, evidence })
     : { complete: true, missing: [] as const };
   const persistBudget =
     Boolean(options.dataDir) &&
@@ -274,20 +277,9 @@ export function createCallLifecycleManager(
       staleAdmissions.push(staleClaim);
     }
     if (integrity.complete) {
-      runRetentionCleanup({ dataDir: options.dataDir, ledger, now: options.now?.() });
+      runRetentionCleanup({ ledger, evidence, now: options.now?.() });
     }
   }
-  const evidenceByCall = new Map<string, StructuredCallEvidence>();
-  const reloadEvidence = () => {
-    evidenceByCall.clear();
-    if (!options.dataDir) {
-      return;
-    }
-    for (const evidence of loadEvidence(options.dataDir)) {
-      evidenceByCall.set(evidence.callId, evidence);
-    }
-  };
-  reloadEvidence();
   const availableRecovery = (): RecoveryAssessment => ({
     admissionAvailable: true,
     missing: [],
@@ -298,6 +290,7 @@ export function createCallLifecycleManager(
       ? assessRecovery({
           dataDir: options.dataDir,
           ledger,
+          evidence,
           reconcile: options.booking?.reconcileUnresolvedOperations
             ? () => options.booking!.reconcileUnresolvedOperations!()
             : undefined,
@@ -325,13 +318,6 @@ export function createCallLifecycleManager(
       });
     }
   }
-  const record = (evidence: StructuredCallEvidence) => {
-    evidenceByCall.set(evidence.callId, evidence);
-    if (options.dataDir) {
-      persistEvidence(options.dataDir, evidence);
-    }
-  };
-
   const onOutcome = (
     callId: string,
     callerNumber: string,
@@ -344,7 +330,7 @@ export function createCallLifecycleManager(
     }
     budget.settle(callId, outcome.durationMs);
     const error = boundedErrorCategory(outcome.error);
-    record({
+    const record: StructuredCallEvidence = {
       callId,
       connectionRoute: DIRECT_SIP_ROUTE,
       callerNumberMasked: maskPhoneNumber(callerNumber),
@@ -358,7 +344,13 @@ export function createCallLifecycleManager(
       durationWarningSent: outcome.durationWarningSent,
       ...(error ? { error } : {}),
       recordedAt: new Date().toISOString(),
-    });
+    };
+    try {
+      evidence.record(record);
+    } catch {
+      // Release and settlement already happened. An append failure must not
+      // re-enter finalization or publish an outcome that was not persisted.
+    }
   };
 
   const admissionsStatus = (): AdmissionsStatus => {
@@ -468,7 +460,7 @@ export function createCallLifecycleManager(
     },
 
     listEvidence() {
-      return [...evidenceByCall.values()];
+      return evidence.list();
     },
 
     activeCallCount() {
@@ -487,8 +479,7 @@ export function createCallLifecycleManager(
       return recovery;
     },
 
-    reloadDurableViews() {
-      reloadEvidence();
+    reloadOperatorPause() {
       if (options.dataDir) {
         operatorPaused = loadOperatorPause(options.dataDir);
       }

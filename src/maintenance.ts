@@ -2,14 +2,7 @@ import { chmodSync, copyFileSync, mkdirSync, readdirSync, statSync } from "node:
 import { join } from "node:path";
 import { budgetLedgerFileState } from "./budget.js";
 import type { AppointmentLedger } from "./calendar/appointment-ledger.js";
-import {
-  OPERATIONAL_RETENTION_MS,
-  isRetainedOperationalRecord,
-  loadEvidence,
-  replaceEvidence,
-} from "./evidence.js";
-
-export { OPERATIONAL_RETENTION_MS };
+import type { CallEvidence } from "./evidence.js";
 
 export const BUDGET_LEDGER_FILE = "budget-ledger.json";
 
@@ -37,16 +30,16 @@ export interface RecoveryAssessment {
 export function inspectDurableIntegrity(options: {
   readonly dataDir: string;
   readonly ledger: AppointmentLedger;
+  readonly evidence: CallEvidence;
 }): DurableIntegrity {
-  const { dataDir, ledger } = options;
+  const { dataDir, ledger, evidence } = options;
   const missing = ledger.missingFiles();
-  const evidence = loadEvidence(dataDir);
   const budgetFile = budgetLedgerFileState(dataDir);
   // An unreadable or misshapen ledger is not an empty month. Pause admission
   // the same way a missing ledger does, without rebuilding spend from evidence.
   if (
     budgetFile === "unusable" ||
-    (budgetFile === "absent" && (ledger.hasRecords() || evidence.length > 0))
+    (budgetFile === "absent" && (ledger.hasRecords() || evidence.list().length > 0))
   ) {
     missing.push(BUDGET_LEDGER_FILE);
   }
@@ -54,20 +47,18 @@ export function inspectDurableIntegrity(options: {
 }
 
 export function runRetentionCleanup(options: {
-  readonly dataDir: string;
   readonly ledger: AppointmentLedger;
+  readonly evidence: CallEvidence;
   readonly now?: Date;
 }): RetentionCleanupResult {
   const now = options.now ?? new Date();
-  const operational = loadEvidence(options.dataDir);
-  const keptOperational = operational.filter((record) => isRetainedOperationalRecord(record, now));
-  replaceEvidence(options.dataDir, keptOperational);
+  const operational = options.evidence.compact(now);
 
   const compaction = options.ledger.compact(now);
 
   return {
-    operationalRecordsRemoved: operational.length - keptOperational.length,
-    operationalRecordsKept: keptOperational.length,
+    operationalRecordsRemoved: operational.removed,
+    operationalRecordsKept: operational.kept,
     bookingRecordsRemoved: compaction.removed,
     bookingRecordsKept: compaction.kept,
   };
@@ -76,6 +67,7 @@ export function runRetentionCleanup(options: {
 export async function assessRecovery(options: {
   readonly dataDir: string;
   readonly ledger: AppointmentLedger;
+  readonly evidence: CallEvidence;
   readonly reconcile?: () => Promise<readonly { readonly status: string }[]>;
 }): Promise<RecoveryAssessment> {
   const integrity = inspectDurableIntegrity(options);
