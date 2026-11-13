@@ -22,6 +22,7 @@ describe("Readback field boundaries", () => {
     ["Unicode variation selector", "Ada\uFE00m Smith"],
     ["supplementary-plane variation selector", "Ada\u{E0100}m Smith"],
     ["combining grapheme joiner", "Ada\u034Fm Smith"],
+    ["combining acute accent", "Ada\u0301m Smith"],
     ["Khmer vowel inherent AQ", "Ada\u17B4m Smith"],
     ["Khmer vowel inherent AA", "Ada\u17B5m Smith"],
     ["unassigned default-ignorable code point", "Ada\u2065m Smith"],
