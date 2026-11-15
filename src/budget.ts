@@ -38,7 +38,7 @@ export const RESERVE_MARGIN_DEFAULT = 0.25;
 export const MAX_CALL_DURATION_MS_DEFAULT = 10 * 60 * 1000;
 export const DURATION_WARNING_LEAD_MS_DEFAULT = 60 * 1000;
 
-const LEDGER_FILE = "budget-ledger.json";
+export const BUDGET_LEDGER_FILE = "budget-ledger.json";
 
 export type BudgetBlockReason = "budget_exhausted" | "budget_unavailable";
 
@@ -107,7 +107,7 @@ export function fullCallReservationMicroUsd(
 }
 
 function ledgerPath(dataDir: string): string {
-  return join(dataDir, LEDGER_FILE);
+  return join(dataDir, BUDGET_LEDGER_FILE);
 }
 
 const PERIOD_ID = /^\d{4}-\d{2}$/;

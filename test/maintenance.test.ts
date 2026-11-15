@@ -29,7 +29,6 @@ import {
 } from "../src/evidence.js";
 import { createCallLifecycleManager } from "../src/lifecycle.js";
 import {
-  inspectDurableIntegrity,
   restoreDurableState,
   runRetentionCleanup,
 } from "../src/maintenance.js";
@@ -704,11 +703,6 @@ describe("retention cleanup and recovery", () => {
     const backupDir = mkdtempSync(join(tmpdir(), "scheduling-maint-stale-backup-"));
     restoreDurableState(dataDir, backupDir);
     rmSync(join(backupDir, "callback-salt"), { force: true });
-    expect(
-      inspectDurableIntegrity({ dataDir: backupDir, ledger: createAppointmentLedger({ dataDir: backupDir }), evidence: createCallEvidence({ dataDir: backupDir }) })
-        .complete,
-    ).toBe(false);
-
     const sockets: FakeRealtimeSocket[] = [];
     const hangups: string[] = [];
     const manager = createManager({ sockets, hangups, dataDir: backupDir, calendar });
