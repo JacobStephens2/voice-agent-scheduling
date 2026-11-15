@@ -105,7 +105,7 @@ describe("release deploy", () => {
 
   it("installs the systemd unit from the release before scheduling-agent owns the release", () => {
     const release = `/opt/scheduling-agent/releases/${releaseId}`;
-    const installedUnit = "/etc/systemd/system/scheduling-agent.service";
+    const unitDirectory = "/etc/systemd/system";
     const calls = runDeploy();
 
     const unitUpload = calls.find(
@@ -116,17 +116,18 @@ describe("release deploy", () => {
     const steps = remoteSteps(calls);
     const handOver = steps.findIndex((step) => step.startsWith("sudo chown -R scheduling-agent:scheduling-agent "));
     expect(handOver, "remote step hands the release to scheduling-agent").not.toBe(-1);
-    const unitWrites = steps.flatMap((step, index) =>
-      step.includes(installedUnit) ? [{ ...readInstallStep(step), beforeHandOver: index < handOver }] : [],
+    // A step can write the unit by naming only its directory, as in `cp src /etc/systemd/system/`.
+    const unitDirectorySteps = steps.flatMap((step, index) =>
+      step.includes(unitDirectory) ? [{ ...readInstallStep(step), beforeHandOver: index < handOver }] : [],
     );
-    expect(unitWrites).toEqual([
+    expect(unitDirectorySteps).toEqual([
       {
         command: "sudo install",
         owner: "root",
         group: "root",
         mode: "0644",
         source: `${release}/scheduling-agent.service`,
-        destination: installedUnit,
+        destination: `${unitDirectory}/scheduling-agent.service`,
         beforeHandOver: true,
       },
     ]);
