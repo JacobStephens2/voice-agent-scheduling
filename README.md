@@ -51,7 +51,7 @@ The service listens on `127.0.0.1:3531` behind the `https://scheduler.stephens.p
 
 ## Development
 
-Requires Node.js 22 or newer.
+Requires Node.js 22 or newer. CI checks installation, typechecking, tests, and the build on Node.js 22 (the current production runtime) and 26.
 
 ```bash
 npm ci
@@ -81,7 +81,7 @@ Configuration is environment-driven; [`.env.example`](.env.example) lists every 
 
 ## Deployment
 
-Merging into `master` runs [the deploy workflow](.github/workflows/deploy.yml): it typechecks, tests, builds, ships a timestamped release to `/opt/scheduling-agent/releases/`, restarts `scheduling-agent.service`, and verifies `/health`. `ops/deploy-release.sh` runs the same release by hand.
+Pull requests to `master` run [the workflow's](.github/workflows/deploy.yml) Node.js 22/26 validation matrix. A push to `master` (or a manual run on `master`) deploys only after both versions pass: it ships a timestamped release to `/opt/scheduling-agent/releases/`, restarts `scheduling-agent.service`, and verifies `/health`. Deployment still builds with Node.js 22 and uses the host's `/usr/bin/node`; this does not upgrade the production runtime. `ops/deploy-release.sh` runs the same release by hand, including typechecking, tests, and the build.
 
 The scheduler is deliberately isolated from Jacob's existing voice agent, with its own number, system user, credentials (`/etc/scheduling-agent/scheduling-agent.env`), and durable state (`/var/lib/scheduling-agent`).
 
