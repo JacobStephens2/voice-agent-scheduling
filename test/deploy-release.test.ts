@@ -66,22 +66,46 @@ function runDeploy(): ToolCall[] {
   }
 }
 
+// Every command the host runs, in order: each ssh command line, then each line
+// of the script that call feeds to `bash -s`.
+function remoteSteps(calls: ToolCall[]): string[] {
+  return calls
+    .filter((call) => call.tool === "ssh")
+    .flatMap((call) => [call.args.slice(1).join(" "), ...call.stdin.split("\n")])
+    .map((step) => step.trim())
+    .filter((step) => step !== "");
+}
+
+// Reads `sudo install -o OWNER -g GROUP -m MODE SOURCE DEST` in any flag order.
+// Any other command reads with the fields it lacks left undefined.
+function readInstallStep(step: string) {
+  const words = step.replaceAll("'", "").split(/\s+/);
+  const option = (flag: string) => (words.includes(flag) ? words[words.indexOf(flag) + 1] : undefined);
+  return {
+    command: words.slice(0, 2).join(" "),
+    owner: option("-o"),
+    group: option("-g"),
+    mode: option("-m"),
+    source: words.at(-2),
+    destination: words.at(-1),
+  };
+}
+
 describe("release deploy", () => {
   it("keeps /tmp out of every upload and remote command", () => {
     const calls = runDeploy();
 
     const uploads = calls.filter((call) => call.tool === "scp" || call.tool === "rsync").map((call) => call.args.join(" "));
-    const remoteCommands = calls
-      .filter((call) => call.tool === "ssh")
-      .map((call) => [...call.args.slice(1), call.stdin].join("\n"));
+    const steps = remoteSteps(calls);
 
     expect(uploads).not.toEqual([]);
-    expect(remoteCommands).not.toEqual([]);
-    expect([...uploads, ...remoteCommands].filter((text) => text.includes("/tmp"))).toEqual([]);
+    expect(steps).not.toEqual([]);
+    expect([...uploads, ...steps].filter((text) => text.includes("/tmp"))).toEqual([]);
   });
 
   it("installs the systemd unit from the release before scheduling-agent owns the release", () => {
     const release = `/opt/scheduling-agent/releases/${releaseId}`;
+    const installedUnit = "/etc/systemd/system/scheduling-agent.service";
     const calls = runDeploy();
 
     const unitUpload = calls.find(
@@ -89,13 +113,22 @@ describe("release deploy", () => {
     );
     expect(unitUpload?.args.at(-1)).toBe(`${host}:${release}/`);
 
-    const remoteSteps = calls
-      .filter((call) => call.tool === "ssh")
-      .flatMap((call) => call.stdin.split("\n").map((line) => line.trim()));
-    const install = `sudo install -o root -g root -m 0644 '${release}/scheduling-agent.service' /etc/systemd/system/scheduling-agent.service`;
-    expect(remoteSteps).toContain(install);
-    const handOver = remoteSteps.findIndex((step) => step.startsWith("sudo chown -R scheduling-agent:scheduling-agent "));
+    const steps = remoteSteps(calls);
+    const handOver = steps.findIndex((step) => step.startsWith("sudo chown -R scheduling-agent:scheduling-agent "));
     expect(handOver, "remote step hands the release to scheduling-agent").not.toBe(-1);
-    expect(remoteSteps.indexOf(install)).toBeLessThan(handOver);
+    const unitWrites = steps.flatMap((step, index) =>
+      step.includes(installedUnit) ? [{ ...readInstallStep(step), beforeHandOver: index < handOver }] : [],
+    );
+    expect(unitWrites).toEqual([
+      {
+        command: "sudo install",
+        owner: "root",
+        group: "root",
+        mode: "0644",
+        source: `${release}/scheduling-agent.service`,
+        destination: installedUnit,
+        beforeHandOver: true,
+      },
+    ]);
   });
 });
