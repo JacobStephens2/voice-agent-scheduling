@@ -13,15 +13,14 @@ npm run build
 
 ssh "$HOST" "sudo mkdir -p '${REMOTE_RELEASE}/dist' && sudo chown -R jacob:jacob '${REMOTE_RELEASE}'"
 rsync -a --delete "${ROOT}/dist/" "$HOST:${REMOTE_RELEASE}/dist/"
-scp "${ROOT}/package.json" "${ROOT}/package-lock.json" "$HOST:${REMOTE_RELEASE}/"
-scp "${ROOT}/ops/systemd/scheduling-agent.service" "$HOST:/tmp/scheduling-agent.service"
+scp "${ROOT}/package.json" "${ROOT}/package-lock.json" "${ROOT}/ops/systemd/scheduling-agent.service" "$HOST:${REMOTE_RELEASE}/"
 
 ssh "$HOST" bash -s <<EOF
 set -euo pipefail
 cd '${REMOTE_RELEASE}'
 npm ci --omit=dev
+sudo install -o root -g root -m 0644 '${REMOTE_RELEASE}/scheduling-agent.service' /etc/systemd/system/scheduling-agent.service
 sudo chown -R scheduling-agent:scheduling-agent '${REMOTE_RELEASE}'
-sudo cp /tmp/scheduling-agent.service /etc/systemd/system/scheduling-agent.service
 sudo ln -sfn '${REMOTE_RELEASE}' /opt/scheduling-agent/current
 sudo systemctl daemon-reload
 sudo systemctl restart scheduling-agent
