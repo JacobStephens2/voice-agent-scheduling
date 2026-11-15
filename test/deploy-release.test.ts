@@ -77,7 +77,8 @@ function remoteSteps(calls: ToolCall[]): string[] {
 }
 
 // Reads `sudo install -o OWNER -g GROUP -m MODE SOURCE DEST` in any flag order.
-// Any other command reads with the fields it lacks left undefined.
+// Any other command still reads its last two words as source and destination,
+// with owner, group or mode undefined where it has no -o, -g or -m.
 function readInstallStep(step: string) {
   const words = step.replaceAll("'", "").split(/\s+/);
   const option = (flag: string) => (words.includes(flag) ? words[words.indexOf(flag) + 1] : undefined);
@@ -116,11 +117,14 @@ describe("release deploy", () => {
     const steps = remoteSteps(calls);
     const handOver = steps.findIndex((step) => step.startsWith("sudo chown -R scheduling-agent:scheduling-agent "));
     expect(handOver, "remote step hands the release to scheduling-agent").not.toBe(-1);
-    // A step can write the unit by naming only its directory, as in `cp src /etc/systemd/system/`.
-    const unitDirectorySteps = steps.flatMap((step, index) =>
-      step.includes(unitDirectory) ? [{ ...readInstallStep(step), beforeHandOver: index < handOver }] : [],
+    // A step can feed systemd a unit by naming only the directory (`cp src /etc/systemd/system/`)
+    // or only the copy it reads (`systemctl link <release>/scheduling-agent.service`).
+    const unitSteps = steps.flatMap((step, index) =>
+      step.includes(unitDirectory) || step.includes("/scheduling-agent.service")
+        ? [{ ...readInstallStep(step), beforeHandOver: index < handOver }]
+        : [],
     );
-    expect(unitDirectorySteps).toEqual([
+    expect(unitSteps).toEqual([
       {
         command: "sudo install",
         owner: "root",
