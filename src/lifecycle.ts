@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import WebSocket from "ws";
 import {
@@ -11,9 +11,7 @@ import {
   DIRECT_SIP_MICRO_USD_PER_MINUTE,
   DURATION_WARNING_LEAD_MS_DEFAULT,
   MAX_CALL_DURATION_MS_DEFAULT,
-  createBudgetLedger,
   type BudgetBlockReason,
-  type BudgetLedger,
   type BudgetSnapshot,
 } from "./budget.js";
 import {
@@ -26,13 +24,10 @@ import {
   type StructuredCallEvidence,
 } from "./evidence.js";
 import {
-  BUDGET_LEDGER_FILE,
-  assessRecovery,
-  inspectDurableIntegrity,
-  runRetentionCleanup,
+  createCallRecovery,
   type RecoveryAssessment,
   type RecoveryBlockReason,
-} from "./maintenance.js";
+} from "./recovery.js";
 import { createAppointmentLedger, type AppointmentLedger } from "./calendar/appointment-ledger.js";
 import {
   createTelephoneSession,
@@ -121,38 +116,7 @@ const REJECTION_STATUS: Record<WebhookRejectionReason, number> = {
   operator_paused: 503,
 };
 
-const ACTIVE_CALL_FILE = "active-call.json";
 const ADMISSION_PAUSE_FILE = "admission-pause.json";
-
-function activeCallPath(dataDir: string): string {
-  return join(dataDir, ACTIVE_CALL_FILE);
-}
-
-/** Durable one-caller claim so a restart can detect a stale admission. */
-function writeActiveCallClaim(dataDir: string, callId: string): void {
-  try {
-    mkdirSync(dataDir, { recursive: true });
-    writeFileSync(
-      activeCallPath(dataDir),
-      JSON.stringify({ callId, admittedAt: new Date().toISOString() }),
-    );
-  } catch {
-    // Admission stays in memory when the claim cannot be persisted.
-  }
-}
-
-function clearActiveCallClaim(dataDir: string, callId: string): void {
-  try {
-    const raw = readFileSync(activeCallPath(dataDir), "utf8");
-    const parsed = JSON.parse(raw) as { callId?: unknown };
-    if (parsed.callId !== callId) {
-      return;
-    }
-    unlinkSync(activeCallPath(dataDir));
-  } catch {
-    // Absent or unreadable claim means nothing to release.
-  }
-}
 
 function admissionPausePath(dataDir: string): string {
   return join(dataDir, ADMISSION_PAUSE_FILE);
@@ -185,22 +149,6 @@ function persistOperatorPause(dataDir: string | undefined, paused: boolean): voi
     );
   } catch {
     // In-memory pause still applies when the file cannot be written.
-  }
-}
-
-/**
- * Recover a claim left by a process that died mid-call. The previous media
- * session is gone with its process, so the slot is freed; the budget ledger
- * conservatively counts its reservation as spent (see createBudgetLedger).
- */
-function recoverStaleActiveCallClaim(dataDir: string): string | undefined {
-  try {
-    const raw = readFileSync(activeCallPath(dataDir), "utf8");
-    const parsed = JSON.parse(raw) as { callId?: unknown };
-    unlinkSync(activeCallPath(dataDir));
-    return typeof parsed.callId === "string" ? parsed.callId : undefined;
-  } catch {
-    return undefined;
   }
 }
 
@@ -250,73 +198,26 @@ export function createCallLifecycleManager(
   const perMinuteMicroUsd = options.perMinuteMicroUsd ?? DIRECT_SIP_MICRO_USD_PER_MINUTE;
   const ledger = options.ledger ?? createAppointmentLedger({ dataDir: options.dataDir });
   const evidence = options.evidence ?? createCallEvidence({ dataDir: options.dataDir });
-  const integrity = options.dataDir
-    ? inspectDurableIntegrity({ dataDir: options.dataDir, ledger, evidence })
-    : { complete: true, missing: [] as const };
-  const persistBudget =
-    Boolean(options.dataDir) &&
-    (integrity.complete || !integrity.missing.includes(BUDGET_LEDGER_FILE));
-  const budget: BudgetLedger = createBudgetLedger({
-    dataDir: persistBudget ? options.dataDir : undefined,
-    monthlyTargetMicroUsd: options.monthlyTargetMicroUsd,
-    fixedMonthlyMicroUsd: options.fixedMonthlyMicroUsd,
-    perMinuteMicroUsd: options.perMinuteMicroUsd,
-    reserveMargin: options.reserveMargin,
-    maxCallDurationMs,
-    now: options.now,
+  const recovery = createCallRecovery({
+    dataDir: options.dataDir,
+    ledger,
+    evidence,
+    budget: {
+      monthlyTargetMicroUsd: options.monthlyTargetMicroUsd,
+      fixedMonthlyMicroUsd: options.fixedMonthlyMicroUsd,
+      perMinuteMicroUsd: options.perMinuteMicroUsd,
+      reserveMargin: options.reserveMargin,
+      maxCallDurationMs,
+      now: options.now,
+    },
+    reconcile: options.booking?.reconcileUnresolvedOperations
+      ? () => options.booking!.reconcileUnresolvedOperations!()
+      : undefined,
   });
   let operatorPaused = loadOperatorPause(options.dataDir);
   if (options.pauseAdmissions === true) {
     operatorPaused = true;
     persistOperatorPause(options.dataDir, true);
-  }
-  const staleAdmissions: string[] = [];
-  if (options.dataDir) {
-    const staleClaim = recoverStaleActiveCallClaim(options.dataDir);
-    if (staleClaim) {
-      staleAdmissions.push(staleClaim);
-    }
-    if (integrity.complete) {
-      runRetentionCleanup({ ledger, evidence, now: options.now?.() });
-    }
-  }
-  const availableRecovery = (): RecoveryAssessment => ({
-    admissionAvailable: true,
-    missing: [],
-    reconciliation: [],
-  });
-  const runAssess = () =>
-    options.dataDir
-      ? assessRecovery({
-          dataDir: options.dataDir,
-          ledger,
-          evidence,
-          reconcile: options.booking?.reconcileUnresolvedOperations
-            ? () => options.booking!.reconcileUnresolvedOperations!()
-            : undefined,
-        })
-      : Promise.resolve(availableRecovery());
-  let recovery: RecoveryAssessment = availableRecovery();
-  let recoveryReady = Promise.resolve();
-  if (options.dataDir) {
-    if (!integrity.complete) {
-      recovery = {
-        admissionAvailable: false,
-        reason: "restored_state_incomplete",
-        missing: integrity.missing,
-        reconciliation: [],
-      };
-    } else if (ledger.unresolvedOperations().length > 0) {
-      recovery = {
-        admissionAvailable: false,
-        reason: "recovery_pending",
-        missing: [],
-        reconciliation: [],
-      };
-      recoveryReady = runAssess().then((result) => {
-        recovery = result;
-      });
-    }
   }
   const onOutcome = (
     callId: string,
@@ -325,10 +226,7 @@ export function createCallLifecycleManager(
     outcome: SessionOutcome,
   ) => {
     admission.release(callId);
-    if (options.dataDir) {
-      clearActiveCallClaim(options.dataDir, callId);
-    }
-    budget.settle(callId, outcome.durationMs);
+    recovery.settle(callId, outcome.durationMs);
     const error = boundedErrorCategory(outcome.error);
     const record: StructuredCallEvidence = {
       callId,
@@ -354,15 +252,15 @@ export function createCallLifecycleManager(
   };
 
   const admissionsStatus = (): AdmissionsStatus => {
-    if (!recovery.admissionAvailable && recovery.reason) {
-      return { paused: true, reason: recovery.reason };
+    const snapshot = recovery.snapshot();
+    if (!snapshot.recovery.admissionAvailable && snapshot.recovery.reason) {
+      return { paused: true, reason: snapshot.recovery.reason };
     }
     if (operatorPaused) {
       return { paused: true, reason: "operator_paused" };
     }
-    const snapshot = budget.snapshot();
-    if (snapshot.admissionsPaused) {
-      return { paused: true, reason: snapshot.pauseReason };
+    if (snapshot.budget.admissionsPaused) {
+      return { paused: true, reason: snapshot.budget.pauseReason };
     }
     return { paused: false };
   };
@@ -390,16 +288,13 @@ export function createCallLifecycleManager(
         };
       }
 
-      await recoveryReady;
-      if (!recovery.admissionAvailable && recovery.reason === "recovery_pending") {
-        recovery = await runAssess();
-      }
-      if (!recovery.admissionAvailable && recovery.reason) {
+      const readiness = await recovery.beforeAdmission();
+      if (!readiness.admissionAvailable && readiness.reason) {
         admission.release(result.callId);
         void hangupCall(result.callId);
         return {
-          statusCode: REJECTION_STATUS[recovery.reason],
-          body: JSON.stringify({ error: recovery.reason }),
+          statusCode: REJECTION_STATUS[readiness.reason],
+          body: JSON.stringify({ error: readiness.reason }),
         };
       }
 
@@ -412,7 +307,7 @@ export function createCallLifecycleManager(
         };
       }
 
-      const reservation = budget.tryReserve(result.callId);
+      const reservation = recovery.reserve(result.callId);
       if (!reservation.admitted) {
         admission.release(result.callId);
         void hangupCall(result.callId);
@@ -421,10 +316,6 @@ export function createCallLifecycleManager(
           body: JSON.stringify({ error: reservation.reason }),
         };
       }
-      if (options.dataDir) {
-        writeActiveCallClaim(options.dataDir, result.callId);
-      }
-
       const session = createTelephoneSession({
         callId: result.callId,
         apiKey: options.apiKey,
@@ -468,15 +359,15 @@ export function createCallLifecycleManager(
     },
 
     budgetSnapshot() {
-      return budget.snapshot();
+      return recovery.snapshot().budget;
     },
 
     recoveredStaleAdmissions() {
-      return [...staleAdmissions];
+      return recovery.snapshot().recoveredStaleAdmissions;
     },
 
     recoveryStatus() {
-      return recovery;
+      return recovery.snapshot().recovery;
     },
 
     reloadOperatorPause() {

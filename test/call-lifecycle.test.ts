@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { OPERATIONAL_RECORDS_FILE, createCallEvidence, type CallEvidence } from "../src/evidence.js";
+import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
 import { createCallLifecycleManager } from "../src/lifecycle.js";
 import { createSyntheticAvailabilityTool } from "../src/synthetic-calendar.js";
 import { FakeRealtimeSocket } from "./fake-socket.js";
@@ -44,6 +45,100 @@ function createManager(options: {
 }
 
 describe("scheduling call lifecycle", () => {
+  it("retries pending startup recovery on the first webhook before admitting its Scheduling call", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "scheduling-first-recovery-"));
+    const ledger = createAppointmentLedger({ dataDir });
+    ledger.record({
+      operationId: "op-interrupted",
+      eventId: "event-interrupted",
+      callId: "call-interrupted",
+      proposalId: "proposal-interrupted",
+      calendarId: "primary",
+      startUtc: "2026-11-20T15:00:00.000Z",
+      status: "pending",
+    });
+    writeFileSync(join(dataDir, "budget-ledger.json"), JSON.stringify({
+      periodId: "2026-11", spentMicroUsd: 0, reservations: {},
+    }));
+    const sockets: FakeRealtimeSocket[] = [];
+    let attempts = 0;
+    const manager = createCallLifecycleManager({
+      webhookSecret: WEBHOOK_SECRET,
+      apiKey: "test-xai-key",
+      availabilityTool: createSyntheticAvailabilityTool(),
+      dataDir,
+      ledger,
+      booking: {
+        definitions: () => [],
+        execute: async () => ({}),
+        reconcileUnresolvedOperations: async () => [{
+          operationId: "op-interrupted",
+          eventId: "event-interrupted",
+          status: ++attempts === 1 ? "unresolved" : "booked",
+          eventExists: true,
+        }],
+      },
+      connectWebSocket: (url, headers) => {
+        const socket = new FakeRealtimeSocket(url, headers);
+        sockets.push(socket);
+        return socket;
+      },
+      hangupCall: async () => undefined,
+    });
+    try {
+      expect(manager.recoveryStatus().reason).toBe("recovery_pending");
+      const response = await manager.handleWebhook(signedHeaders(incomingCallPayload({ callId: "call-first-recovery" })));
+      expect(response.statusCode).toBe(200);
+      expect(attempts).toBe(2);
+      expect(sockets).toHaveLength(1);
+      sockets[0]!.close();
+      await recordedEvidence(() => manager.listEvidence(), "call-first-recovery");
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves recovery, operator pause, then budget rejection precedence and releases refused calls", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "scheduling-recovery-precedence-"));
+    const hangups: string[] = [];
+    const options = {
+      webhookSecret: WEBHOOK_SECRET,
+      apiKey: "test-xai-key",
+      availabilityTool: createSyntheticAvailabilityTool(),
+      dataDir,
+      pauseAdmissions: true,
+      monthlyTargetMicroUsd: 1,
+      hangupCall: async (callId: string) => { hangups.push(callId); },
+    };
+    try {
+      writeFileSync(join(dataDir, "budget-ledger.json"), "{}\n");
+      const incomplete = createCallLifecycleManager(options);
+      const first = signedHeaders(incomingCallPayload({ callId: "call-incomplete" }));
+      const recoveryRefusal = await incomplete.handleWebhook(first);
+      expect(recoveryRefusal).toEqual({ statusCode: 503, body: '{"error":"restored_state_incomplete"}' });
+      expect(incomplete.activeCallCount()).toBe(0);
+      expect(JSON.parse((await incomplete.handleWebhook(first)).body)).toEqual({ error: "duplicate_delivery" });
+
+      rmSync(join(dataDir, "budget-ledger.json"));
+      const complete = createCallLifecycleManager(options);
+      const operatorRefusal = await complete.handleWebhook(signedHeaders(incomingCallPayload({ callId: "call-paused" }), {
+        webhookId: "evt-paused",
+      }));
+      expect(operatorRefusal).toEqual({ statusCode: 503, body: '{"error":"operator_paused"}' });
+      expect(complete.activeCallCount()).toBe(0);
+      complete.resumeAdmissions();
+      const budgetRefusal = await complete.handleWebhook(signedHeaders(incomingCallPayload({ callId: "call-exhausted" }), {
+        webhookId: "evt-exhausted",
+      }));
+      expect(budgetRefusal).toEqual({ statusCode: 503, body: '{"error":"budget_exhausted"}' });
+      expect(complete.activeCallCount()).toBe(0);
+      expect(hangups).toEqual(["call-incomplete", "call-paused", "call-exhausted"]);
+      expect(existsSync(join(dataDir, "active-call.json"))).toBe(false);
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("releases a call and settles usage once when evidence append fails, without retrying finalization", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "scheduling-evidence-append-failure-"));
     const sockets: FakeRealtimeSocket[] = [];

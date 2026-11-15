@@ -1,49 +1,13 @@
 import { chmodSync, copyFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { budgetLedgerFileState } from "./budget.js";
 import type { AppointmentLedger } from "./calendar/appointment-ledger.js";
 import type { CallEvidence } from "./evidence.js";
-
-export const BUDGET_LEDGER_FILE = "budget-ledger.json";
-
-export type RecoveryBlockReason = "recovery_pending" | "restored_state_incomplete";
 
 export interface RetentionCleanupResult {
   readonly operationalRecordsRemoved: number;
   readonly operationalRecordsKept: number;
   readonly bookingRecordsRemoved: number;
   readonly bookingRecordsKept: number;
-}
-
-export interface DurableIntegrity {
-  readonly complete: boolean;
-  readonly missing: readonly string[];
-}
-
-export interface RecoveryAssessment {
-  readonly admissionAvailable: boolean;
-  readonly reason?: RecoveryBlockReason;
-  readonly missing: readonly string[];
-  readonly reconciliation: readonly { readonly status: string }[];
-}
-
-export function inspectDurableIntegrity(options: {
-  readonly dataDir: string;
-  readonly ledger: AppointmentLedger;
-  readonly evidence: CallEvidence;
-}): DurableIntegrity {
-  const { dataDir, ledger, evidence } = options;
-  const missing = ledger.missingFiles();
-  const budgetFile = budgetLedgerFileState(dataDir);
-  // An unreadable or misshapen ledger is not an empty month. Pause admission
-  // the same way a missing ledger does, without rebuilding spend from evidence.
-  if (
-    budgetFile === "unusable" ||
-    (budgetFile === "absent" && (ledger.hasRecords() || evidence.list().length > 0))
-  ) {
-    missing.push(BUDGET_LEDGER_FILE);
-  }
-  return { complete: missing.length === 0, missing };
 }
 
 export function runRetentionCleanup(options: {
@@ -61,37 +25,6 @@ export function runRetentionCleanup(options: {
     operationalRecordsKept: operational.kept,
     bookingRecordsRemoved: compaction.removed,
     bookingRecordsKept: compaction.kept,
-  };
-}
-
-export async function assessRecovery(options: {
-  readonly dataDir: string;
-  readonly ledger: AppointmentLedger;
-  readonly evidence: CallEvidence;
-  readonly reconcile?: () => Promise<readonly { readonly status: string }[]>;
-}): Promise<RecoveryAssessment> {
-  const integrity = inspectDurableIntegrity(options);
-  if (!integrity.complete) {
-    return {
-      admissionAvailable: false,
-      reason: "restored_state_incomplete",
-      missing: integrity.missing,
-      reconciliation: [],
-    };
-  }
-  const reconciliation = options.reconcile ? [...(await options.reconcile())] : [];
-  if (reconciliation.some((row) => row.status === "unresolved")) {
-    return {
-      admissionAvailable: false,
-      reason: "recovery_pending",
-      missing: [],
-      reconciliation,
-    };
-  }
-  return {
-    admissionAvailable: true,
-    missing: [],
-    reconciliation,
   };
 }
 
