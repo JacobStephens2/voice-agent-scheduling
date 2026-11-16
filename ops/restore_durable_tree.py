@@ -19,11 +19,12 @@ sys.dont_write_bytecode = True
 
 from durable_state import (
     KNOWN_DURABLE_FILES,
-    copy_fd_bytes,
+    close_fds,
     open_directory_nofollow,
-    open_verified_source_file,
+    open_verified_sources,
     parse_transfer_args,
     sanitized_mode,
+    write_verified_file,
 )
 
 
@@ -70,34 +71,24 @@ def restore_durable_files(src: str, dest: str, expected_uid: int) -> None:
         for name in names:
             if name not in KNOWN_DURABLE_FILES:
                 raise SystemExit(f"Refusing restore: unexpected entry {name}.")
-        for name in names:
-            opened = open_verified_source_file(
-                src_dirfd,
-                name,
-                expected_uid,
-                action="restore",
-                missing_ok=False,
-            )
-            assert opened is not None
-            opened_sources.append((name, opened[0], opened[1]))
+        opened_sources = open_verified_sources(
+            src_dirfd,
+            names,
+            expected_uid,
+            action="restore",
+            missing_ok=False,
+        )
 
         for name, src_fd, info in opened_sources:
             # The service user can set these bits on its own state file. This restore
             # runs as root, and copying them would install a set-id root executable.
-            mode = sanitized_mode(info)
-            dest_fd = open_replaced_file(dest_dirfd, name, mode)
+            dest_fd = open_replaced_file(dest_dirfd, name, sanitized_mode(info))
             try:
-                copy_fd_bytes(src_fd, dest_fd)
-                os.fchmod(dest_fd, mode)
-                os.utime(dest_fd, ns=(info.st_atime_ns, info.st_mtime_ns))
+                write_verified_file(dest_fd, src_fd, info)
             finally:
                 os.close(dest_fd)
     finally:
-        for _, src_fd, _ in opened_sources:
-            os.close(src_fd)
-        if dest_dirfd != -1:
-            os.close(dest_dirfd)
-        os.close(src_dirfd)
+        close_fds(opened_sources, dest_dirfd, src_dirfd)
 
 
 def main() -> None:

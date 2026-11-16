@@ -20,6 +20,7 @@ const opsDir = join(dirname(fileURLToPath(import.meta.url)), "../ops");
 const script = join(opsDir, "restore-scheduling-state.sh");
 const backupScript = join(opsDir, "backup-scheduling-state.sh");
 const restorePy = join(opsDir, "restore_durable_tree.py");
+const backupPy = join(opsDir, "backup_durable_files.py");
 
 const KNOWN_DURABLE_FILES = [
   "bookings.jsonl",
@@ -42,38 +43,95 @@ function currentUid(): string {
   return String(uid);
 }
 
-function restoreDurableTree(
+interface HelperOptions {
+  expectedUid?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+function runDurableHelper(
+  scriptPath: string,
+  fnName: "restore_durable_tree" | "backup_durable_files",
   source: string,
   dest: string,
-  options: { expectedUid?: string; env?: NodeJS.ProcessEnv } = {},
+  options: HelperOptions = {},
 ): void {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    SCHEDULING_AGENT_UID: options.expectedUid ?? currentUid(),
-    ...options.env,
+    ...(options.env ?? {}),
   };
+  if (options.expectedUid !== undefined) {
+    env.SCHEDULING_AGENT_UID = options.expectedUid;
+  } else if (!("SCHEDULING_AGENT_UID" in (options.env ?? {}))) {
+    env.SCHEDULING_AGENT_UID = currentUid();
+  }
   execFileSync(
     "bash",
-    ["-c", 'set -euo pipefail; source "$1"; restore_durable_tree "$2" "$3"', "bash", script, source, dest],
+    ["-c", `set -euo pipefail; source "$1"; ${fnName} "$2" "$3"`, "bash", scriptPath, source, dest],
     { env, stdio: "pipe" },
   );
 }
 
-function backupDurableTree(
-  source: string,
-  dest: string,
-  options: { expectedUid?: string; env?: NodeJS.ProcessEnv } = {},
+function restoreDurableTree(source: string, dest: string, options: HelperOptions = {}): void {
+  runDurableHelper(script, "restore_durable_tree", source, dest, options);
+}
+
+function backupDurableFiles(source: string, dest: string, options: HelperOptions = {}): void {
+  runDurableHelper(backupScript, "backup_durable_files", source, dest, options);
+}
+
+function expectDefaultUidResolution(
+  scriptPath: string,
+  fnName: "restore_durable_tree" | "backup_durable_files",
 ): void {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    SCHEDULING_AGENT_UID: options.expectedUid ?? currentUid(),
-    ...options.env,
-  };
-  execFileSync(
-    "bash",
-    ["-c", 'set -euo pipefail; source "$1"; backup_durable_tree "$2" "$3"', "bash", backupScript, source, dest],
-    { env, stdio: "pipe" },
-  );
+  const root = mkdtempSync(join(tmpdir(), `scheduling-${fnName}-uid-`));
+  try {
+    const bin = join(root, "bin");
+    const source = join(root, "src");
+    const dest = join(root, "dest");
+    mkdirSync(bin);
+    mkdirSync(source);
+    if (fnName === "restore_durable_tree") {
+      mkdirSync(dest);
+    }
+    writeFileSync(join(source, "budget-ledger.json"), "from-backup\n");
+
+    const fakeId = join(bin, "id");
+    writeFileSync(
+      fakeId,
+      `#!/bin/sh\nif [ "$1" = "-u" ] && [ "$2" = "scheduling-agent" ]; then echo ${currentUid()}; exit 0; fi\nexit 1\n`,
+    );
+    chmodSync(fakeId, 0o755);
+
+    const envWithoutOverride = { ...process.env };
+    delete envWithoutOverride.SCHEDULING_AGENT_UID;
+    const basePath = process.env.PATH ?? "";
+    const envWithFakeId: NodeJS.ProcessEnv = { ...envWithoutOverride, PATH: `${bin}:${basePath}` };
+
+    execFileSync(
+      "bash",
+      ["-c", `set -euo pipefail; source "$1"; ${fnName} "$2" "$3"`, "bash", scriptPath, source, dest],
+      { env: envWithFakeId, stdio: "pipe" },
+    );
+    expect(readFileSync(join(dest, "budget-ledger.json"), "utf8")).toBe("from-backup\n");
+
+    writeFileSync(fakeId, "#!/bin/sh\nexit 1\n");
+    expect(() =>
+      execFileSync(
+        "bash",
+        ["-c", `set -euo pipefail; source "$1"; ${fnName} "$2" "$3"`, "bash", scriptPath, source, join(root, "dest2")],
+        { env: envWithFakeId, stdio: "pipe" },
+      ),
+    ).toThrow();
+
+    expect(() =>
+      runDurableHelper(scriptPath, fnName, source, dest, { expectedUid: "" }),
+    ).toThrow();
+    expect(() =>
+      runDurableHelper(scriptPath, fnName, source, dest, { expectedUid: "not-a-uid" }),
+    ).toThrow();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 describe("restore durable state", () => {
@@ -425,40 +483,22 @@ describe("restore durable state", () => {
   });
 
   it("resolves scheduling-agent UID by default and fails closed when missing or invalid", () => {
-    const root = mkdtempSync(join(tmpdir(), "scheduling-uid-resolve-"));
+    expectDefaultUidResolution(script, "restore_durable_tree");
+  });
+
+  it("refuses empty source or destination paths in restore", () => {
+    const root = mkdtempSync(join(tmpdir(), "scheduling-restore-empty-"));
     try {
-      const bin = join(root, "bin");
-      const source = join(root, "src");
-      const dest = join(root, "dest");
-      mkdirSync(bin);
-      mkdirSync(source);
-      mkdirSync(dest);
-      writeFileSync(join(source, "budget-ledger.json"), "from-backup\n");
+      const validDir = join(root, "valid");
+      mkdirSync(validDir);
+      writeFileSync(join(validDir, "budget-ledger.json"), "ledger\n");
 
-      const fakeId = join(bin, "id");
-      writeFileSync(fakeId, `#!/bin/sh\nif [ "$1" = "-u" ] && [ "$2" = "scheduling-agent" ]; then echo ${currentUid()}; exit 0; fi\nexit 1\n`);
-      chmodSync(fakeId, 0o755);
-
-      const envWithoutOverride = { ...process.env };
-      delete envWithoutOverride.SCHEDULING_AGENT_UID;
-      execFileSync(
-        "bash",
-        ["-c", 'set -euo pipefail; source "$1"; restore_durable_tree "$2" "$3"', "bash", script, source, dest],
-        { env: { ...envWithoutOverride, PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: "pipe" },
-      );
-      expect(readFileSync(join(dest, "budget-ledger.json"), "utf8")).toBe("from-backup\n");
-
-      writeFileSync(fakeId, "#!/bin/sh\nexit 1\n");
       expect(() =>
-        execFileSync(
-          "bash",
-          ["-c", 'set -euo pipefail; source "$1"; restore_durable_tree "$2" "$3"', "bash", script, source, dest],
-          { env: { ...envWithoutOverride, PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: "pipe" },
-        ),
+        execFileSync("python3", [restorePy, "--expected-uid", currentUid(), "", validDir], { stdio: "pipe" }),
       ).toThrow();
-
-      expect(() => restoreDurableTree(source, dest, { expectedUid: "" })).toThrow();
-      expect(() => restoreDurableTree(source, dest, { expectedUid: "not-a-uid" })).toThrow();
+      expect(() =>
+        execFileSync("python3", [restorePy, "--expected-uid", currentUid(), validDir, ""], { stdio: "pipe" }),
+      ).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -482,7 +522,7 @@ describe("backup durable state", () => {
       writeFileSync(join(source, "subdir", "nested.json"), "ignore-nested\n");
       symlinkSync("/nonexistent-target", join(source, "extra-link"));
 
-      backupDurableTree(source, dest);
+      backupDurableFiles(source, dest);
 
       expect(readFileSync(join(dest, "bookings.jsonl"), "utf8")).toBe("booking-row\n");
       expect(lstatSync(join(dest, "bookings.jsonl")).mode & 0o777).toBe(0o600);
@@ -511,7 +551,7 @@ describe("backup durable state", () => {
       mkdirSync(targetDir);
       writeFileSync(join(targetDir, "budget-ledger.json"), "ledger\n");
       symlinkSync(targetDir, linkDir);
-      expect(() => backupDurableTree(`${linkDir}/`, join(root, "out-link-dir"))).toThrow();
+      expect(() => backupDurableFiles(`${linkDir}/`, join(root, "out-link-dir"))).toThrow();
       expect(existsSync(join(root, "out-link-dir"))).toBe(false);
 
       // 2. Known entry is a symlink (including dangling symlink)
@@ -519,20 +559,20 @@ describe("backup durable state", () => {
       mkdirSync(symEntrySrc);
       writeFileSync(join(symEntrySrc, "bookings.jsonl"), "ok\n");
       symlinkSync(join(outside, "secret"), join(symEntrySrc, "budget-ledger.json"));
-      expect(() => backupDurableTree(symEntrySrc, join(root, "out-sym-entry"))).toThrow();
+      expect(() => backupDurableFiles(symEntrySrc, join(root, "out-sym-entry"))).toThrow();
       expect(existsSync(join(root, "out-sym-entry"))).toBe(false);
 
       // 3. Known entry is a directory
       const dirEntrySrc = join(root, "dir-entry-src");
       mkdirSync(join(dirEntrySrc, "bookings.jsonl"), { recursive: true });
-      expect(() => backupDurableTree(dirEntrySrc, join(root, "out-dir-entry"))).toThrow();
+      expect(() => backupDurableFiles(dirEntrySrc, join(root, "out-dir-entry"))).toThrow();
       expect(existsSync(join(root, "out-dir-entry"))).toBe(false);
 
       // 4. Known entry is a special file (FIFO)
       const fifoEntrySrc = join(root, "fifo-entry-src");
       mkdirSync(fifoEntrySrc);
       execFileSync("mkfifo", [join(fifoEntrySrc, "callback-salt")], { stdio: "pipe" });
-      expect(() => backupDurableTree(fifoEntrySrc, join(root, "out-fifo-entry"))).toThrow();
+      expect(() => backupDurableFiles(fifoEntrySrc, join(root, "out-fifo-entry"))).toThrow();
       expect(existsSync(join(root, "out-fifo-entry"))).toBe(false);
 
       // 5. Known entry owned by unexpected UID
@@ -542,47 +582,26 @@ describe("backup durable state", () => {
       const rootOwned = join(uidEntrySrc, "google-refresh");
       writeFileSync(rootOwned, "root-owned\n");
       execFileSync("sudo", ["-n", "chown", "0:0", rootOwned], { stdio: "pipe" });
-      expect(() => backupDurableTree(uidEntrySrc, join(root, "out-uid-entry"))).toThrow();
+      expect(() => backupDurableFiles(uidEntrySrc, join(root, "out-uid-entry"))).toThrow();
       expect(existsSync(join(root, "out-uid-entry"))).toBe(false);
+
+      // 6. Empty source or destination path
+      expect(() =>
+        execFileSync("python3", [backupPy, "--expected-uid", currentUid(), "", join(root, "out-empty-src")], {
+          stdio: "pipe",
+        }),
+      ).toThrow();
+      expect(existsSync(join(root, "out-empty-src"))).toBe(false);
+      expect(() =>
+        execFileSync("python3", [backupPy, "--expected-uid", currentUid(), targetDir, ""], { stdio: "pipe" }),
+      ).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
   it("resolves scheduling-agent UID by default in backup and fails closed when missing", () => {
-    const root = mkdtempSync(join(tmpdir(), "scheduling-backup-uid-"));
-    try {
-      const bin = join(root, "bin");
-      const source = join(root, "src");
-      const dest = join(root, "dest");
-      mkdirSync(bin);
-      mkdirSync(source);
-      writeFileSync(join(source, "budget-ledger.json"), "ledger\n");
-
-      const fakeId = join(bin, "id");
-      writeFileSync(fakeId, `#!/bin/sh\nif [ "$1" = "-u" ] && [ "$2" = "scheduling-agent" ]; then echo ${currentUid()}; exit 0; fi\nexit 1\n`);
-      chmodSync(fakeId, 0o755);
-
-      const envWithoutOverride = { ...process.env };
-      delete envWithoutOverride.SCHEDULING_AGENT_UID;
-      execFileSync(
-        "bash",
-        ["-c", 'set -euo pipefail; source "$1"; backup_durable_tree "$2" "$3"', "bash", backupScript, source, dest],
-        { env: { ...envWithoutOverride, PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: "pipe" },
-      );
-      expect(readFileSync(join(dest, "budget-ledger.json"), "utf8")).toBe("ledger\n");
-
-      writeFileSync(fakeId, "#!/bin/sh\nexit 1\n");
-      expect(() =>
-        execFileSync(
-          "bash",
-          ["-c", 'set -euo pipefail; source "$1"; backup_durable_tree "$2" "$3"', "bash", backupScript, source, join(root, "dest2")],
-          { env: { ...envWithoutOverride, PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: "pipe" },
-        ),
-      ).toThrow();
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    expectDefaultUidResolution(backupScript, "backup_durable_files");
   });
 
   it("creates the backup destination directory with mode 0700 before writing files", () => {

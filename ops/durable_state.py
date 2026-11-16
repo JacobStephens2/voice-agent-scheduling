@@ -15,6 +15,7 @@ import os
 import stat
 import subprocess
 import sys
+from collections.abc import Iterable
 
 KNOWN_DURABLE_FILES: frozenset[str] = frozenset(
     {
@@ -63,9 +64,9 @@ def resolve_expected_uid(explicit_uid: str | None = None) -> int:
 
 
 def strip_trailing_slashes(path: str) -> str:
-    """Strip trailing slashes so O_NOFOLLOW inspects the final directory entry itself."""
-    if path == "/":
-        return "/"
+    """Strip trailing slashes without turning an empty path into '/'."""
+    if not path:
+        return ""
     trimmed = path.rstrip("/")
     return trimmed or "/"
 
@@ -77,6 +78,8 @@ def open_directory_nofollow(
     dir_fd: int | None = None,
 ) -> tuple[int, os.stat_result]:
     """Open an existing directory without following a trailing symlink."""
+    if not path:
+        raise SystemExit(f"Refusing {action}: directory path cannot be empty.")
     target = strip_trailing_slashes(path) if dir_fd is None else path
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
@@ -161,6 +164,45 @@ def open_verified_source_file(
         raise
 
 
+def close_fds(
+    opened_sources: Iterable[tuple[str, int, os.stat_result]],
+    *fds: int,
+) -> None:
+    """Close opened source descriptors and any non-negative directory descriptors."""
+    for _, src_fd, _ in opened_sources:
+        os.close(src_fd)
+    for fd in fds:
+        if fd != -1:
+            os.close(fd)
+
+
+def open_verified_sources(
+    src_dirfd: int,
+    names: Iterable[str],
+    expected_uid: int,
+    *,
+    action: str,
+    missing_ok: bool,
+) -> list[tuple[str, int, os.stat_result]]:
+    """Open and verify every requested source entry, closing opened fds on failure."""
+    opened_sources: list[tuple[str, int, os.stat_result]] = []
+    try:
+        for name in names:
+            opened = open_verified_source_file(
+                src_dirfd,
+                name,
+                expected_uid,
+                action=action,
+                missing_ok=missing_ok,
+            )
+            if opened is not None:
+                opened_sources.append((name, opened[0], opened[1]))
+        return opened_sources
+    except Exception:
+        close_fds(opened_sources)
+        raise
+
+
 def sanitized_mode(info: os.stat_result) -> int:
     """Return permission bits with setuid and setgid cleared."""
     return stat.S_IMODE(info.st_mode) & ~(stat.S_ISUID | stat.S_ISGID)
@@ -176,6 +218,21 @@ def copy_fd_bytes(src_fd: int, dest_fd: int) -> None:
         while view:
             written = os.write(dest_fd, view)
             view = view[written:]
+
+
+def write_verified_file(
+    dest_fd: int,
+    src_fd: int,
+    info: os.stat_result,
+    *,
+    preserve_owner: bool = False,
+) -> None:
+    """Copy bytes from src_fd to dest_fd and apply sanitized mode and timestamps."""
+    copy_fd_bytes(src_fd, dest_fd)
+    if preserve_owner and os.geteuid() == 0:
+        os.fchown(dest_fd, info.st_uid, info.st_gid)
+    os.fchmod(dest_fd, sanitized_mode(info))
+    os.utime(dest_fd, ns=(info.st_atime_ns, info.st_mtime_ns))
 
 
 def parse_transfer_args(description: str, argv: list[str] | None = None) -> tuple[str, str, int]:

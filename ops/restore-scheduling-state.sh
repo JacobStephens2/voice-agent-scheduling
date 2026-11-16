@@ -9,20 +9,14 @@ _ops_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _restore_durable_helper="${_ops_dir}/restore_durable_tree.py"
 _durable_state_helper="${_ops_dir}/durable_state.py"
 
-resolve_scheduling_agent_uid() {
-  PYTHONDONTWRITEBYTECODE=1 python3 "${_durable_state_helper}" resolve-uid "$@"
-}
-
 restore_durable_tree() {
   local src="$1"
   local dest="$2"
-  local expected_uid
   if [ "$#" -ge 3 ]; then
-    expected_uid="$(resolve_scheduling_agent_uid "$3")"
+    PYTHONDONTWRITEBYTECODE=1 python3 "${_restore_durable_helper}" --expected-uid "$3" "${src}" "${dest}"
   else
-    expected_uid="$(resolve_scheduling_agent_uid)"
+    PYTHONDONTWRITEBYTECODE=1 python3 "${_restore_durable_helper}" "${src}" "${dest}"
   fi
-  PYTHONDONTWRITEBYTECODE=1 python3 "${_restore_durable_helper}" --expected-uid "${expected_uid}" "${src}" "${dest}"
 }
 
 main() {
@@ -52,7 +46,7 @@ main() {
   fi
 
   local expected_uid
-  expected_uid="$(resolve_scheduling_agent_uid)"
+  expected_uid="$(PYTHONDONTWRITEBYTECODE=1 python3 "${_durable_state_helper}" resolve-uid)"
 
   echo "=== Restoring isolated scheduling state from ${SOURCE} ==="
   echo "Calendar appointments are not in this backup and will not be deleted or recreated."

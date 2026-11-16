@@ -5,32 +5,27 @@ _ops_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _backup_durable_helper="${_ops_dir}/backup_durable_files.py"
 _durable_state_helper="${_ops_dir}/durable_state.py"
 
-resolve_scheduling_agent_uid() {
-  PYTHONDONTWRITEBYTECODE=1 python3 "${_durable_state_helper}" resolve-uid "$@"
-}
-
-backup_durable_tree() {
+backup_durable_files() {
   local src="$1"
   local dest="$2"
-  local expected_uid
   if [ "$#" -ge 3 ]; then
-    expected_uid="$(resolve_scheduling_agent_uid "$3")"
+    PYTHONDONTWRITEBYTECODE=1 python3 "${_backup_durable_helper}" --expected-uid "$3" "${src}" "${dest}"
   else
-    expected_uid="$(resolve_scheduling_agent_uid)"
+    PYTHONDONTWRITEBYTECODE=1 python3 "${_backup_durable_helper}" "${src}" "${dest}"
   fi
-  PYTHONDONTWRITEBYTECODE=1 python3 "${_backup_durable_helper}" --expected-uid "${expected_uid}" "${src}" "${dest}"
 }
 
 backup_to_dest() {
   local dest="$1"
   local etc_src="$2"
   local state_src="$3"
-  local expected_uid
+  local expected_uid_args=()
   if [ "$#" -ge 4 ]; then
-    expected_uid="$(resolve_scheduling_agent_uid "$4")"
-  else
-    expected_uid="$(resolve_scheduling_agent_uid)"
+    expected_uid_args=("$4")
   fi
+
+  local expected_uid
+  expected_uid="$(PYTHONDONTWRITEBYTECODE=1 python3 "${_durable_state_helper}" resolve-uid ${expected_uid_args[@]+"${expected_uid_args[@]}"})"
 
   if [ -L "${etc_src}" ] || [ ! -d "${etc_src}" ]; then
     echo "Refusing backup: ${etc_src} is not a directory." >&2
@@ -56,7 +51,7 @@ backup_to_dest() {
     trap cleanup_incomplete_backup EXIT INT TERM
 
     cp -a "${etc_src}" "${dest}/etc-scheduling-agent" || exit 1
-    backup_durable_tree "${state_src}" "${dest}/var-lib-scheduling-agent" "${expected_uid}" || exit 1
+    backup_durable_files "${state_src}" "${dest}/var-lib-scheduling-agent" "${expected_uid}" || exit 1
     complete=1
   )
 }
@@ -67,7 +62,7 @@ main() {
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
   local DEST="${DEST_ROOT%/}/${STAMP}"
   local expected_uid
-  expected_uid="$(resolve_scheduling_agent_uid)"
+  expected_uid="$(PYTHONDONTWRITEBYTECODE=1 python3 "${_durable_state_helper}" resolve-uid)"
 
   echo "=== Backing up isolated scheduling state to ${DEST} ==="
   echo "This copy is credentials and durable application state only."
