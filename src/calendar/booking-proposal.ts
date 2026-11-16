@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { extractE164, isE164 } from "../phone.js";
+import { createBookingReadback, type ReadbackHandle } from "./booking-readback.js";
 import { computeAvailableStarts, SCHEDULING_TIMEZONE } from "./policy.js";
 
 export interface AppointmentProposal {
@@ -29,6 +30,107 @@ export interface ProposeResult {
   readonly message: string;
 }
 
+export type ConfirmationEligibility =
+  | { readonly status: "eligible"; readonly proposal: AppointmentProposal }
+  | { readonly status: "readback_incomplete"; readonly message: string };
+
+export interface AppointmentProposals {
+  propose(
+    args: Record<string, unknown>,
+    options: { readonly callId: string; readonly referenceTime?: Date },
+  ): ProposeResult;
+  openReadback(callId: string): ReadbackHandle;
+  checkConfirmation(
+    args: Record<string, unknown>,
+    options: { readonly callId: string },
+  ): ConfirmationEligibility;
+  currentForInsert(captured: AppointmentProposal): AppointmentProposal | undefined;
+  discard(captured: AppointmentProposal): void;
+}
+
+/** Owns transient proposals and the complete call-scoped confirmation protocol. */
+export function createAppointmentProposals(options: { readonly now: () => Date }): AppointmentProposals {
+  const proposals = new Map<string, { proposal: AppointmentProposal; readbackFinished: boolean }>();
+  return {
+    propose(args, execOptions) {
+      const validated = validateProposal(args, {
+        ...execOptions,
+        now: options.now,
+      });
+      if ("status" in validated) {
+        return validated;
+      }
+      proposals.set(validated.callId, { proposal: validated, readbackFinished: false });
+      const { proposalId, callId: _callId, ...readback } = validated;
+      const purposeLine = validated.purpose ? ` Purpose: ${validated.purpose}.` : "";
+      return {
+        status: "proposed",
+        proposalId,
+        readback,
+        message: `Please read back: ${validated.callerName}, callback ${validated.callbackNumber}, ${validated.date} ${validated.startTime}–${validated.endTime} ${SCHEDULING_TIMEZONE}.${purposeLine} Wait for explicit agreement before confirming.`,
+      };
+    },
+    openReadback(callId) {
+      const readback = createBookingReadback();
+      return {
+        observe(event) {
+          const current = proposals.get(callId);
+          if (readback.observe(event, current?.proposal) && current) {
+            current.readbackFinished = true;
+          }
+        },
+        close() {
+          readback.close();
+        },
+      };
+    },
+    checkConfirmation(args, { callId }) {
+      const current = proposals.get(callId);
+      if (!current) {
+        return {
+          status: "readback_incomplete",
+          message: "There is no current appointment proposal on this call to confirm.",
+        };
+      }
+      if (args.confirmed !== true) {
+        return {
+          status: "readback_incomplete",
+          message:
+            "Do not create the appointment. Unclear assent, background speech, or a refusal is not confirmation.",
+        };
+      }
+      if (typeof args.proposalId !== "string" || args.proposalId !== current.proposal.proposalId) {
+        return {
+          status: "readback_incomplete",
+          message:
+            "That confirmation does not match the current proposal on this call. Finish a fresh complete readback first.",
+        };
+      }
+      if (!current.readbackFinished) {
+        return {
+          status: "readback_incomplete",
+          message:
+            "The readback is not finished. Complete the full readback without interruption before confirming. Do not create the appointment.",
+        };
+      }
+      return { status: "eligible", proposal: { ...current.proposal } };
+    },
+    currentForInsert(captured) {
+      const current = proposals.get(captured.callId);
+      if (current?.proposal.proposalId !== captured.proposalId || !current.readbackFinished) {
+        return undefined;
+      }
+      return { ...current.proposal };
+    },
+    discard(captured) {
+      const current = proposals.get(captured.callId);
+      if (current?.proposal.proposalId === captured.proposalId) {
+        proposals.delete(captured.callId);
+      }
+    },
+  };
+}
+
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value.trim() : undefined;
 }
@@ -37,16 +139,14 @@ function invalid(message: string): ProposeResult {
   return { status: "invalid", message };
 }
 
-/** Record a call-scoped proposal for readback. A new proposal replaces any earlier one. */
-export function proposeAppointment(
+function validateProposal(
   args: Record<string, unknown>,
   options: {
     readonly callId: string;
     readonly referenceTime?: Date;
     readonly now: () => Date;
-    readonly proposals: { save(proposal: AppointmentProposal): void };
   },
-): ProposeResult {
+): AppointmentProposal | ProposeResult {
   const callerName = asString(args.callerName);
   if (!callerName) {
     return invalid("Please ask the caller for their name before proposing an appointment.");
@@ -77,7 +177,7 @@ export function proposeAppointment(
     );
   }
   const purpose = asString(args.purpose);
-  const proposal: AppointmentProposal = {
+  return {
     proposalId: randomBytes(16).toString("hex"),
     callId: options.callId,
     callerName,
@@ -87,21 +187,5 @@ export function proposeAppointment(
     endTime: slot.endTime,
     timezone: SCHEDULING_TIMEZONE,
     ...(purpose ? { purpose } : {}),
-  };
-  options.proposals.save(proposal);
-  const purposeLine = purpose ? ` Purpose: ${purpose}.` : "";
-  return {
-    status: "proposed",
-    proposalId: proposal.proposalId,
-    readback: {
-      callerName,
-      callbackNumber,
-      date: slot.date,
-      startTime: slot.startTime,
-      endTime: slot.endTime,
-      timezone: SCHEDULING_TIMEZONE,
-      ...(purpose ? { purpose } : {}),
-    },
-    message: `Please read back: ${callerName}, callback ${callbackNumber}, ${slot.date} ${slot.startTime}–${slot.endTime} ${SCHEDULING_TIMEZONE}.${purposeLine} Wait for explicit agreement before confirming.`,
   };
 }

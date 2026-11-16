@@ -7,11 +7,11 @@ import {
   type GoogleOAuthCredentials,
 } from "./auth.js";
 import {
-  proposeAppointment,
-  type AppointmentProposal,
+  createAppointmentProposals,
+  type AppointmentProposals,
   type ProposeResult,
 } from "./booking-proposal.js";
-import { createBookingReadback, type ReadbackHandle } from "./booking-readback.js";
+import type { ReadbackHandle } from "./booking-readback.js";
 import {
   createAppointmentLedger,
   isUnresolvedBookingStatus,
@@ -120,40 +120,6 @@ function newHexId(): string {
   return randomBytes(16).toString("hex");
 }
 
-interface ProposalStore {
-  save(proposal: AppointmentProposal): void;
-  current(callId: string): AppointmentProposal | undefined;
-  drop(callId: string): void;
-  markReadbackFinished(callId: string): void;
-  readbackFinished(callId: string): boolean;
-}
-
-function createProposalStore(): ProposalStore {
-  const proposals = new Map<string, AppointmentProposal>();
-  const finishedReadbacks = new Set<string>();
-  return {
-    save(proposal) {
-      proposals.set(proposal.callId, proposal);
-      finishedReadbacks.delete(proposal.callId);
-    },
-    current(callId) {
-      return proposals.get(callId);
-    },
-    drop(callId) {
-      proposals.delete(callId);
-      finishedReadbacks.delete(callId);
-    },
-    markReadbackFinished(callId) {
-      if (proposals.has(callId)) {
-        finishedReadbacks.add(callId);
-      }
-    },
-    readbackFinished(callId) {
-      return finishedReadbacks.has(callId);
-    },
-  };
-}
-
 export function createAppointmentBooking(
   options: BookingToolOptions = {},
 ): AppointmentBooking {
@@ -171,7 +137,7 @@ export function createAppointmentBooking(
   const tokenProvider =
     options.tokenProvider ??
     (explicitCredentials ? createTokenProvider(explicitCredentials, fetchFn) : undefined);
-  const proposals = createProposalStore();
+  const proposals = createAppointmentProposals({ now });
   const ledger = options.ledger ?? createAppointmentLedger({ dataDir: options.dataDir });
   let queue: Promise<unknown> = Promise.resolve();
 
@@ -250,12 +216,7 @@ export function createAppointmentBooking(
 
     async execute(name, args, execOptions): Promise<BookingToolResult> {
       if (name === "propose_appointment") {
-        return proposeAppointment(args, {
-          callId: execOptions.callId,
-          referenceTime: execOptions.referenceTime,
-          now,
-          proposals,
-        });
+        return proposals.propose(args, execOptions);
       }
       if (name === "confirm_appointment") {
         return enqueue(() =>
@@ -278,17 +239,7 @@ export function createAppointmentBooking(
     },
 
     openReadback(callId) {
-      const readback = createBookingReadback();
-      return {
-        observe(event) {
-          if (readback.observe(event, proposals.current(callId))) {
-            proposals.markReadbackFinished(callId);
-          }
-        },
-        close() {
-          readback.close();
-        },
-      };
+      return proposals.openReadback(callId);
     },
 
     reconcileUnresolvedOperations() {
@@ -318,7 +269,7 @@ async function confirm(
   args: Record<string, unknown>,
   execOptions: { callId: string; referenceTime?: Date },
   ctx: {
-    proposals: ProposalStore;
+    proposals: AppointmentProposals;
     ledger: AppointmentLedger;
     fetchFn: typeof fetch;
     now: () => Date;
@@ -328,34 +279,11 @@ async function confirm(
     allowWrites: boolean;
   },
 ): Promise<ConfirmResult> {
-  const proposal = ctx.proposals.current(execOptions.callId);
-  if (!proposal) {
-    return {
-      status: "readback_incomplete",
-      message: "There is no current appointment proposal on this call to confirm.",
-    };
+  const eligibility = ctx.proposals.checkConfirmation(args, execOptions);
+  if (eligibility.status === "readback_incomplete") {
+    return eligibility;
   }
-  if (args.confirmed !== true) {
-    return {
-      status: "readback_incomplete",
-      message:
-        "Do not create the appointment. Unclear assent, background speech, or a refusal is not confirmation.",
-    };
-  }
-  if (typeof args.proposalId !== "string" || args.proposalId !== proposal.proposalId) {
-    return {
-      status: "readback_incomplete",
-      message:
-        "That confirmation does not match the current proposal on this call. Finish a fresh complete readback first.",
-    };
-  }
-  if (!ctx.proposals.readbackFinished(execOptions.callId)) {
-    return {
-      status: "readback_incomplete",
-      message:
-        "The readback is not finished. Complete the full readback without interruption before confirming. Do not create the appointment.",
-    };
-  }
+  const proposal = eligibility.proposal;
 
   const existing = ctx.ledger.latestForProposal(proposal.proposalId);
   if (existing?.status === "booked") {
@@ -478,7 +406,7 @@ async function confirm(
       if (recorded.status !== "unavailable") {
         return stoppedAttemptResult(recorded);
       }
-      ctx.proposals.drop(execOptions.callId);
+      ctx.proposals.discard(proposal);
       return {
         status: "unavailable",
         operationId: generated.operationId,
@@ -511,17 +439,10 @@ async function confirm(
     return limitRefusal(finalLimit);
   }
 
-  // Re-read in this turn. An await between this check and the insert
-  // arguments would let a replacement proposal, or a cleared readback,
-  // be written. The pending row already holds the callback number, so a
-  // miss closes it with the existing failed result and leaves the stored
-  // proposal in place.
-  const current = ctx.proposals.current(execOptions.callId);
-  if (
-    !current ||
-    current.proposalId !== proposal.proposalId ||
-    !ctx.proposals.readbackFinished(execOptions.callId)
-  ) {
+  // No await may separate this eligibility check from the commit invocation.
+  // A replacement stops this attempt using the ledger's existing failure path.
+  const current = ctx.proposals.currentForInsert(proposal);
+  if (!current) {
     return stoppedAttemptResult(attempt.fail());
   }
   const insert = {
