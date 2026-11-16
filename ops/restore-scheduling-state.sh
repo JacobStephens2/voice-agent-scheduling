@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Copy a durable-state tree onto dest. The caller creates dest.
-# Each restored name is opened relative to its parent directory fd. That open
-# fails closed when the final name is a symlink, so the backup is not written
-# through the link. Names the backup does not restore stay in place.
-_restore_durable_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/restore_durable_tree.py"
+# Copy known top-level durable-state files onto dest. The caller creates dest.
+# Each source and target name is opened relative to its directory fd with
+# O_NOFOLLOW, verifying each source entry is a known regular file owned by the
+# expected scheduling-agent UID. Names the backup does not restore stay in place.
+_ops_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_restore_durable_helper="${_ops_dir}/restore_durable_tree.py"
+_durable_state_helper="${_ops_dir}/durable_state.py"
 
 restore_durable_tree() {
   local src="$1"
   local dest="$2"
-  PYTHONDONTWRITEBYTECODE=1 python3 "${_restore_durable_helper}" "${src}" "${dest}"
+  if [ "$#" -ge 3 ]; then
+    PYTHONDONTWRITEBYTECODE=1 python3 "${_restore_durable_helper}" --expected-uid "$3" "${src}" "${dest}"
+  else
+    PYTHONDONTWRITEBYTECODE=1 python3 "${_restore_durable_helper}" "${src}" "${dest}"
+  fi
 }
 
 main() {
@@ -30,10 +36,17 @@ main() {
 
   # Refuse before stopping the service or copying credentials. mkdir -p would
   # leave this symlink in place, and the state copy would not run.
+  if [ -L "${STATE_SRC}" ]; then
+    echo "Refusing restore: ${STATE_SRC} is a symlink." >&2
+    exit 1
+  fi
   if [ -L /var/lib/scheduling-agent ]; then
     echo "Refusing restore: /var/lib/scheduling-agent is a symlink." >&2
     exit 1
   fi
+
+  local expected_uid
+  expected_uid="$(PYTHONDONTWRITEBYTECODE=1 python3 "${_durable_state_helper}" resolve-uid)"
 
   echo "=== Restoring isolated scheduling state from ${SOURCE} ==="
   echo "Calendar appointments are not in this backup and will not be deleted or recreated."
@@ -43,7 +56,7 @@ main() {
   sudo cp -a "${ETC_SRC}/." /etc/scheduling-agent/
   local script_path
   script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-  sudo bash -c 'set -euo pipefail; source "$1"; restore_durable_tree "$2" "$3"' bash "${script_path}" "${STATE_SRC}" /var/lib/scheduling-agent
+  sudo bash -c 'set -euo pipefail; source "$1"; restore_durable_tree "$2" "$3" "$4"' bash "${script_path}" "${STATE_SRC}" /var/lib/scheduling-agent "${expected_uid}"
   sudo chown -R root:scheduling-agent /etc/scheduling-agent
   sudo chmod 0700 /etc/scheduling-agent
   sudo chmod 0600 /etc/scheduling-agent/scheduling-agent.env || true

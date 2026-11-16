@@ -102,6 +102,24 @@ curl -fsS https://scheduler.stephens.page/health
 Use a throwaway copy of `/var/lib/scheduling-agent` when rehearsing restore.
 Do not point a rehearsal at the live Calendar destination.
 
+Backup and restore of `/var/lib/scheduling-agent` are restricted to the known
+top-level durable state files: `bookings.jsonl`, `callback-salt`,
+`budget-ledger.json`, `operational-records.jsonl`, `smoke-evidence.jsonl`,
+`active-call.json`, `admission-pause.json`, `scheduling-calendars.json`,
+`google-client.json`, and `google-refresh`.
+
+- **Backup**: creates the timestamped destination directory with mode `0700`
+  before writing files, opens `/var/lib/scheduling-agent` and present known
+  files without following symlinks (`O_NOFOLLOW`), requires each known entry to
+  be a regular file owned by `scheduling-agent`, skips recursive directory
+  traversal, and removes incomplete backup directories on failure.
+- **Restore**: opens the source snapshot and target directory without following
+  symlinks, requires every source entry to be one of the known filenames above
+  as a regular file owned by `scheduling-agent`, and fails closed on
+  directories, symlinks, special files, unexpected filenames, or any other
+  owner UID. For test environments without a `scheduling-agent` account, set
+  `SCHEDULING_AGENT_UID` to override the expected source UID.
+
 ## Application recording settings vs provider retention
 
 The scheduling process never enables xAI input transcription
