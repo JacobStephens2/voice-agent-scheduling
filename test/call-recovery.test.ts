@@ -16,7 +16,7 @@ function storage() {
   return {
     dataDir,
     ledger: createAppointmentLedger({ dataDir }),
-    evidence: createCallEvidence({ dataDir }),
+    evidence: createCallEvidence({ dataDir, now: () => new Date("2026-09-01T14:00:00.000Z") }),
     budget: { now: () => NOW },
   };
 }
@@ -37,14 +37,14 @@ function appointment(ledger: AppointmentLedger, status: "pending" | "failed" = "
 function oldEvidence(evidence: CallEvidence) {
   evidence.record({
     callId: "call-old",
-    connectionRoute: "direct_sip",
-    callerNumberMasked: "+1***9876",
-    calledNumber: "+18005550199",
     status: "completed",
     durationMs: 60_000,
     toolRoundTrips: 0,
-    estimatedCostMicroUsd: 83_200,
-    recordedAt: "2026-09-01T14:00:00.000Z",
+    durationWarningSent: false,
+  }, {
+    callId: "call-old",
+    callerNumber: "+15551239876",
+    calledNumber: "+18005550199",
   });
 }
 

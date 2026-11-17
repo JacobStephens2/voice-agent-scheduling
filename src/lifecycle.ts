@@ -8,19 +8,15 @@ import {
   type SignedWebhook,
 } from "./admission.js";
 import {
-  DIRECT_SIP_MICRO_USD_PER_MINUTE,
   DURATION_WARNING_LEAD_MS_DEFAULT,
   MAX_CALL_DURATION_MS_DEFAULT,
   type BudgetBlockReason,
   type BudgetSnapshot,
 } from "./budget.js";
 import {
-  DIRECT_SIP_ROUTE,
-  boundedErrorCategory,
   createCallEvidence,
-  estimateCostMicroUsd,
-  maskPhoneNumber,
   type CallEvidence,
+  type CallEvidenceContext,
   type StructuredCallEvidence,
 } from "./evidence.js";
 import {
@@ -195,9 +191,11 @@ export function createCallLifecycleManager(
   const hangupCall = options.hangupCall ?? defaultHangupCall(options.apiKey);
   const maxCallDurationMs = options.maxCallDurationMs ?? MAX_CALL_DURATION_MS_DEFAULT;
   const warningLeadMs = options.warningLeadMs ?? DURATION_WARNING_LEAD_MS_DEFAULT;
-  const perMinuteMicroUsd = options.perMinuteMicroUsd ?? DIRECT_SIP_MICRO_USD_PER_MINUTE;
   const ledger = options.ledger ?? createAppointmentLedger({ dataDir: options.dataDir });
-  const evidence = options.evidence ?? createCallEvidence({ dataDir: options.dataDir });
+  const evidence = options.evidence ?? createCallEvidence({
+    dataDir: options.dataDir,
+    perMinuteMicroUsd: options.perMinuteMicroUsd,
+  });
   const recovery = createCallRecovery({
     dataDir: options.dataDir,
     ledger,
@@ -219,34 +217,13 @@ export function createCallLifecycleManager(
     operatorPaused = true;
     persistOperatorPause(options.dataDir, true);
   }
-  const onOutcome = (
-    callId: string,
-    callerNumber: string,
-    calledNumber: string,
-    outcome: SessionOutcome,
-  ) => {
-    admission.release(callId);
-    recovery.settle(callId, outcome.durationMs);
-    const error = boundedErrorCategory(outcome.error);
-    const record: StructuredCallEvidence = {
-      callId,
-      connectionRoute: DIRECT_SIP_ROUTE,
-      callerNumberMasked: maskPhoneNumber(callerNumber),
-      calledNumber,
-      status: outcome.status,
-      durationMs: outcome.durationMs,
-      modelVerified: outcome.modelVerified,
-      reasoningVerified: outcome.reasoningVerified,
-      toolRoundTrips: outcome.toolRoundTrips,
-      estimatedCostMicroUsd: estimateCostMicroUsd(outcome.durationMs, perMinuteMicroUsd),
-      durationWarningSent: outcome.durationWarningSent,
-      ...(error ? { error } : {}),
-      recordedAt: new Date().toISOString(),
-    };
+  const onOutcome = (context: CallEvidenceContext, outcome: SessionOutcome) => {
+    admission.release(context.callId);
+    recovery.settle(context.callId, outcome.durationMs);
     try {
-      evidence.record(record);
+      evidence.record(outcome, context);
     } catch {
-      // Release and settlement already happened. An append failure must not
+      // Release and settlement already happened. A recording failure must not
       // re-enter finalization or publish an outcome that was not persisted.
     }
   };
@@ -331,10 +308,10 @@ export function createCallLifecycleManager(
       void session
         .start()
         .then((outcome) => {
-          onOutcome(result.callId, result.callerNumber, result.calledNumber, outcome);
+          onOutcome(result, outcome);
         })
         .catch((error: unknown) => {
-          onOutcome(result.callId, result.callerNumber, result.calledNumber, {
+          onOutcome(result, {
             callId: result.callId,
             status: "failed",
             toolRoundTrips: 0,

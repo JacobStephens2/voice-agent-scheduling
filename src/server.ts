@@ -177,7 +177,10 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
   // reconciliation and retention cleanup all read and write this instance,
   // so a cleanup can never leave the confirmation path a stale view.
   const ledger = createAppointmentLedger({ dataDir: config.dataDir });
-  const evidence = createCallEvidence({ dataDir: config.dataDir });
+  const evidence = createCallEvidence({
+    dataDir: config.dataDir,
+    perMinuteMicroUsd: config.perMinuteMicroUsd,
+  });
   const booking =
     config.booking ??
     createAppointmentBooking({

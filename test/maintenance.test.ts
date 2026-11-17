@@ -424,7 +424,7 @@ describe("startup retention cleanup when a durable load fails", () => {
 describe("retention cleanup and recovery", () => {
   it("updates lifecycle evidence immediately through the shared owner without a reload", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-shared-"));
-    const evidence = createCallEvidence({ dataDir });
+    const evidence = createCallEvidence({ dataDir, now: () => new Date("2026-08-01T14:00:00.000Z") });
     const ledger = createAppointmentLedger({ dataDir });
     const manager = createCallLifecycleManager({
       webhookSecret: WEBHOOK_SECRET,
@@ -437,14 +437,14 @@ describe("retention cleanup and recovery", () => {
     });
     evidence.record({
       callId: "shared-old",
-      connectionRoute: "direct_sip",
-      callerNumberMasked: "+1***9876",
-      calledNumber: "+18005550199",
       status: "completed",
       durationMs: 1000,
       toolRoundTrips: 0,
-      estimatedCostMicroUsd: 1,
-      recordedAt: "2026-08-01T14:00:00.000Z",
+      durationWarningSent: false,
+    }, {
+      callId: "shared-old",
+      callerNumber: "+15551239876",
+      calledNumber: "+18005550199",
     });
     expect(manager.listEvidence()).toHaveLength(1);
     const result = runRetentionCleanup({ evidence, ledger, now: MONDAY_14H });
@@ -454,7 +454,7 @@ describe("retention cleanup and recovery", () => {
 
   it("keeps successful evidence compaction published when the Appointment ledger rewrite fails", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-maint-partial-"));
-    const evidence = createCallEvidence({ dataDir });
+    const evidence = createCallEvidence({ dataDir, now: () => new Date("2026-08-01T14:00:00.000Z") });
     const ledger = createAppointmentLedger({ dataDir });
     const manager = createCallLifecycleManager({
       webhookSecret: WEBHOOK_SECRET,
@@ -467,14 +467,14 @@ describe("retention cleanup and recovery", () => {
     });
     evidence.record({
       callId: "expired-before-ledger-failure",
-      connectionRoute: "direct_sip",
-      callerNumberMasked: "+1***9876",
-      calledNumber: "+18005550199",
       status: "completed",
       durationMs: 1000,
       toolRoundTrips: 0,
-      estimatedCostMicroUsd: 1,
-      recordedAt: "2026-08-01T14:00:00.000Z",
+      durationWarningSent: false,
+    }, {
+      callId: "expired-before-ledger-failure",
+      callerNumber: "+15551239876",
+      calledNumber: "+18005550199",
     });
     const bookingsPath = join(dataDir, "bookings.jsonl");
     rmSync(bookingsPath, { force: true });
@@ -722,16 +722,20 @@ describe("retention cleanup and recovery", () => {
     const ledgerPath = join(dataDir, "budget-ledger.json");
     const original = `{"periodId":"2026-11","spentMicroUsd":"12000000","reservations":{}}\n`;
     writeFileSync(ledgerPath, original, { mode: 0o600 });
-    createCallEvidence({ dataDir }).record({
+    createCallEvidence({
+      dataDir,
+      now: () => new Date("2026-11-02T15:00:00.000Z"),
+      perMinuteMicroUsd: 4_500_000,
+    }).record({
       callId: "call-spent-evidence",
-      connectionRoute: "direct_sip",
-      callerNumberMasked: "+1***9876",
-      calledNumber: "+18005550199",
       status: "completed",
       durationMs: 120_000,
       toolRoundTrips: 0,
-      estimatedCostMicroUsd: 9_000_000,
-      recordedAt: "2026-11-02T15:00:00.000Z",
+      durationWarningSent: false,
+    }, {
+      callId: "call-spent-evidence",
+      callerNumber: "+15551239876",
+      calledNumber: "+18005550199",
     });
 
     const sockets: FakeRealtimeSocket[] = [];
@@ -976,17 +980,18 @@ describe("operator maintenance HTTP", () => {
     });
     ledger.tryReserve("http-warmup");
     ledger.settle("http-warmup", 0);
-    createCallEvidence({ dataDir }).record({
+    const recordedAt = new Date();
+    createCallEvidence({ dataDir, now: () => recordedAt }).record({
       callId: "call-http-recent",
-      connectionRoute: "direct_sip",
-      callerNumberMasked: "+1***1111",
-      calledNumber: "+18005550199",
       status: "failed",
       durationMs: 2000,
       toolRoundTrips: 0,
-      estimatedCostMicroUsd: 2,
-      error: "provider_error",
-      recordedAt: new Date().toISOString(),
+      durationWarningSent: false,
+      error: "provider failure with private details",
+    }, {
+      callId: "call-http-recent",
+      callerNumber: "+15550001111",
+      calledNumber: "+18005550199",
     });
     app = createSchedulingServer({
       port: HTTP_PORT,
@@ -1017,16 +1022,16 @@ describe("operator maintenance HTTP", () => {
   });
 
   it("runs retention cleanup and reports health", async () => {
-    createCallEvidence({ dataDir }).record({
+    createCallEvidence({ dataDir, now: () => new Date("2026-01-01T00:00:00.000Z") }).record({
       callId: "call-http-old",
-      connectionRoute: "direct_sip",
-      callerNumberMasked: "+1***0000",
-      calledNumber: "+18005550199",
       status: "completed",
       durationMs: 1000,
       toolRoundTrips: 0,
-      estimatedCostMicroUsd: 1,
-      recordedAt: new Date("2026-01-01T00:00:00.000Z").toISOString(),
+      durationWarningSent: false,
+    }, {
+      callId: "call-http-old",
+      callerNumber: "+15550000000",
+      calledNumber: "+18005550199",
     });
     const denied = await fetch(`http://127.0.0.1:${HTTP_PORT}/maintenance/cleanup`, {
       method: "POST",

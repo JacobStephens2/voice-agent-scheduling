@@ -21,13 +21,14 @@ function temporaryDirectory() {
   return dataDir;
 }
 
-async function startServer(dataDir?: string) {
+async function startServer(dataDir?: string, perMinuteMicroUsd?: number) {
   const app = createSchedulingServer({
     port: 0,
     webhookSecret: WEBHOOK_SECRET,
     apiKey: "test-xai-key",
     evidenceToken: TOKEN,
     dataDir,
+    perMinuteMicroUsd,
     availabilityTool: createSyntheticAvailabilityTool(),
     connectWebSocket: (url, headers) => {
       const socket = new FakeRealtimeSocket(url, headers);
@@ -64,6 +65,34 @@ afterEach(async () => {
 });
 
 describe("Scheduling call evidence HTTP cleanup", () => {
+  it("shares the configured usage rate, masks failures and preserves recorded outcomes across a server restart", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    const dataDir = temporaryDirectory();
+    const first = await startServer(dataDir, 120_000);
+    const socket = await admit(first.app, "configured-http");
+    vi.setSystemTime(new Date("2026-11-13T15:01:00.000Z"));
+    socket.receive({ type: "error", error: { message: "provider error with private caller details" } });
+    const record = await recordedEvidence(() => first.app.lifecycleManager.listEvidence(), "configured-http");
+    expect(record).toMatchObject({
+      callId: "configured-http",
+      callerNumberMasked: "+1***4567",
+      calledNumber: "+18005550199",
+      connectionRoute: "direct_sip",
+      status: "failed",
+      error: "provider_error",
+      durationMs: 60_000,
+      estimatedCostMicroUsd: 120_000,
+      recordedAt: "2026-11-13T15:01:00.000Z",
+    });
+    expect(first.app.lifecycleManager.budgetSnapshot()).toMatchObject({ spentMicroUsd: 120_000, reservedMicroUsd: 0 });
+    expect(await first.listing()).toEqual([record]);
+    await first.app.stop();
+    applications.splice(applications.indexOf(first.app), 1);
+    const restarted = await startServer(dataDir, 240_000);
+    expect(await restarted.listing()).toEqual([record]);
+  });
+
   it("preserves in-memory evidence and operator pause without a data directory", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(NOW);

@@ -1,7 +1,8 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { appendJsonl, loadJsonl, rewriteJsonl } from "./jsonl.js";
-import { DIRECT_SIP_MICRO_USD_PER_MINUTE } from "./budget.js";
+import { DIRECT_SIP_MICRO_USD_PER_MINUTE, estimateCallCostMicroUsd } from "./budget.js";
+import type { SessionOutcome } from "./session.js";
 
 export const DIRECT_SIP_ROUTE = "direct_sip";
 export const OPERATIONAL_RECORDS_FILE = "operational-records.jsonl";
@@ -36,8 +37,14 @@ export interface StructuredCallEvidence {
   readonly recordedAt: string;
 }
 
+export interface CallEvidenceContext {
+  readonly callId: string;
+  readonly callerNumber: string;
+  readonly calledNumber: string;
+}
+
 export interface CallEvidence {
-  record(record: StructuredCallEvidence): void;
+  record(outcome: SessionOutcome, context: CallEvidenceContext): void;
   list(): readonly StructuredCallEvidence[];
   compact(now: Date): { removed: number; kept: number };
 }
@@ -47,19 +54,40 @@ function latestByCall(rows: readonly StructuredCallEvidence[]) {
 }
 
 /** Owns the records and latest-per-call view of Scheduling call evidence. */
-export function createCallEvidence(options: { readonly dataDir?: string } = {}): CallEvidence {
+export function createCallEvidence(options: {
+  readonly dataDir?: string;
+  readonly perMinuteMicroUsd?: number;
+  readonly now?: () => Date;
+} = {}): CallEvidence {
   const dataDir = options.dataDir;
+  const perMinuteMicroUsd = options.perMinuteMicroUsd ?? DIRECT_SIP_MICRO_USD_PER_MINUTE;
+  const now = options.now ?? (() => new Date());
   let rows = dataDir ? loadEvidence(dataDir) : [];
   let latest = latestByCall(rows);
 
   return {
-    record(record: StructuredCallEvidence): void {
-      const copy = { ...record };
+    record(outcome: SessionOutcome, context: CallEvidenceContext): void {
+      const error = boundedErrorCategory(outcome.error);
+      const record: StructuredCallEvidence = {
+        callId: context.callId,
+        connectionRoute: DIRECT_SIP_ROUTE,
+        callerNumberMasked: maskPhoneNumber(context.callerNumber),
+        calledNumber: context.calledNumber,
+        status: outcome.status,
+        durationMs: outcome.durationMs,
+        modelVerified: outcome.modelVerified,
+        reasoningVerified: outcome.reasoningVerified,
+        toolRoundTrips: outcome.toolRoundTrips,
+        estimatedCostMicroUsd: estimateCallCostMicroUsd(outcome.durationMs, perMinuteMicroUsd),
+        durationWarningSent: outcome.durationWarningSent,
+        ...(error ? { error } : {}),
+        recordedAt: now().toISOString(),
+      };
       if (dataDir) {
-        persistEvidence(dataDir, copy);
+        persistEvidence(dataDir, record);
       }
-      rows.push(copy);
-      latest.set(copy.callId, copy);
+      rows.push(record);
+      latest.set(record.callId, record);
     },
     list(): readonly StructuredCallEvidence[] {
       return [...latest.values()].map((row) => ({ ...row }));
@@ -77,11 +105,7 @@ export function createCallEvidence(options: { readonly dataDir?: string } = {}):
   };
 }
 
-// Per-call estimates use the combined direct-SIP rate (voice model plus
-// carrier): an operating target for admission control, not a promise about
-// any carrier's bill.
-
-export function maskPhoneNumber(number: string): string {
+function maskPhoneNumber(number: string): string {
   const digits = number.replace(/\D/g, "");
   if (digits.length < 8) {
     return "***";
@@ -89,16 +113,6 @@ export function maskPhoneNumber(number: string): string {
   const lastFour = digits.slice(-4);
   const country = digits.slice(0, Math.max(1, digits.length - 10));
   return `+${country}***${lastFour}`;
-}
-
-export function estimateCostMicroUsd(
-  durationMs: number,
-  perMinuteMicroUsd: number = DIRECT_SIP_MICRO_USD_PER_MINUTE,
-): number {
-  if (!Number.isFinite(durationMs) || durationMs <= 0) {
-    return 0;
-  }
-  return Math.round((durationMs * perMinuteMicroUsd) / 60_000);
 }
 
 function evidenceFile(dataDir: string): string {
@@ -145,7 +159,7 @@ function isRetainedOperationalRecord(
 }
 
 /** Map session/provider failure text to a closed set of operational categories. */
-export function boundedErrorCategory(error: string | undefined): OperationalErrorCategory | undefined {
+function boundedErrorCategory(error: string | undefined): OperationalErrorCategory | undefined {
   if (!error) {
     return undefined;
   }
