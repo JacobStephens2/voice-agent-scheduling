@@ -23,6 +23,8 @@ function createManager(options: {
   dataDir?: string;
   maxCallDurationMs?: number;
   evidence?: CallEvidence;
+  perMinuteMicroUsd?: number;
+  now?: () => Date;
 }) {
   return createCallLifecycleManager({
     webhookSecret: WEBHOOK_SECRET,
@@ -39,6 +41,8 @@ function createManager(options: {
     },
     dataDir: options.dataDir,
     evidence: options.evidence,
+    perMinuteMicroUsd: options.perMinuteMicroUsd,
+    now: options.now,
     maxCallDurationMs: options.maxCallDurationMs,
     referenceTime: new Date("2026-09-07T14:00:00-04:00"),
   });
@@ -139,10 +143,17 @@ describe("scheduling call lifecycle", () => {
     }
   });
 
-  it("releases a call and settles usage once when evidence append fails, without retrying finalization", async () => {
+  it.each(["append", "projection"])("releases a call and settles usage once before evidence %s fails, without retrying finalization", async (failure) => {
     const dataDir = await mkdtemp(join(tmpdir(), "scheduling-evidence-append-failure-"));
     const sockets: FakeRealtimeSocket[] = [];
-    const evidence = createCallEvidence({ dataDir });
+    let failProjection = false;
+    const recordingStates: Array<{ active: number; reserved: number; spent: number }> = [];
+    const evidence = createCallEvidence({ dataDir, now: () => {
+      const budget = manager.budgetSnapshot();
+      recordingStates.push({ active: manager.activeCallCount(), reserved: budget.reservedMicroUsd, spent: budget.spentMicroUsd });
+      if (failProjection) throw new Error("evidence clock unavailable");
+      return new Date();
+    } });
     const manager = createManager({ sockets, dataDir, evidence });
     const path = join(dataDir, OPERATIONAL_RECORDS_FILE);
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -156,8 +167,12 @@ describe("scheduling call lifecycle", () => {
       await manager.handleWebhook(signedHeaders(incomingCallPayload({ callId: "append-failure" }), {
         webhookId: "evt-append-failure",
       }));
-      rmSync(path);
-      mkdirSync(path);
+      if (failure === "append") {
+        rmSync(path);
+        mkdirSync(path);
+      } else {
+        failProjection = true;
+      }
       vi.setSystemTime(Date.now() + 60_000);
       sockets[1]!.close();
       await vi.waitFor(() => expect(manager.activeCallCount()).toBe(0));
@@ -167,8 +182,15 @@ describe("scheduling call lifecycle", () => {
         spentMicroUsd: spentBefore + 83_200,
       });
       expect(manager.listEvidence()).toEqual(previous);
-      rmSync(path, { recursive: true });
-      writeFileSync(path, previousBytes, { mode: 0o600 });
+      expect(recordingStates).toHaveLength(2);
+      expect(recordingStates[1]).toEqual({ active: 0, reserved: 0, spent: spentBefore + 83_200 });
+      if (failure === "append") {
+        rmSync(path, { recursive: true });
+        writeFileSync(path, previousBytes, { mode: 0o600 });
+      } else {
+        expect(readFileSync(path, "utf8")).toBe(previousBytes);
+        failProjection = false;
+      }
       expect(createCallEvidence({ dataDir }).list()).toEqual(previous);
 
       await manager.handleWebhook(signedHeaders(incomingCallPayload({ callId: "append-after" }), {
@@ -176,11 +198,41 @@ describe("scheduling call lifecycle", () => {
       }));
       sockets[2]!.close();
       await recordedEvidence(() => manager.listEvidence(), "append-after");
+      expect(recordingStates).toHaveLength(3);
       expect(manager.listEvidence().map((row) => row.callId)).toEqual(["append-before", "append-after"]);
     } finally {
       for (const socket of sockets) socket.close();
       vi.useRealTimers();
       rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])("uses the configured fallback rate and preserves a supplied evidence owner's settings (supplied: %s)", async (supplied) => {
+    const sockets: FakeRealtimeSocket[] = [];
+    const ownerTime = new Date("2026-11-01T12:00:00.000Z");
+    const evidence = supplied ? createCallEvidence({ perMinuteMicroUsd: 60_000, now: () => ownerTime }) : undefined;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-17T12:00:00.000Z"));
+    const manager = createManager({
+      sockets,
+      evidence,
+      perMinuteMicroUsd: 120_000,
+      now: () => new Date("2026-11-02T12:00:00.000Z"),
+    });
+    try {
+      await manager.handleWebhook(signedHeaders(incomingCallPayload({ callId: "configured-rate" })));
+      vi.setSystemTime(new Date("2026-11-17T12:01:00.000Z"));
+      sockets[0]!.close();
+      const record = await recordedEvidence(() => manager.listEvidence(), "configured-rate");
+      expect(record).toMatchObject({
+        durationMs: 60_000,
+        estimatedCostMicroUsd: supplied ? 60_000 : 120_000,
+        recordedAt: supplied ? ownerTime.toISOString() : "2026-11-17T12:01:00.000Z",
+      });
+      expect(manager.budgetSnapshot()).toMatchObject({ spentMicroUsd: 120_000, reservedMicroUsd: 0 });
+    } finally {
+      for (const socket of sockets) socket.close();
+      vi.useRealTimers();
     }
   });
 
