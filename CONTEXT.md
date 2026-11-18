@@ -42,7 +42,7 @@ The caller's explicit agreement to the appointment details read back by the sche
 _Avoid_: Booking success
 
 **Appointment proposal**:
-The current Scheduling call's chosen Appointment details awaiting complete Readback and Booking confirmation; a valid replacement receives a new identity and resets Readback completion.
+The current Scheduling call's chosen Appointment details awaiting complete Readback and Booking confirmation; a valid replacement receives a new identity and resets Readback completion. Its transient details belong to one Scheduling call and are released when that call ends, after any confirmation requests accepted before the end have settled.
 
 **Readback**:
 The scheduling agent's complete spoken repetition of the current Appointment proposal's returned fields before asking for Booking confirmation.

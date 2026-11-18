@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
-import { createAppointmentBooking, type BookingToolResult } from "../src/calendar/booking-tool.js";
-import { assistantResponseEvents, completeReadback, fakeGoogleCalendar, readbackText, TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
+import { createAppointmentBooking, type AppointmentBookingCall, type BookingToolResult } from "../src/calendar/booking-tool.js";
+import { completeReadback, fakeGoogleCalendar, TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
 
 const MONDAY_14H = new Date("2026-09-07T14:00:00-04:00");
 const SELECTION = {
@@ -39,64 +39,27 @@ function bookingWith(
 }
 
 async function proposedOn(
-  booking: ReturnType<typeof createAppointmentBooking>,
+  call: AppointmentBookingCall,
   extra: Record<string, unknown> = {},
-  callId = CALL_ID,
 ) {
-  return booking.execute("propose_appointment", { ...PROPOSE_ARGS, ...extra }, { callId });
+  return call.execute("propose_appointment", { ...PROPOSE_ARGS, ...extra });
 }
 
 async function confirmCurrent(
-  booking: ReturnType<typeof createAppointmentBooking>,
+  call: AppointmentBookingCall,
   proposed: BookingToolResult,
   extra: Record<string, unknown> = {},
-  callId = CALL_ID,
 ) {
-  completeReadback(booking, callId, proposed);
+  completeReadback(call, proposed);
   const proposalId = "proposalId" in proposed ? proposed.proposalId : undefined;
-  return booking.execute(
-    "confirm_appointment",
-    { confirmed: true, proposalId, ...extra },
-    { callId },
-  );
+  return call.execute("confirm_appointment", { confirmed: true, proposalId, ...extra });
 }
 
 describe("appointment booking tool", () => {
-  it("finishes an authorized write when its handle closes before the final insertion recheck", async () => {
-    const google = fakeGoogleCalendar({});
-    let release!: () => void;
-    let reached!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const started = new Promise<void>((resolve) => { reached = resolve; });
-    const booking = bookingWith({ ...google, fetchFn: async (input, init) => {
-      if (String(input).includes("/freeBusy")) {
-        reached();
-        await gate;
-      }
-      return google.fetchFn(input, init);
-    } });
-    const proposed = await proposedOn(booking);
-    if (proposed.status !== "proposed" || !proposed.readback) {
-      throw new Error("Expected Readback fields");
-    }
-    const handle = booking.openReadback(CALL_ID);
-    for (const event of assistantResponseEvents({ responseId: "authorized", transcriptDelta: readbackText(proposed.readback) })) {
-      handle.observe(event);
-    }
-    const pending = booking.execute("confirm_appointment", {
-      confirmed: true, proposalId: proposed.proposalId,
-    }, { callId: CALL_ID });
-    await started;
-    handle.close();
-    handle.close();
-    release();
-    expect(await pending).toMatchObject({ status: "booked", eventExists: true });
-    expect(google.writes).toHaveLength(1);
-  });
-
   it("proposes a chosen appointment with a confirmed callback number and does not write", async () => {
     const google = fakeGoogleCalendar({});
     const booking = bookingWith(google);
+    const call = booking.openCall({ callId: CALL_ID });
 
     const names = booking.definitions().map((tool) => tool.name);
     expect(names).toContain("propose_appointment");
@@ -107,18 +70,14 @@ describe("appointment booking tool", () => {
     expect(propertyNames).not.toContain("email");
     expect(propertyNames).not.toContain("emailAddress");
 
-    const result = await booking.execute(
-      "propose_appointment",
-      {
-        callerName: "Ada Lovelace",
-        callbackNumber: "555-123-9876",
-        callbackConfirmed: true,
-        date: "2026-09-11",
-        startTime: "10:00",
-        purpose: "Website review",
-      },
-      { callId: CALL_ID },
-    );
+    const result = await call.execute("propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "555-123-9876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+      purpose: "Website review",
+    });
 
     expect(result).toMatchObject({
       status: "proposed",
@@ -144,22 +103,15 @@ describe("appointment booking tool", () => {
   it("creates no event when the readback was not finished or the proposalId is stale", async () => {
     const google = fakeGoogleCalendar({});
     const booking = bookingWith(google);
-    const proposed = await proposedOn(booking);
+    const call = booking.openCall({ callId: CALL_ID });
+    const proposed = await proposedOn(call);
 
-    const interrupted = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId },
-      { callId: CALL_ID },
-    );
+    const interrupted = await call.execute("confirm_appointment", { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId });
     expect(interrupted.status).toBe("readback_incomplete");
     expect(google.writes).toEqual([]);
 
-    completeReadback(booking, CALL_ID, proposed);
-    const stale = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true, proposalId: "not-the-current-proposal" },
-      { callId: CALL_ID },
-    );
+    completeReadback(call, proposed);
+    const stale = await call.execute("confirm_appointment", { confirmed: true, proposalId: "not-the-current-proposal" });
     expect(stale.status).toBe("readback_incomplete");
     expect(google.writes).toEqual([]);
   });
@@ -167,22 +119,18 @@ describe("appointment booking tool", () => {
   it("does not insert when the current proposal is replaced before the calendar write", async () => {
     const google = fakeGoogleCalendar({});
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-bookings-"));
-    let booking: ReturnType<typeof createAppointmentBooking> | undefined;
+    let call: AppointmentBookingCall | undefined;
     let replacedProposalId: string | undefined;
     const fetchFn: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.includes("/freeBusy") && booking && !replacedProposalId) {
-        const replaced = await booking.execute(
-          "propose_appointment",
-          {
-            callerName: "Grace Hopper",
-            callbackNumber: "+15559876543",
-            callbackConfirmed: true,
-            date: "2026-09-11",
-            startTime: "14:00",
-          },
-          { callId: CALL_ID },
-        );
+      if (url.includes("/freeBusy") && call && !replacedProposalId) {
+        const replaced = await call.execute("propose_appointment", {
+          callerName: "Grace Hopper",
+          callbackNumber: "+15559876543",
+          callbackConfirmed: true,
+          date: "2026-09-11",
+          startTime: "14:00",
+        });
         if (replaced.status !== "proposed" || !("proposalId" in replaced) || !replaced.proposalId) {
           throw new Error("replacement proposal was not stored");
         }
@@ -190,7 +138,7 @@ describe("appointment booking tool", () => {
       }
       return google.fetchFn(input, init);
     };
-    booking = createAppointmentBooking({
+    const booking = createAppointmentBooking({
       fetchFn,
       tokenProvider: TOKEN_PROVIDER,
       selection: SELECTION,
@@ -199,14 +147,11 @@ describe("appointment booking tool", () => {
       createIds: () => ({ operationId: TEST_OPERATION_ID, eventId: TEST_EVENT_ID }),
       allowWrites: true,
     });
+    call = booking.openCall({ callId: CALL_ID });
 
-    const proposed = await proposedOn(booking);
-    completeReadback(booking, CALL_ID, proposed);
-    const result = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId },
-      { callId: CALL_ID },
-    );
+    const proposed = await proposedOn(call);
+    completeReadback(call, proposed);
+    const result = await call.execute("confirm_appointment", { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId });
 
     expect(replacedProposalId).toEqual(expect.any(String));
     expect(result).toMatchObject({
@@ -228,11 +173,7 @@ describe("appointment booking tool", () => {
     expect(stored).not.toContain("+15551239876");
     expect(stored).not.toContain("15551239876");
 
-    const originalAfterReplacement = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId },
-      { callId: CALL_ID },
-    );
+    const originalAfterReplacement = await call.execute("confirm_appointment", { confirmed: true, proposalId: (proposed as { proposalId?: string }).proposalId });
     expect(originalAfterReplacement.status).toBe("readback_incomplete");
     expect(originalAfterReplacement.message).toContain("does not match the current proposal");
     expect(google.writes).toEqual([]);
@@ -260,15 +201,17 @@ describe("appointment booking tool", () => {
       if (String(input).includes("/freeBusy")) availabilityReads += 1;
       return google.fetchFn(input, init);
     } }, { dataDir });
-    const original = await proposedOn(booking);
-    completeReadback(booking, CALL_ID, original);
+    const call = booking.openCall({ callId: CALL_ID });
+    const original = await proposedOn(call);
+    completeReadback(call, original);
     const reconciliation = booking.reconcileUnresolvedOperations();
     await reading;
-    const queued = booking.execute("confirm_appointment", {
+    const queued = call.execute("confirm_appointment", {
       confirmed: true, proposalId: "proposalId" in original ? original.proposalId : undefined,
-    }, { callId: CALL_ID });
-    const replacement = await proposedOn(booking, { startTime: "14:00" });
-    completeReadback(booking, CALL_ID, replacement);
+    });
+    const replacement = await proposedOn(call, { startTime: "14:00" });
+    completeReadback(call, replacement);
+    call.close();
     release();
     await reconciliation;
     expect(await queued).toMatchObject({
@@ -281,8 +224,9 @@ describe("appointment booking tool", () => {
   it("does not write when calendar writes are disabled on this deployment", async () => {
     const google = fakeGoogleCalendar({});
     const booking = bookingWith(google, { allowWrites: false });
-    const proposed = await proposedOn(booking);
-    const result = await confirmCurrent(booking, proposed);
+    const call = booking.openCall({ callId: CALL_ID });
+    const proposed = await proposedOn(call);
+    const result = await confirmCurrent(call, proposed);
     expect(result.status).toBe("failed");
     expect(result.message).toContain("not enabled");
     expect(google.writes).toEqual([]);
@@ -291,9 +235,10 @@ describe("appointment booking tool", () => {
   it("creates one stored appointment after explicit confirmation and only then reports success", async () => {
     const google = fakeGoogleCalendar({});
     const booking = bookingWith(google);
+    const call = booking.openCall({ callId: CALL_ID });
 
-    const proposed = await proposedOn(booking, { purpose: "Website review" });
-    const result = await confirmCurrent(booking, proposed);
+    const proposed = await proposedOn(call, { purpose: "Website review" });
+    const result = await confirmCurrent(call, proposed);
 
     expect(result).toMatchObject({
       status: "booked",
@@ -306,7 +251,7 @@ describe("appointment booking tool", () => {
     expect(result.message).toContain("+15551239876");
     expect(google.writes).toHaveLength(1);
 
-    const again = await confirmCurrent(booking, proposed);
+    const again = await confirmCurrent(call, proposed);
     expect(again).toMatchObject({
       status: "booked",
       operationId: TEST_OPERATION_ID,
@@ -328,9 +273,10 @@ describe("appointment booking tool", () => {
       },
     });
     const booking = bookingWith(google);
+    const call = booking.openCall({ callId: CALL_ID });
 
-    const proposed = await proposedOn(booking);
-    const result = await confirmCurrent(booking, proposed);
+    const proposed = await proposedOn(call);
+    const result = await confirmCurrent(call, proposed);
     expect(result.status).toBe("unavailable");
     expect(result).toMatchObject({ eventExists: false });
     expect(result.message).toContain("no longer available");
@@ -360,23 +306,24 @@ describe("appointment booking tool", () => {
       }
       return google.fetchFn(input, init);
     } });
-    const original = await proposedOn(booking);
-    const pending = confirmCurrent(booking, original);
+    const call = booking.openCall({ callId: CALL_ID });
+    const original = await proposedOn(call);
+    const pending = confirmCurrent(call, original);
     await reading;
-    const replacement = await proposedOn(booking, { startTime: "14:00" });
+    const replacement = await proposedOn(call, { startTime: "14:00" });
     release();
     expect(await pending).toMatchObject({ status: "unavailable", eventExists: false });
     expect(google.writes).toEqual([]);
 
-    const confirmReplacement = () => booking.execute("confirm_appointment", {
+    const confirmReplacement = () => call.execute("confirm_appointment", {
       confirmed: true,
       proposalId: "proposalId" in replacement ? replacement.proposalId : undefined,
-    }, { callId: CALL_ID });
+    });
     expect(await confirmReplacement()).toMatchObject({
       status: "readback_incomplete",
       message: "The readback is not finished. Complete the full readback without interruption before confirming. Do not create the appointment.",
     });
-    completeReadback(booking, CALL_ID, replacement);
+    completeReadback(call, replacement);
     expect(await confirmReplacement()).toMatchObject({ status: "booked", eventExists: true });
     expect(await confirmReplacement()).toMatchObject({ status: "booked", eventExists: true });
     expect(google.writes).toHaveLength(1);
@@ -387,9 +334,10 @@ describe("appointment booking tool", () => {
     const google = fakeGoogleCalendar({});
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-bookings-"));
     const booking = bookingWith(google, { dataDir });
+    const call = booking.openCall({ callId: CALL_ID });
 
-    const proposed = await proposedOn(booking, { purpose: "Website review" });
-    await confirmCurrent(booking, proposed);
+    const proposed = await proposedOn(call, { purpose: "Website review" });
+    await confirmCurrent(call, proposed);
 
     expect(createAppointmentLedger({ dataDir }).latestForOperation(TEST_OPERATION_ID)).toMatchObject({
       eventId: TEST_EVENT_ID,

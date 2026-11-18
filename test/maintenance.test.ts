@@ -180,26 +180,19 @@ async function proposeAndConfirm(
     startTime?: string;
   },
 ) {
-  const proposed = await booking.execute(
-    "propose_appointment",
-    {
-      callerName: options.callerName ?? CALLER_NAME,
-      callbackNumber: options.callbackNumber ?? CALLBACK_NUMBER,
-      callbackConfirmed: true,
-      date: options.date ?? FRIDAY_DATE,
-      startTime: options.startTime ?? "10:00",
-    },
-    { callId: options.callId },
-  );
+  const call = booking.openCall({ callId: options.callId });
+  const proposed = await call.execute("propose_appointment", {
+    callerName: options.callerName ?? CALLER_NAME,
+    callbackNumber: options.callbackNumber ?? CALLBACK_NUMBER,
+    callbackConfirmed: true,
+    date: options.date ?? FRIDAY_DATE,
+    startTime: options.startTime ?? "10:00",
+  });
   if (proposed.status !== "proposed" || !proposed.proposalId) {
     return proposed;
   }
-  completeReadback(booking, options.callId, proposed);
-  return booking.execute(
-    "confirm_appointment",
-    { confirmed: true, proposalId: proposed.proposalId },
-    { callId: options.callId },
-  );
+  completeReadback(call, proposed);
+  return call.execute("confirm_appointment", { confirmed: true, proposalId: proposed.proposalId });
 }
 
 function createManager(options: {

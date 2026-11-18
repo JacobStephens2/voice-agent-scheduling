@@ -1,4 +1,3 @@
-import type { ReadbackHandle } from "./calendar/booking-readback.js";
 import { SCHEDULING_TIMEZONE } from "./calendar/policy.js";
 
 export interface ToolDefinition {
@@ -29,13 +28,17 @@ export interface BookingReconciliation {
 
 export interface BookingTool {
   definitions(): readonly ToolDefinition[];
+  openCall(options: { callId: string; referenceTime?: Date }): BookingCall;
+  reconcileUnresolvedOperations?(): Promise<readonly BookingReconciliation[]>;
+}
+
+export interface BookingCall {
   execute(
     name: string,
     args: Record<string, unknown>,
-    options: { callId: string; referenceTime?: Date },
   ): unknown | Promise<unknown>;
-  openReadback?(callId: string): ReadbackHandle;
-  reconcileUnresolvedOperations?(): Promise<readonly BookingReconciliation[]>;
+  observe(event: Readonly<Record<string, unknown>>): void;
+  close(): void;
 }
 
 export interface RealtimeSocket {
@@ -221,7 +224,7 @@ async function toolOutputMessages(
   options: {
     availabilityTool: AvailabilityTool;
     booking?: BookingTool;
-    callId: string;
+    bookingCall?: BookingCall;
     referenceTime: Date | undefined;
     isCutoffReached: () => boolean;
     callLimitLabel: string;
@@ -245,11 +248,8 @@ async function toolOutputMessages(
     return functionOutputMessages(event.call_id, result);
   }
   const bookingNames = new Set(options.booking?.definitions().map((tool) => tool.name) ?? []);
-  if (options.booking && bookingNames.has(event.name)) {
-    const result = await options.booking.execute(event.name, args, {
-      callId: options.callId,
-      referenceTime: options.referenceTime,
-    });
+  if (options.bookingCall && bookingNames.has(event.name)) {
+    const result = await options.bookingCall.execute(event.name, args);
     return functionOutputMessages(event.call_id, result);
   }
   return undefined;
@@ -313,14 +313,17 @@ export function createTelephoneSession(options: {
         let warningTimeout: NodeJS.Timeout | undefined;
         const maxDurationMs = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS;
         const warningLeadMs = options.warningLeadMs ?? DEFAULT_WARNING_LEAD_MS;
-        const readback = options.booking?.openReadback?.(options.callId);
+        const bookingCall = options.booking?.openCall({
+          callId: options.callId,
+          referenceTime: options.referenceTime,
+        });
 
         const finish = (status: "completed" | "failed", error?: string) => {
           if (finished) {
             return;
           }
           finished = true;
-          readback?.close();
+          bookingCall?.close();
           if (timeout) {
             clearTimeout(timeout);
           }
@@ -401,7 +404,7 @@ export function createTelephoneSession(options: {
           }
 
           if (event.type.startsWith("response.output_audio_transcript")) {
-            readback?.observe(event);
+            bookingCall?.observe(event);
             return;
           }
 
@@ -452,7 +455,7 @@ export function createTelephoneSession(options: {
               break;
             }
             case "response.done": {
-              readback?.observe(event);
+              bookingCall?.observe(event);
               break;
             }
             case "response.function_call_arguments.done": {
@@ -466,7 +469,7 @@ export function createTelephoneSession(options: {
                 {
                   availabilityTool: options.availabilityTool,
                   booking: options.booking,
-                  callId: options.callId,
+                  bookingCall,
                   referenceTime: options.referenceTime,
                   isCutoffReached: () => cutoffReached,
                   callLimitLabel: limitLabel,

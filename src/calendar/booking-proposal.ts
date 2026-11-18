@@ -35,32 +35,28 @@ export type ConfirmationEligibility =
   | { readonly status: "readback_incomplete"; readonly message: string };
 
 export interface AppointmentProposals {
-  propose(
-    args: Record<string, unknown>,
-    options: { readonly callId: string; readonly referenceTime?: Date },
-  ): ProposeResult;
-  openReadback(callId: string): ReadbackHandle;
-  checkConfirmation(
-    args: Record<string, unknown>,
-    options: { readonly callId: string },
-  ): ConfirmationEligibility;
+  propose(args: Record<string, unknown>): ProposeResult;
+  openReadback(): ReadbackHandle;
+  checkConfirmation(args: Record<string, unknown>): ConfirmationEligibility;
   currentForInsert(captured: AppointmentProposal): AppointmentProposal | undefined;
   discard(captured: AppointmentProposal): void;
+  clear(): void;
 }
 
-/** Owns transient proposals and the complete call-scoped confirmation protocol. */
-export function createAppointmentProposals(options: { readonly now: () => Date }): AppointmentProposals {
-  const proposals = new Map<string, { proposal: AppointmentProposal; readbackFinished: boolean }>();
+/** Owns one call's transient proposal and Booking confirmation eligibility. */
+export function createAppointmentProposals(options: {
+  readonly callId: string;
+  readonly referenceTime?: Date;
+  readonly now: () => Date;
+}): AppointmentProposals {
+  let current: { proposal: AppointmentProposal; readbackFinished: boolean } | undefined;
   return {
-    propose(args, execOptions) {
-      const validated = validateProposal(args, {
-        ...execOptions,
-        now: options.now,
-      });
+    propose(args) {
+      const validated = validateProposal(args, options);
       if ("status" in validated) {
         return validated;
       }
-      proposals.set(validated.callId, { proposal: validated, readbackFinished: false });
+      current = { proposal: validated, readbackFinished: false };
       const { proposalId, callId: _callId, ...readback } = validated;
       const purposeLine = validated.purpose ? ` Purpose: ${validated.purpose}.` : "";
       return {
@@ -70,11 +66,10 @@ export function createAppointmentProposals(options: { readonly now: () => Date }
         message: `Please read back: ${validated.callerName}, callback ${validated.callbackNumber}, ${validated.date} ${validated.startTime}–${validated.endTime} ${SCHEDULING_TIMEZONE}.${purposeLine} Wait for explicit agreement before confirming.`,
       };
     },
-    openReadback(callId) {
+    openReadback() {
       const readback = createBookingReadback();
       return {
         observe(event) {
-          const current = proposals.get(callId);
           if (readback.observe(event, current?.proposal) && current) {
             current.readbackFinished = true;
           }
@@ -84,8 +79,7 @@ export function createAppointmentProposals(options: { readonly now: () => Date }
         },
       };
     },
-    checkConfirmation(args, { callId }) {
-      const current = proposals.get(callId);
+    checkConfirmation(args) {
       if (!current) {
         return {
           status: "readback_incomplete",
@@ -116,17 +110,22 @@ export function createAppointmentProposals(options: { readonly now: () => Date }
       return { status: "eligible", proposal: { ...current.proposal } };
     },
     currentForInsert(captured) {
-      const current = proposals.get(captured.callId);
-      if (current?.proposal.proposalId !== captured.proposalId || !current.readbackFinished) {
+      if (
+        captured.callId !== options.callId ||
+        current?.proposal.proposalId !== captured.proposalId ||
+        !current.readbackFinished
+      ) {
         return undefined;
       }
       return { ...current.proposal };
     },
     discard(captured) {
-      const current = proposals.get(captured.callId);
-      if (current?.proposal.proposalId === captured.proposalId) {
-        proposals.delete(captured.callId);
+      if (captured.callId === options.callId && current?.proposal.proposalId === captured.proposalId) {
+        current = undefined;
       }
+    },
+    clear() {
+      current = undefined;
     },
   };
 }
