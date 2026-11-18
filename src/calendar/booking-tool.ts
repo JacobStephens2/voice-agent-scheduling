@@ -6,12 +6,12 @@ import {
   type AccessTokenProvider,
   type GoogleOAuthCredentials,
 } from "./auth.js";
+import type { AppointmentProposals, ProposeResult } from "./booking-proposal.js";
 import {
-  createAppointmentProposals,
-  type AppointmentProposals,
-  type ProposeResult,
-} from "./booking-proposal.js";
-import type { ReadbackHandle } from "./booking-readback.js";
+  createAppointmentBookingCall,
+  type AppointmentBookingCall,
+  type BookingCallOptions,
+} from "./booking-call.js";
 import {
   createAppointmentLedger,
   isUnresolvedBookingStatus,
@@ -34,6 +34,7 @@ import {
 import { loadSelection, requiredCalendarIds, type CalendarSelection } from "./selection.js";
 
 export type { AppointmentProposal, ProposeResult } from "./booking-proposal.js";
+export type { AppointmentBookingCall } from "./booking-call.js";
 
 export interface BookingIds {
   readonly operationId: string;
@@ -83,12 +84,7 @@ export interface AppointmentBooking {
       readonly required: readonly string[];
     };
   }>;
-  execute(
-    name: string,
-    args: Record<string, unknown>,
-    options: { callId: string; referenceTime?: Date },
-  ): Promise<BookingToolResult>;
-  openReadback(callId: string): ReadbackHandle;
+  openCall(options: BookingCallOptions): AppointmentBookingCall;
   /**
    * Reconcile every pending/inconclusive durable operation against its
    * stored event identity. Establishes a single matching event or a
@@ -137,7 +133,6 @@ export function createAppointmentBooking(
   const tokenProvider =
     options.tokenProvider ??
     (explicitCredentials ? createTokenProvider(explicitCredentials, fetchFn) : undefined);
-  const proposals = createAppointmentProposals({ now });
   const ledger = options.ledger ?? createAppointmentLedger({ dataDir: options.dataDir });
   let queue: Promise<unknown> = Promise.resolve();
 
@@ -214,32 +209,24 @@ export function createAppointmentBooking(
       ];
     },
 
-    async execute(name, args, execOptions): Promise<BookingToolResult> {
-      if (name === "propose_appointment") {
-        return proposals.propose(args, execOptions);
-      }
-      if (name === "confirm_appointment") {
-        return enqueue(() =>
-          confirm(args, execOptions, {
-            proposals,
-            ledger,
-            fetchFn,
-            now,
-            createIds,
-            tokenProvider,
-            selection: explicitSelection,
-            allowWrites: options.allowWrites === true,
-          }),
-        );
-      }
-      return {
-        status: "failed",
-        message: "Unknown booking tool.",
-      };
-    },
-
-    openReadback(callId) {
-      return proposals.openReadback(callId);
+    openCall(execOptions) {
+      return createAppointmentBookingCall({
+        ...execOptions,
+        now,
+        confirm: (args, proposals) =>
+          enqueue(() =>
+            confirm(args, execOptions, {
+              proposals,
+              ledger,
+              fetchFn,
+              now,
+              createIds,
+              tokenProvider,
+              selection: explicitSelection,
+              allowWrites: options.allowWrites === true,
+            }),
+          ),
+      });
     },
 
     reconcileUnresolvedOperations() {
@@ -279,7 +266,7 @@ async function confirm(
     allowWrites: boolean;
   },
 ): Promise<ConfirmResult> {
-  const eligibility = ctx.proposals.checkConfirmation(args, execOptions);
+  const eligibility = ctx.proposals.checkConfirmation(args);
   if (eligibility.status === "readback_incomplete") {
     return eligibility;
   }

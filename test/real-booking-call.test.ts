@@ -1,9 +1,9 @@
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
-import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
+import { createAppointmentBooking, type BookingToolResult } from "../src/calendar/booking-tool.js";
 import { createCalendarAvailabilityTool } from "../src/calendar/availability-tool.js";
 import { createCallLifecycleManager } from "../src/lifecycle.js";
 import { FakeRealtimeSocket } from "./fake-socket.js";
@@ -26,10 +26,13 @@ const SELECTION = {
   updatedAt: "2026-09-07T00:00:00.000Z",
 };
 
+afterEach(() => vi.useRealTimers());
+
 function createBookingManager(
   sockets: FakeRealtimeSocket[],
   google: ReturnType<typeof fakeGoogleCalendar>,
   fetchFn: typeof fetch = google.fetchFn,
+  maxCallDurationMs?: number,
 ) {
   const dataDir = mkdtempSync(join(tmpdir(), "scheduling-booking-call-"));
   const tokenProvider = { getAccessToken: async () => "test-access-token" };
@@ -42,6 +45,7 @@ function createBookingManager(
     createIds: () => ({ operationId: TEST_OPERATION_ID, eventId: TEST_EVENT_ID }),
     allowWrites: true,
   });
+  const executions: Promise<BookingToolResult>[] = [];
   const manager = createCallLifecycleManager({
     webhookSecret: WEBHOOK_SECRET,
     apiKey: "test-xai-key",
@@ -52,7 +56,14 @@ function createBookingManager(
       selection: SELECTION,
       now: () => REFERENCE_TIME,
     }),
-    booking,
+    booking: { ...booking, openCall(options) {
+      const call = booking.openCall(options);
+      return { ...call, execute(name, args) {
+        const result = call.execute(name, args);
+        executions.push(result);
+        return result;
+      } };
+    } },
     connectWebSocket: (url, headers) => {
       const socket = new FakeRealtimeSocket(url, headers);
       sockets.push(socket);
@@ -60,8 +71,9 @@ function createBookingManager(
     },
     hangupCall: async () => undefined,
     referenceTime: REFERENCE_TIME,
+    maxCallDurationMs,
   });
-  return { manager, booking, dataDir };
+  return { manager, booking, dataDir, executions };
 }
 
 describe("controlled inbound call with appointment booking", () => {
@@ -384,10 +396,12 @@ describe("controlled inbound call with appointment booking", () => {
     });
   });
 
-  it("completes an accepted write even if the call disconnects mid-insert", async () => {
+  it.each(["disconnect", "cutoff"] as const)("durably completes an accepted write after %s mid-insert", async (ending) => {
+    vi.useFakeTimers();
     const sockets: FakeRealtimeSocket[] = [];
     const google = fakeGoogleCalendar({});
-    let insertStarted = false;
+    let reachedInsert!: () => void;
+    const insertStarted = new Promise<void>((resolve) => { reachedInsert = resolve; });
     let releaseInsert!: () => void;
     const insertGate = new Promise<void>((resolve) => {
       releaseInsert = resolve;
@@ -396,25 +410,26 @@ describe("controlled inbound call with appointment booking", () => {
       const target = String(url);
       const method = (init as RequestInit | undefined)?.method ?? "GET";
       if (target.includes("/events") && method === "POST") {
-        insertStarted = true;
+        reachedInsert();
         await insertGate;
       }
       return google.fetchFn(target, init as RequestInit);
     }) as typeof fetch;
-    const { manager, dataDir } = createBookingManager(sockets, google, gatedFetch);
+    const { manager, dataDir, executions } = createBookingManager(sockets, google, gatedFetch, 1000);
 
     const socket = await openTelephoneSession(sockets, manager, {
       callId: "call-book-disconnect",
       webhookId: "evt_book_disconnect",
     });
-    await toolRoundTrip(socket, "tool-1", "propose_appointment", {
+    socket.receive({ type: "response.function_call_arguments.done", call_id: "tool-1", name: "propose_appointment", arguments: JSON.stringify({
       callerName: "Ada Lovelace",
       callbackNumber: "+15551239876",
       callbackConfirmed: true,
       date: "2026-09-11",
       startTime: "10:00",
-    });
-    const proposed = toolOutputs(socket)[0] as { proposalId?: string };
+    }) });
+    const proposed = await executions[0];
+    if (proposed?.status !== "proposed") throw new Error("Expected Appointment proposal");
     receiveAssistantResponse(socket, {
       responseId: "resp-disconnect",
       payloadTranscript:
@@ -426,24 +441,16 @@ describe("controlled inbound call with appointment booking", () => {
       name: "confirm_appointment",
       arguments: JSON.stringify({ confirmed: true, proposalId: proposed.proposalId }),
     });
-    const deadline = Date.now() + 1000;
-    while (!insertStarted && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    expect(insertStarted).toBe(true);
+    await insertStarted;
 
     expect(
       createAppointmentLedger({ dataDir }).latestForOperation(TEST_OPERATION_ID)?.status,
     ).toBe("pending");
 
-    socket.close();
+    if (ending === "disconnect") socket.close();
+    else await vi.advanceTimersByTimeAsync(1000);
     releaseInsert();
-
-    const outputsDeadline = Date.now() + 2000;
-    while (toolOutputs(socket).length < 2 && Date.now() < outputsDeadline) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    expect(toolOutputs(socket)[1]).toMatchObject({
+    expect(await executions[1]).toMatchObject({
       status: "booked",
       operationId: TEST_OPERATION_ID,
       eventId: TEST_EVENT_ID,

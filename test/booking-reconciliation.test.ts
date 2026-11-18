@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAppointmentLedger, type AppointmentLedger } from "../src/calendar/appointment-ledger.js";
-import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
+import { createAppointmentBooking, type AppointmentBookingCall } from "../src/calendar/booking-tool.js";
 import { completeReadback, TEST_EVENT_ID, TEST_OPERATION_ID } from "./helpers.js";
 
 const MONDAY_14H = new Date("2026-09-07T14:00:00-04:00");
@@ -116,28 +116,22 @@ function bookingWith(
 }
 
 async function propose(
-  booking: ReturnType<typeof createAppointmentBooking>,
+  call: AppointmentBookingCall,
   extra: Record<string, unknown> = {},
-  callId = CALL_ID,
 ) {
-  const result = await booking.execute(
-    "propose_appointment",
-    { ...PROPOSE_ARGS, ...extra },
-    { callId },
-  );
+  const result = await call.execute("propose_appointment", { ...PROPOSE_ARGS, ...extra });
   if (result.status !== "proposed" || !("proposalId" in result) || !result.proposalId) {
     throw new Error(`Expected a proposal, got ${result.status}`);
   }
-  completeReadback(booking, callId, result);
+  completeReadback(call, result);
   return result.proposalId as string;
 }
 
 async function confirm(
-  booking: ReturnType<typeof createAppointmentBooking>,
+  call: AppointmentBookingCall,
   proposalId: string,
-  callId = CALL_ID,
 ) {
-  return booking.execute("confirm_appointment", { confirmed: true, proposalId }, { callId });
+  return call.execute("confirm_appointment", { confirmed: true, proposalId });
 }
 
 function latestRecord(dataDir: string, operationId: string) {
@@ -158,8 +152,9 @@ describe("confirmed booking reconciliation", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-reconcile-"));
     const booking = bookingWith(calendar, dataDir);
 
-    const proposalId = await propose(booking);
-    const result = await confirm(booking, proposalId);
+    const call = booking.openCall({ callId: CALL_ID });
+    const proposalId = await propose(call);
+    const result = await confirm(call, proposalId);
 
     expect(result).toMatchObject({
       status: "booked",
@@ -170,7 +165,7 @@ describe("confirmed booking reconciliation", () => {
     expect(result.message).toContain("Jacob will call");
     expect(calendar.posts).toHaveLength(1);
 
-    const again = await confirm(booking, proposalId);
+    const again = await confirm(call, proposalId);
     expect(again).toMatchObject({
       status: "booked",
       operationId: TEST_OPERATION_ID,
@@ -193,8 +188,9 @@ describe("confirmed booking reconciliation", () => {
       return { operationId: `op-${created}`, eventId: `ev-${created}` };
     });
 
-    const proposalId = await propose(booking);
-    const uncertain = await confirm(booking, proposalId);
+    const call = booking.openCall({ callId: CALL_ID });
+    const proposalId = await propose(call);
+    const uncertain = await confirm(call, proposalId);
 
     expect(uncertain).toMatchObject({
       status: "inconclusive",
@@ -208,7 +204,7 @@ describe("confirmed booking reconciliation", () => {
     calendar.state.postBehavior = "ok";
     calendar.state.recordPost = true;
     calendar.state.getBehavior = "stored";
-    const retried = await confirm(booking, proposalId);
+    const retried = await confirm(call, proposalId);
 
     expect(retried).toMatchObject({
       status: "booked",
@@ -231,8 +227,9 @@ describe("confirmed booking reconciliation", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-reconcile-"));
     const booking = bookingWith(calendar, dataDir);
 
-    const proposalId = await propose(booking);
-    const result = await confirm(booking, proposalId);
+    const call = booking.openCall({ callId: CALL_ID });
+    const proposalId = await propose(call);
+    const result = await confirm(call, proposalId);
 
     expect(result).toMatchObject({
       status: "inconclusive",
@@ -249,10 +246,11 @@ describe("confirmed booking reconciliation", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-reconcile-"));
     const booking = bookingWith(calendar, dataDir);
 
-    const proposalId = await propose(booking);
+    const call = booking.openCall({ callId: CALL_ID });
+    const proposalId = await propose(call);
     const [first, second] = await Promise.all([
-      booking.execute("confirm_appointment", { confirmed: true, proposalId }, { callId: CALL_ID }),
-      booking.execute("confirm_appointment", { confirmed: true, proposalId }, { callId: CALL_ID }),
+      call.execute("confirm_appointment", { confirmed: true, proposalId }),
+      call.execute("confirm_appointment", { confirmed: true, proposalId }),
     ]);
 
     expect(first).toMatchObject({ status: "booked", eventExists: true });
@@ -273,8 +271,9 @@ describe("confirmed booking reconciliation", () => {
     });
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-reconcile-"));
     const beforeCrash = bookingWith(calendar, dataDir);
-    const proposalId = await propose(beforeCrash);
-    const uncertain = await confirm(beforeCrash, proposalId);
+    const beforeCrashCall = beforeCrash.openCall({ callId: CALL_ID });
+    const proposalId = await propose(beforeCrashCall);
+    const uncertain = await confirm(beforeCrashCall, proposalId);
     expect(uncertain.status).toBe("inconclusive");
 
     // Google accepted the write late: the event is now readable under the
@@ -320,15 +319,16 @@ describe("confirmed booking reconciliation", () => {
     const booking = bookingWith(calendar, dataDir);
 
     calendar.state.getBehavior = "missing";
-    const proposalId = await propose(booking);
-    const uncertain = await confirm(booking, proposalId);
+    const call = booking.openCall({ callId: CALL_ID });
+    const proposalId = await propose(call);
+    const uncertain = await confirm(call, proposalId);
     expect(uncertain.status).toBe("inconclusive");
 
     // The landed write is now visible: free/busy reports the slot taken and
     // the event reads back under the original identity.
     calendar.state.busyAtTen = true;
     calendar.state.getBehavior = "stored";
-    const retried = await confirm(booking, proposalId);
+    const retried = await confirm(call, proposalId);
 
     expect(retried).toMatchObject({
       status: "booked",
@@ -344,21 +344,18 @@ describe("confirmed booking reconciliation", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-reconcile-"));
     const booking = bookingWith(calendar, dataDir);
 
-    const proposalId = await propose(booking);
-    const taken = await confirm(booking, proposalId);
+    const call = booking.openCall({ callId: CALL_ID });
+    const proposalId = await propose(call);
+    const taken = await confirm(call, proposalId);
     expect(taken).toMatchObject({ status: "unavailable", eventExists: false });
     expect(taken.message).toContain("fresh alternatives");
     expect(calendar.posts).toHaveLength(0);
 
-    const stale = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true, proposalId },
-      { callId: CALL_ID },
-    );
+    const stale = await call.execute("confirm_appointment", { confirmed: true, proposalId });
     expect(stale.status).toBe("readback_incomplete");
 
-    const replacementId = await propose(booking, { startTime: "14:00" });
-    const replacement = await confirm(booking, replacementId);
+    const replacementId = await propose(call, { startTime: "14:00" });
+    const replacement = await confirm(call, replacementId);
     expect(replacement).toMatchObject({ status: "booked", eventExists: true });
     expect(calendar.posts).toHaveLength(1);
     expect(calendar.posts[0]?.body).toMatchObject({
@@ -378,8 +375,9 @@ describe("confirmed booking reconciliation", () => {
       created += 1;
       return { operationId: `op-${created}`, eventId: `ev-${created}` };
     });
-    const proposalId = await propose(beforeCrash);
-    expect((await confirm(beforeCrash, proposalId)).status).toBe("inconclusive");
+    const beforeCrashCall = beforeCrash.openCall({ callId: CALL_ID });
+    const proposalId = await propose(beforeCrashCall);
+    expect((await confirm(beforeCrashCall, proposalId)).status).toBe("inconclusive");
 
     const attemptsBeforeRestart = calendar.posts.length;
     const restartedLedger = createAppointmentLedger({ dataDir });
@@ -458,8 +456,9 @@ describe("confirmed booking reconciliation", () => {
     });
     expect(ledger.latestForOperation(TEST_OPERATION_ID)?.storedShape).toBeUndefined();
 
-    const proposalId = await propose(booking, { startTime: "14:00" }, "call-after-cancel");
-    const second = await confirm(booking, proposalId, "call-after-cancel");
+    const afterCancel = booking.openCall({ callId: "call-after-cancel" });
+    const proposalId = await propose(afterCancel, { startTime: "14:00" });
+    const second = await confirm(afterCancel, proposalId);
     expect(second).toMatchObject({ status: "booked", eventExists: true });
   });
 
@@ -472,8 +471,9 @@ describe("confirmed booking reconciliation", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-reconcile-hold-"));
     const booking = bookingWith(calendar, dataDir, sequencedIds("hold"));
 
-    const firstProposal = await propose(booking, {}, "call-hold-1");
-    const first = await confirm(booking, firstProposal, "call-hold-1");
+    const firstCall = booking.openCall({ callId: "call-hold-1" });
+    const firstProposal = await propose(firstCall);
+    const first = await confirm(firstCall, firstProposal);
 
     expect(first).toMatchObject({
       status: "inconclusive",
@@ -487,8 +487,9 @@ describe("confirmed booking reconciliation", () => {
       eventId: "hold-ev-1",
     });
 
-    const secondProposal = await propose(booking, { startTime: "14:00" }, "call-hold-2");
-    const second = await confirm(booking, secondProposal, "call-hold-2");
+    const secondCall = booking.openCall({ callId: "call-hold-2" });
+    const secondProposal = await propose(secondCall, { startTime: "14:00" });
+    const second = await confirm(secondCall, secondProposal);
 
     expect(second.status).not.toBe("booked");
     expect(calendar.posts.map((post) => post.body.id)).toEqual(["hold-ev-1"]);
@@ -515,8 +516,9 @@ describe("confirmed booking reconciliation", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-reconcile-busy-"));
     const booking = bookingWith(calendar, dataDir, sequencedIds("busy"));
 
-    const proposalId = await propose(booking, {}, "call-busy-1");
-    const first = await confirm(booking, proposalId, "call-busy-1");
+    const call = booking.openCall({ callId: "call-busy-1" });
+    const proposalId = await propose(call);
+    const first = await confirm(call, proposalId);
     expect(first).toMatchObject({
       status: "inconclusive",
       operationId: "busy-op-1",
@@ -525,7 +527,7 @@ describe("confirmed booking reconciliation", () => {
     expect(calendar.posts.map((post) => post.body.id)).toEqual(["busy-ev-1"]);
 
     calendar.state.busyAtTen = true;
-    const retried = await confirm(booking, proposalId, "call-busy-1");
+    const retried = await confirm(call, proposalId);
     const ledger = createAppointmentLedger({ dataDir });
 
     expect(retried.status).not.toBe("unavailable");
@@ -544,8 +546,9 @@ describe("confirmed booking reconciliation", () => {
     });
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-reconcile-"));
     const beforeCrash = bookingWith(calendar, dataDir);
-    const proposalId = await propose(beforeCrash);
-    expect((await confirm(beforeCrash, proposalId)).status).toBe("inconclusive");
+    const beforeCrashCall = beforeCrash.openCall({ callId: CALL_ID });
+    const proposalId = await propose(beforeCrashCall);
+    expect((await confirm(beforeCrashCall, proposalId)).status).toBe("inconclusive");
 
     const restartedLedger = createAppointmentLedger({ dataDir });
     const recordBefore = restartedLedger.latestForOperation(TEST_OPERATION_ID);

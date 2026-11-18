@@ -12,28 +12,27 @@ const ARGS = {
   startTime: "10:00",
 };
 
-function owner() {
-  return createAppointmentProposals({ now: () => NOW });
+function owner(callId = CALL_ID) {
+  return createAppointmentProposals({ callId, now: () => NOW });
 }
 
 function propose(
   proposals: ReturnType<typeof owner>,
   extra: Record<string, unknown> = {},
-  callId = CALL_ID,
 ) {
-  const result = proposals.propose({ ...ARGS, ...extra }, { callId });
+  const result = proposals.propose({ ...ARGS, ...extra });
   if (result.status !== "proposed" || !result.proposalId || !result.readback) {
     throw new Error("Expected Appointment proposal and Readback fields");
   }
   return { ...result, proposalId: result.proposalId, readback: result.readback };
 }
 
-function check(proposals: ReturnType<typeof owner>, proposalId: string, callId = CALL_ID) {
-  return proposals.checkConfirmation({ confirmed: true, proposalId }, { callId });
+function check(proposals: ReturnType<typeof owner>, proposalId: string) {
+  return proposals.checkConfirmation({ confirmed: true, proposalId });
 }
 
-function eligible(proposals: ReturnType<typeof owner>, proposalId: string, callId = CALL_ID) {
-  const result = check(proposals, proposalId, callId);
+function eligible(proposals: ReturnType<typeof owner>, proposalId: string) {
+  const result = check(proposals, proposalId);
   if (result.status !== "eligible") {
     throw new Error(result.message);
   }
@@ -43,9 +42,8 @@ function eligible(proposals: ReturnType<typeof owner>, proposalId: string, callI
 function speak(
   proposals: ReturnType<typeof owner>,
   proposed: ReturnType<typeof propose>,
-  callId = CALL_ID,
 ) {
-  const handle = proposals.openReadback(callId);
+  const handle = proposals.openReadback();
   for (const event of assistantResponseEvents({
     responseId: "readback",
     transcriptDelta: readbackText(proposed.readback),
@@ -92,7 +90,7 @@ describe("Appointment proposal eligibility", () => {
     const proposed = propose(proposals);
     speak(proposals, proposed);
     const captured = eligible(proposals, proposed.proposalId);
-    expect(proposals.propose({ ...ARGS, ...extra }, { callId: CALL_ID })).toEqual({
+    expect(proposals.propose({ ...ARGS, ...extra })).toEqual({
       status: "invalid", message: expect.stringContaining(message),
     });
     expect(eligible(proposals, proposed.proposalId)).toEqual(captured);
@@ -100,9 +98,10 @@ describe("Appointment proposal eligibility", () => {
   });
 
   it("uses the supplied reference time instead of the clock and omits blank purpose", () => {
-    const proposals = createAppointmentProposals({ now: () => new Date("2026-09-30T00:00:00Z") });
-    expect(proposals.propose({ ...ARGS, purpose: "  " }, { callId: CALL_ID })).toMatchObject({ status: "invalid" });
-    const result = proposals.propose({ ...ARGS, purpose: "  " }, { callId: CALL_ID, referenceTime: NOW });
+    const options = { callId: CALL_ID, now: () => new Date("2026-09-30T00:00:00Z") };
+    expect(createAppointmentProposals(options).propose({ ...ARGS, purpose: "  " })).toMatchObject({ status: "invalid" });
+    const proposals = createAppointmentProposals({ ...options, referenceTime: NOW });
+    const result = proposals.propose({ ...ARGS, purpose: "  " });
     expect(result).toMatchObject({ status: "proposed" });
     expect(result.readback).not.toHaveProperty("purpose");
     expect(result.message).toBe(
@@ -112,16 +111,16 @@ describe("Appointment proposal eligibility", () => {
 
   it("keeps the initial refusal precedence and never consumes earned readiness", () => {
     const proposals = owner();
-    expect(proposals.checkConfirmation({ confirmed: false, proposalId: "stale" }, { callId: CALL_ID })).toEqual({
+    expect(proposals.checkConfirmation({ confirmed: false, proposalId: "stale" })).toEqual({
       status: "readback_incomplete", message: "There is no current appointment proposal on this call to confirm.",
     });
     const proposed = propose(proposals);
-    expect(proposals.checkConfirmation({ confirmed: false, proposalId: "stale" }, { callId: CALL_ID })).toEqual({
+    expect(proposals.checkConfirmation({ confirmed: false, proposalId: "stale" })).toEqual({
       status: "readback_incomplete",
       message: "Do not create the appointment. Unclear assent, background speech, or a refusal is not confirmation.",
     });
     for (const proposalId of [undefined, 42, "stale"]) {
-      expect(proposals.checkConfirmation({ confirmed: true, proposalId }, { callId: CALL_ID })).toEqual({
+      expect(proposals.checkConfirmation({ confirmed: true, proposalId })).toEqual({
         status: "readback_incomplete",
         message: "That confirmation does not match the current proposal on this call. Finish a fresh complete readback first.",
       });
@@ -132,9 +131,9 @@ describe("Appointment proposal eligibility", () => {
     });
     speak(proposals, proposed);
     const captured = eligible(proposals, proposed.proposalId);
-    expect(check(proposals, proposed.proposalId, "other-call")).toMatchObject({ status: "readback_incomplete" });
+    expect(check(owner("other-call"), proposed.proposalId)).toMatchObject({ status: "readback_incomplete" });
     for (const confirmed of [false, undefined, "true"]) {
-      expect(proposals.checkConfirmation({ confirmed, proposalId: proposed.proposalId }, { callId: CALL_ID })).toMatchObject({ status: "readback_incomplete" });
+      expect(proposals.checkConfirmation({ confirmed, proposalId: proposed.proposalId })).toMatchObject({ status: "readback_incomplete" });
     }
     expect(check(proposals, "stale")).toMatchObject({ status: "readback_incomplete" });
     expect(eligible(proposals, proposed.proposalId)).toEqual(captured);
@@ -163,7 +162,7 @@ describe("Appointment proposal eligibility", () => {
   it("tests response coverage against the proposal current at completion", () => {
     const proposals = owner();
     const first = propose(proposals);
-    const handle = proposals.openReadback(CALL_ID);
+    const handle = proposals.openReadback();
     const events = assistantResponseEvents({ responseId: "same", transcriptDelta: readbackText(first.readback) });
     handle.observe(events[0]!);
     const identical = propose(proposals);
@@ -183,16 +182,17 @@ describe("Appointment proposal eligibility", () => {
   it.each([CALL_ID, "other-call"])("keeps transcript assembly separate for handles on %s", (otherCall) => {
     const proposals = owner();
     const proposed = propose(proposals);
-    const other = otherCall === CALL_ID ? proposed : propose(proposals, {}, otherCall);
-    const one = proposals.openReadback(CALL_ID);
-    const two = proposals.openReadback(otherCall);
+    const otherOwner = otherCall === CALL_ID ? proposals : owner(otherCall);
+    const other = otherCall === CALL_ID ? proposed : propose(otherOwner);
+    const one = proposals.openReadback();
+    const two = otherOwner.openReadback();
     const events = assistantResponseEvents({ responseId: "same", transcriptDelta: readbackText(proposed.readback) });
     one.observe(events[0]!);
     two.observe(events[1]!);
-    expect(check(proposals, other.proposalId, otherCall)).toMatchObject({ status: "readback_incomplete" });
+    expect(check(otherOwner, other.proposalId)).toMatchObject({ status: "readback_incomplete" });
     one.observe(events[1]!);
     expect(check(proposals, proposed.proposalId)).toMatchObject({ status: "eligible" });
-    expect(check(proposals, other.proposalId, otherCall)).toMatchObject({
+    expect(check(otherOwner, other.proposalId)).toMatchObject({
       status: otherCall === CALL_ID ? "eligible" : "readback_incomplete",
     });
     one.close();
@@ -202,7 +202,7 @@ describe("Appointment proposal eligibility", () => {
   it("makes a closed handle inert without dropping the proposal or shared earned readiness", () => {
     const proposals = owner();
     const proposed = propose(proposals);
-    const closed = proposals.openReadback(CALL_ID);
+    const closed = proposals.openReadback();
     const events = assistantResponseEvents({ responseId: "same", transcriptDelta: readbackText(proposed.readback) });
     closed.observe(events[0]!);
     closed.close();
@@ -218,7 +218,7 @@ describe("Appointment proposal eligibility", () => {
   it("preserves earned readiness after later cancelled and noncovering responses", () => {
     const proposals = owner();
     const proposed = propose(proposals);
-    const handle = proposals.openReadback(CALL_ID);
+    const handle = proposals.openReadback();
     handle.observe({ type: "response.done", response: {
       status: "completed", output: [{ content: [{ transcript: readbackText(proposed.readback) }] }],
     } });
@@ -256,20 +256,21 @@ describe("Appointment proposal eligibility", () => {
     const replacement = propose(proposals, { startTime: "14:00" });
     speak(proposals, replacement);
     const current = eligible(proposals, replacement.proposalId);
-    const other = propose(proposals, {}, "other-call");
-    speak(proposals, other, "other-call");
+    const otherOwner = owner("other-call");
+    const other = propose(otherOwner);
+    speak(otherOwner, other);
     proposals.discard(stale);
     proposals.discard(stale);
     proposals.discard({ ...current, callId: "other-call" });
     expect(proposals.currentForInsert(current)).toEqual(current);
-    expect(check(proposals, other.proposalId, "other-call")).toMatchObject({ status: "eligible" });
+    expect(check(otherOwner, other.proposalId)).toMatchObject({ status: "eligible" });
     proposals.discard(current);
     proposals.discard(current);
     expect(proposals.currentForInsert(current)).toBeUndefined();
     expect(check(proposals, current.proposalId)).toMatchObject({
       status: "readback_incomplete", message: expect.stringContaining("no current appointment proposal"),
     });
-    expect(check(proposals, other.proposalId, "other-call")).toMatchObject({ status: "eligible" });
+    expect(check(otherOwner, other.proposalId)).toMatchObject({ status: "eligible" });
     const next = propose(proposals, { startTime: "14:00" });
     expect(check(proposals, next.proposalId)).toMatchObject({ status: "readback_incomplete" });
   });

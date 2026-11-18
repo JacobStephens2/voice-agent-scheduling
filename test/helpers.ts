@@ -3,7 +3,7 @@ import type { StructuredCallEvidence } from "../src/evidence.js";
 import type { CallLifecycleManager } from "../src/lifecycle.js";
 import type { FakeRealtimeSocket } from "./fake-socket.js";
 import type { ProposeResult } from "../src/calendar/booking-proposal.js";
-import type { AppointmentBooking, BookingToolResult } from "../src/calendar/booking-tool.js";
+import type { AppointmentBookingCall, BookingToolResult } from "../src/calendar/booking-tool.js";
 
 export const WEBHOOK_SECRET = "whsec_dGVzdHNlY3JldGZvcnNpZ25pbmd3ZWI=";
 export const REQUIRED_MODEL = "grok-voice-think-fast-2.0";
@@ -211,21 +211,18 @@ export function receiveAssistantResponse(
 
 /** Speak the exact returned fields through the same events production observes. */
 export function completeReadback(
-  booking: AppointmentBooking,
-  callId: string,
+  call: AppointmentBookingCall,
   proposed: BookingToolResult,
 ): void {
   if (proposed.status !== "proposed" || !("readback" in proposed) || !proposed.readback) {
     throw new Error("Expected returned Readback fields");
   }
-  const handle = booking.openReadback(callId);
   for (const event of assistantResponseEvents({
     responseId: "test-readback",
     transcriptDelta: readbackText(proposed.readback),
   })) {
-    handle.observe(event);
+    call.observe(event);
   }
-  handle.close();
 }
 
 export function readbackText(fields: NonNullable<ProposeResult["readback"]>): string {

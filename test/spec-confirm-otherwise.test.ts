@@ -24,34 +24,18 @@ describe("spec: confirm_appointment otherwise status", () => {
       createIds: () => ({ operationId: TEST_OPERATION_ID, eventId: TEST_EVENT_ID }),
       allowWrites: true,
     });
-    const callId = "call-spec-otherwise";
-    const proposed = (await booking.execute(
-      "propose_appointment",
-      {
-        callerName: "Ada Lovelace",
-        callbackNumber: "+15551239876",
-        callbackConfirmed: true,
-        date: "2026-09-11",
-        startTime: "10:00",
-      },
-      { callId },
-    )) as { proposalId?: string };
+    const call = booking.openCall({ callId: "call-spec-otherwise" });
+    const proposed = (await call.execute("propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "+15551239876",
+      callbackConfirmed: true,
+      date: "2026-09-11",
+      startTime: "10:00",
+    })) as { proposalId?: string };
 
-    const unclear = await booking.execute(
-      "confirm_appointment",
-      { confirmed: false, proposalId: proposed.proposalId },
-      { callId },
-    );
-    const stale = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true, proposalId: "not-the-current-proposal" },
-      { callId },
-    );
-    const missing = await booking.execute(
-      "confirm_appointment",
-      { confirmed: true, proposalId: proposed.proposalId },
-      { callId: "call-with-no-proposal" },
-    );
+    const unclear = await call.execute("confirm_appointment", { confirmed: false, proposalId: proposed.proposalId });
+    const stale = await call.execute("confirm_appointment", { confirmed: true, proposalId: "not-the-current-proposal" });
+    const missing = await booking.openCall({ callId: "call-with-no-proposal" }).execute("confirm_appointment", { confirmed: true, proposalId: proposed.proposalId });
 
     expect(unclear.status).toBe("readback_incomplete");
     expect(stale.status).toBe("readback_incomplete");

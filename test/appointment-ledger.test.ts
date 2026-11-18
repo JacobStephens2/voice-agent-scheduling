@@ -363,34 +363,23 @@ describe("booking retries through the appointment ledger", () => {
         allowWrites: true,
       });
 
-      const proposed = await booking.execute(
-        "propose_appointment",
-        {
-          callerName: "Ada Lovelace",
-          callbackNumber: "+15551239876",
-          callbackConfirmed: true,
-          date: "2026-09-11",
-          startTime: "10:00",
-        },
-        { callId: "call-retry" },
-      );
+      const call = booking.openCall({ callId: "call-retry" });
+      const proposed = await call.execute("propose_appointment", {
+        callerName: "Ada Lovelace",
+        callbackNumber: "+15551239876",
+        callbackConfirmed: true,
+        date: "2026-09-11",
+        startTime: "10:00",
+      });
       const proposalId = (proposed as { proposalId: string }).proposalId;
-      completeReadback(booking, "call-retry", proposed);
+      completeReadback(call, proposed);
 
-      const failed = await booking.execute(
-        "confirm_appointment",
-        { confirmed: true, proposalId },
-        { callId: "call-retry" },
-      );
+      const failed = await call.execute("confirm_appointment", { confirmed: true, proposalId });
       expect(failed.status).toBe("failed");
       expect(ledger.latestForOperation("op-retry")?.status).toBe("failed");
 
       failing = false;
-      const retried = await booking.execute(
-        "confirm_appointment",
-        { confirmed: true, proposalId },
-        { callId: "call-retry" },
-      );
+      const retried = await call.execute("confirm_appointment", { confirmed: true, proposalId });
 
       expect(retried).toMatchObject({
         status: "booked",

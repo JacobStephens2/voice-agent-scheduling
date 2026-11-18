@@ -74,7 +74,7 @@ describe("scheduling call lifecycle", () => {
       ledger,
       booking: {
         definitions: () => [],
-        execute: async () => ({}),
+        openCall: () => ({ execute: async () => ({}), observe() {}, close() {} }),
         reconcileUnresolvedOperations: async () => [{
           operationId: "op-interrupted",
           eventId: "event-interrupted",

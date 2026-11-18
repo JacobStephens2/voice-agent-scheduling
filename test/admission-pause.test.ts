@@ -32,13 +32,17 @@ function createStubBooking(options: {
         parameters: { type: "object", properties: {}, required: [] },
       },
     ],
-    execute: async (name, args) => {
-      calls.push({ name, args });
-      if (options.onExecute) {
-        return options.onExecute(name, args);
-      }
-      return { status: "booked", message: "The appointment is booked." };
-    },
+    openCall: () => ({
+      observe() {},
+      close() {},
+      execute: async (name, args) => {
+        calls.push({ name, args });
+        if (options.onExecute) {
+          return options.onExecute(name, args);
+        }
+        return { status: "booked", message: "The appointment is booked." };
+      },
+    }),
   };
 }
 

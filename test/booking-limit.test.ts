@@ -135,26 +135,19 @@ async function proposeAndConfirm(
     startTime?: string;
   },
 ) {
-  const proposed = await booking.execute(
-    "propose_appointment",
-    {
-      callerName: options.callerName ?? "Ada Lovelace",
-      callbackNumber: options.callbackNumber ?? CALLBACK_NUMBER,
-      callbackConfirmed: true,
-      date: options.date ?? FRIDAY_DATE,
-      startTime: options.startTime ?? "10:00",
-    },
-    { callId: options.callId },
-  );
+  const call = booking.openCall({ callId: options.callId });
+  const proposed = await call.execute("propose_appointment", {
+    callerName: options.callerName ?? "Ada Lovelace",
+    callbackNumber: options.callbackNumber ?? CALLBACK_NUMBER,
+    callbackConfirmed: true,
+    date: options.date ?? FRIDAY_DATE,
+    startTime: options.startTime ?? "10:00",
+  });
   if (proposed.status !== "proposed" || !proposed.proposalId) {
     return proposed;
   }
-  completeReadback(booking, options.callId, proposed);
-  return booking.execute(
-    "confirm_appointment",
-    { confirmed: true, proposalId: proposed.proposalId },
-    { callId: options.callId },
-  );
+  completeReadback(call, proposed);
+  return call.execute("confirm_appointment", { confirmed: true, proposalId: proposed.proposalId });
 }
 
 describe("one upcoming appointment per callback number", () => {
@@ -192,17 +185,18 @@ describe("one upcoming appointment per callback number", () => {
           createIds: () => ({ operationId: "own-op", eventId: "own-event" }),
           allowWrites: true,
         });
-        const proposed = await booking.execute("propose_appointment", {
+        const call = booking.openCall({ callId: "own-call" });
+        const proposed = await call.execute("propose_appointment", {
           callerName: "Ada Lovelace",
           callbackNumber: CALLBACK_NUMBER,
           callbackConfirmed: true,
           date: FRIDAY_DATE,
           startTime: "10:00",
-        }, { callId: "own-call" });
+        });
         if (proposed.status !== "proposed" || !proposed.proposalId) {
           throw new Error("Expected an appointment proposal");
         }
-        completeReadback(booking, "own-call", proposed);
+        completeReadback(call, proposed);
         const prior = status ? ledger.record({
           ...competing,
           operationId: "own-op",
@@ -217,10 +211,10 @@ describe("one upcoming appointment per callback number", () => {
           ledger.record(competing);
         }
 
-        const refused = await booking.execute("confirm_appointment", {
+        const refused = await call.execute("confirm_appointment", {
           confirmed: true,
           proposalId: proposed.proposalId,
-        }, { callId: "own-call" });
+        });
         expect(refused).toMatchObject({ status: "unavailable", eventExists: false });
         expect(refused.message).toContain("already has an upcoming appointment");
         expect(refused.message).toContain("contact Jacob directly");
@@ -287,45 +281,31 @@ describe("one upcoming appointment per callback number", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "scheduling-limit-"));
     const booking = bookingWith(calendar, dataDir, sequencedIds());
 
-    const firstProposed = await booking.execute(
-      "propose_appointment",
-      {
-        callerName: "Ada Lovelace",
-        callbackNumber: CALLBACK_NUMBER,
-        callbackConfirmed: true,
-        date: FRIDAY_DATE,
-        startTime: "10:00",
-      },
-      { callId: "call-limit-race-1" },
-    );
-    const secondProposed = await booking.execute(
-      "propose_appointment",
-      {
-        callerName: "Ada Lovelace",
-        callbackNumber: "555-123-9876",
-        callbackConfirmed: true,
-        date: FRIDAY_DATE,
-        startTime: "10:00",
-      },
-      { callId: "call-limit-race-2" },
-    );
+    const firstCall = booking.openCall({ callId: "call-limit-race-1" });
+    const secondCall = booking.openCall({ callId: "call-limit-race-2" });
+    const firstProposed = await firstCall.execute("propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: CALLBACK_NUMBER,
+      callbackConfirmed: true,
+      date: FRIDAY_DATE,
+      startTime: "10:00",
+    });
+    const secondProposed = await secondCall.execute("propose_appointment", {
+      callerName: "Ada Lovelace",
+      callbackNumber: "555-123-9876",
+      callbackConfirmed: true,
+      date: FRIDAY_DATE,
+      startTime: "10:00",
+    });
     if (firstProposed.status !== "proposed" || secondProposed.status !== "proposed") {
       throw new Error("Expected both proposals to be recorded");
     }
-    completeReadback(booking, "call-limit-race-1", firstProposed);
-    completeReadback(booking, "call-limit-race-2", secondProposed);
+    completeReadback(firstCall, firstProposed);
+    completeReadback(secondCall, secondProposed);
 
     const [first, second] = await Promise.all([
-      booking.execute(
-        "confirm_appointment",
-        { confirmed: true, proposalId: firstProposed.proposalId },
-        { callId: "call-limit-race-1" },
-      ),
-      booking.execute(
-        "confirm_appointment",
-        { confirmed: true, proposalId: secondProposed.proposalId },
-        { callId: "call-limit-race-2" },
-      ),
+      firstCall.execute("confirm_appointment", { confirmed: true, proposalId: firstProposed.proposalId }),
+      secondCall.execute("confirm_appointment", { confirmed: true, proposalId: secondProposed.proposalId }),
     ]);
     const statuses = [first.status, second.status].sort();
     expect(statuses).toEqual(["booked", "unavailable"]);

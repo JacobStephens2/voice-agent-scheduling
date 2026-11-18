@@ -2,7 +2,7 @@ import { cpSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createAppointmentBooking } from "../src/calendar/booking-tool.js";
+import { createAppointmentBooking, type AppointmentBookingCall } from "../src/calendar/booking-tool.js";
 import { completeReadback } from "./helpers.js";
 import { createAppointmentLedger, type BookingRecord } from "../src/calendar/appointment-ledger.js";
 import { runRetentionCleanup } from "../src/maintenance.js";
@@ -154,39 +154,29 @@ function bookingAt(dataDir: string) {
 }
 
 async function propose(
-  booking: ReturnType<typeof createAppointmentBooking>,
-  callId: string,
+  call: AppointmentBookingCall,
   extra: Record<string, unknown> = {},
 ) {
-  const result = await booking.execute(
-    "propose_appointment",
-    {
-      callerName: "Ada Lovelace",
-      callbackNumber: CALLBACK,
-      callbackConfirmed: true,
-      date: "2026-09-11",
-      startTime: "10:00",
-      ...extra,
-    },
-    { callId },
-  );
+  const result = await call.execute("propose_appointment", {
+    callerName: "Ada Lovelace",
+    callbackNumber: CALLBACK,
+    callbackConfirmed: true,
+    date: "2026-09-11",
+    startTime: "10:00",
+    ...extra,
+  });
   if (result.status !== "proposed" || !("proposalId" in result) || !result.proposalId) {
     throw new Error(`expected a proposal, got ${result.status}`);
   }
-  completeReadback(booking, callId, result);
+  completeReadback(call, result);
   return result.proposalId;
 }
 
 async function confirm(
-  booking: ReturnType<typeof createAppointmentBooking>,
-  callId: string,
+  call: AppointmentBookingCall,
   proposalId: string,
 ) {
-  return booking.execute(
-    "confirm_appointment",
-    { confirmed: true, proposalId },
-    { callId },
-  );
+  return call.execute("confirm_appointment", { confirmed: true, proposalId });
 }
 
 function retainedAfterCleanup(dataDir: string, operationId: string): BookingRecord | undefined {
@@ -209,7 +199,8 @@ describe("booking confirmation records", () => {
       const dataDir = mkdtempSync(join(tmpdir(), "scheduling-pending-stop-"));
       const { calendar, booking, ledger, setTokenMode } = bookingAt(dataDir);
       const callId = "call-pending-stop";
-      const proposalId = await propose(booking, callId);
+      const call = booking.openCall({ callId });
+      const proposalId = await propose(call);
       const numberHash = ledger.hashCallbackNumber(CALLBACK);
       if (!numberHash) {
         throw new Error("Expected a callback-number hash");
@@ -232,7 +223,7 @@ describe("booking confirmation records", () => {
         calendar.state.freeBusyMode = "throw";
       } else if (stop === "proposal replacement") {
         calendar.state.beforeFreeBusy = async () => {
-          await propose(booking, callId, { startTime: "14:00" });
+          await propose(call, { startTime: "14:00" });
         };
       } else {
         calendar.stored.set("other-event", {
@@ -241,7 +232,7 @@ describe("booking confirmation records", () => {
         });
       }
 
-      const result = await confirm(booking, callId, proposalId);
+      const result = await confirm(call, proposalId);
       expect(result).toMatchObject({
         status: "inconclusive",
         operationId: "original-op",
@@ -255,7 +246,7 @@ describe("booking confirmation records", () => {
       expect(latestRow(dataDir, "original-op")).toEqual(prior);
       expect(eventPosts(calendar.requests)).toHaveLength(0);
       if (stop === "closed start") {
-        expect((await confirm(booking, callId, proposalId)).status).toBe("inconclusive");
+        expect((await confirm(call, proposalId)).status).toBe("inconclusive");
       }
     },
   );
@@ -265,9 +256,10 @@ describe("booking confirmation records", () => {
     const { calendar, booking } = bookingAt(dataDir);
     calendar.state.getMode = "cancelled";
     const callId = "call-cancelled";
+    const call = booking.openCall({ callId });
 
-    const proposalId = await propose(booking, callId);
-    const result = await confirm(booking, callId, proposalId);
+    const proposalId = await propose(call);
+    const result = await confirm(call, proposalId);
     expect(result).toMatchObject({ status: "inconclusive", eventExists: false });
     expect(result.message).toContain("interrupted");
     expect(result.message).not.toContain("approved shape");
@@ -290,9 +282,10 @@ describe("booking confirmation records", () => {
       reminders: { useDefault: false, overrides: [{ method: "popup", minutes: 10 }] },
     });
     const callId = "call-cancelled-busy";
+    const call = booking.openCall({ callId });
 
-    const proposalId = await propose(booking, callId);
-    const result = await confirm(booking, callId, proposalId);
+    const proposalId = await propose(call);
+    const result = await confirm(call, proposalId);
     expect(result).toMatchObject({ status: "inconclusive", eventExists: false });
     expect(result.message).toContain("interrupted");
     expect(result.message).not.toContain("no longer available");
@@ -307,9 +300,10 @@ describe("booking confirmation records", () => {
     const { calendar, booking } = bookingAt(dataDir);
     calendar.state.getMode = "mismatch";
     const callId = "call-shape";
+    const call = booking.openCall({ callId });
 
-    const proposalId = await propose(booking, callId);
-    const first = await confirm(booking, callId, proposalId);
+    const proposalId = await propose(call);
+    const first = await confirm(call, proposalId);
     expect(first.status).toBe("inconclusive");
     expect(first.message).toContain("does not match the approved shape");
     expect(first.message).not.toContain("no longer available");
@@ -322,7 +316,7 @@ describe("booking confirmation records", () => {
     expect(missing.message).toContain("no longer available");
     expect(first.status).not.toBe(missing.status);
 
-    const retry = await confirm(booking, callId, proposalId);
+    const retry = await confirm(call, proposalId);
     expect(retry.status).toBe("inconclusive");
     expect(retry.status).not.toBe(missing.status);
     expect(retry.message).toContain("does not match the approved shape");
@@ -340,11 +334,11 @@ describe("booking confirmation records", () => {
     expect(retainedAfterCleanup(dataDir, "op-1")).toBeDefined();
 
     const postsBeforeLater = eventPosts(calendar.requests).length;
-    const laterProposalId = await propose(booking, callId, {
+    const laterProposalId = await propose(call, {
       callbackNumber: SAME_NORMALIZED_CALLBACK,
       startTime: "14:00",
     });
-    const later = await confirm(booking, callId, laterProposalId);
+    const later = await confirm(call, laterProposalId);
     expect(later.status).not.toBe("booked");
     expect(eventPosts(calendar.requests)).toHaveLength(postsBeforeLater);
     expect(calendar.stored.has("ev-1")).toBe(true);
@@ -357,9 +351,10 @@ describe("booking confirmation records", () => {
     const { calendar, booking, ledger, setTokenMode } = bookingAt(dataDir);
     calendar.state.getMode = "error";
     const callId = "call-token";
+    const call = booking.openCall({ callId });
 
-    const proposalId = await propose(booking, callId);
-    const first = await confirm(booking, callId, proposalId);
+    const proposalId = await propose(call);
+    const first = await confirm(call, proposalId);
     expect(first.status).toBe("inconclusive");
     expect(calendar.stored.has("ev-1")).toBe(true);
     expect(deletes(calendar.requests)).toHaveLength(0);
@@ -367,7 +362,7 @@ describe("booking confirmation records", () => {
     calendar.state.getMode = "match";
     const rowBeforeRetry = ledger.latestForOperation("op-1");
     setTokenMode("throw");
-    const retry = await confirm(booking, callId, proposalId);
+    const retry = await confirm(call, proposalId);
     expect(retry.status).toBe("inconclusive");
     expect(retry.message).toContain("Do not tell the caller the appointment is booked");
     // The same record object: the retry appended nothing, not even an identical row.
@@ -379,11 +374,11 @@ describe("booking confirmation records", () => {
     expect(retainedAfterCleanup(dataDir, "op-1")).toBeDefined();
 
     const postsBeforeLater = eventPosts(calendar.requests).length;
-    const laterProposalId = await propose(booking, callId, {
+    const laterProposalId = await propose(call, {
       callbackNumber: SAME_NORMALIZED_CALLBACK,
       startTime: "14:00",
     });
-    const later = await confirm(booking, callId, laterProposalId);
+    const later = await confirm(call, laterProposalId);
     expect(later.status).not.toBe("booked");
     expect(eventPosts(calendar.requests)).toHaveLength(postsBeforeLater);
     expect(calendar.stored.has("ev-2")).toBe(false);
@@ -405,16 +400,17 @@ describe("booking confirmation records", () => {
     const { calendar, booking, ledger } = bookingAt(dataDir);
     calendar.state.getMode = "error";
     const callId = "call-freebusy";
+    const call = booking.openCall({ callId });
 
-    const proposalId = await propose(booking, callId);
-    const first = await confirm(booking, callId, proposalId);
+    const proposalId = await propose(call);
+    const first = await confirm(call, proposalId);
     expect(first.status).toBe("inconclusive");
     expect(calendar.stored.has("ev-1")).toBe(true);
 
     calendar.state.getMode = "match";
     calendar.state.freeBusyMode = "throw";
     const rowBeforeRetry = ledger.latestForOperation("op-1");
-    const retry = await confirm(booking, callId, proposalId);
+    const retry = await confirm(call, proposalId);
     expect(retry.status).toBe("inconclusive");
     expect(ledger.latestForOperation("op-1")).toBe(rowBeforeRetry);
     expect(latestRow(dataDir, "op-1")?.status).toBe("inconclusive");
@@ -424,11 +420,11 @@ describe("booking confirmation records", () => {
     expect(retainedAfterCleanup(dataDir, "op-1")).toBeDefined();
 
     const postsBeforeLater = eventPosts(calendar.requests).length;
-    const laterProposalId = await propose(booking, callId, {
+    const laterProposalId = await propose(call, {
       callbackNumber: SAME_NORMALIZED_CALLBACK,
       startTime: "14:00",
     });
-    const later = await confirm(booking, callId, laterProposalId);
+    const later = await confirm(call, laterProposalId);
     expect(later.status).not.toBe("booked");
     expect(eventPosts(calendar.requests)).toHaveLength(postsBeforeLater);
     expect(calendar.stored.has("ev-2")).toBe(false);
@@ -443,16 +439,17 @@ describe("booking confirmation records", () => {
     const { calendar, booking, ledger, setTokenMode } = bookingAt(dataDir);
     calendar.state.getMode = "mismatch";
     const callId = "call-shape-token";
+    const call = booking.openCall({ callId });
 
-    const proposalId = await propose(booking, callId);
-    const first = await confirm(booking, callId, proposalId);
+    const proposalId = await propose(call);
+    const first = await confirm(call, proposalId);
     expect(first.message).toContain("does not match the approved shape");
     expect(first.message).not.toContain("interrupted");
 
     const rowBeforeRetry = ledger.latestForOperation("op-1");
     expect(rowBeforeRetry?.storedShape).toBe("mismatched");
     setTokenMode("throw");
-    const retry = await confirm(booking, callId, proposalId);
+    const retry = await confirm(call, proposalId);
     expect(ledger.latestForOperation("op-1")).toBe(rowBeforeRetry);
     expect(retry.status).toBe("inconclusive");
     expect(retry.message).toContain("does not match the approved shape");
@@ -466,12 +463,13 @@ async function confirmMissingBusySlot() {
   const { calendar, booking } = bookingAt(dataDir);
   calendar.state.getMode = "missing";
   const callId = "call-missing";
-  const proposalId = await propose(booking, callId);
+  const call = booking.openCall({ callId });
+  const proposalId = await propose(call);
   // Another commitment already occupies the slot. This operation never stored an event.
   calendar.stored.set("someone-else", {
     id: "someone-else",
     start: { dateTime: "2026-09-11T10:00:00" },
     end: { dateTime: "2026-09-11T10:30:00" },
   });
-  return confirm(booking, callId, proposalId);
+  return confirm(call, proposalId);
 }
