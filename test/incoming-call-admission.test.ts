@@ -411,6 +411,53 @@ describe("incoming call admission", () => {
     });
   });
 
+  it("uses the sip or sips subscriber, not a telephone-subscriber parameter", () => {
+    for (const [label, from] of [
+      ["sip", "<sip:5555550177;phone-context=+15550001111@sip.telnyx.com>"],
+      ["sips", "<sips:5555550177;phone-context=+15550001111@sip.telnyx.com>"],
+      ["bare", "sip:5555550177;phone-context=+15550001111@sip.telnyx.com"],
+    ] as const) {
+      const parameterAllowlist = createIncomingCallAdmission({
+        webhookSecret: WEBHOOK_SECRET,
+        maxConcurrentCalls: 1,
+        allowedCallerNumbers: ["+15550001111"],
+      });
+      expect(
+        parameterAllowlist.admit(
+          signedHeaders(
+            incomingCallPayload({ callId: `call-${label}-param`, callerNumber: from }),
+            { webhookId: `msg_${label}_param` },
+          ),
+        ),
+        label,
+      ).toEqual({
+        admitted: false,
+        reason: "unauthorized_caller",
+        callId: `call-${label}-param`,
+      });
+
+      const subscriberAllowlist = createIncomingCallAdmission({
+        webhookSecret: WEBHOOK_SECRET,
+        maxConcurrentCalls: 1,
+        allowedCallerNumbers: ["+15555550177"],
+      });
+      expect(
+        subscriberAllowlist.admit(
+          signedHeaders(
+            incomingCallPayload({ callId: `call-${label}-sub`, callerNumber: from }),
+            { webhookId: `msg_${label}_sub` },
+          ),
+        ),
+        label,
+      ).toEqual({
+        admitted: true,
+        callId: `call-${label}-sub`,
+        callerNumber: "+15555550177",
+        calledNumber: "+18005550199",
+      });
+    }
+  });
+
   it("rejects callers outside the smoke-mode allowlist", () => {
     const admission = createIncomingCallAdmission({
       webhookSecret: WEBHOOK_SECRET,

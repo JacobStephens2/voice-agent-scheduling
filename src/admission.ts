@@ -142,10 +142,15 @@ function firstUnbracketedTelephoneSubscriber(value: string): string | undefined 
     }
     const sip = /^sips?:([^@]*)@/i.exec(candidate);
     if (sip) {
-      return sip[1] ?? "";
+      return subscriberBeforeParameter(sip[1] ?? "");
     }
   }
   return undefined;
+}
+
+function subscriberBeforeParameter(user: string): string {
+  const semi = user.indexOf(";");
+  return semi === -1 ? user : user.slice(0, semi);
 }
 
 function telSubscriber(value: string): string | undefined {
@@ -161,7 +166,7 @@ function sipUserIn(value: string): string | undefined {
   if (!matched) {
     return undefined;
   }
-  return matched[1] ?? "";
+  return subscriberBeforeParameter(matched[1] ?? "");
 }
 
 export function createIncomingCallAdmission(
