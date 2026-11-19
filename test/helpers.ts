@@ -1,6 +1,11 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { computeWebhookSignature } from "../src/admission.js";
+import { billingPeriodId, BUDGET_LEDGER_FILE } from "../src/budget.js";
+import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
 import type { StructuredCallEvidence } from "../src/evidence.js";
 import type { CallLifecycleManager } from "../src/lifecycle.js";
+import type { BookingTool } from "../src/session.js";
 import type { FakeRealtimeSocket } from "./fake-socket.js";
 import type { ProposeResult } from "../src/calendar/booking-proposal.js";
 import type { AppointmentBookingCall, BookingToolResult } from "../src/calendar/booking-tool.js";
@@ -44,6 +49,38 @@ export function signedHeaders(
     timestamp,
     signature: computeWebhookSignature(secret, options.webhookId, timestamp, rawBody),
     rawBody,
+  };
+}
+
+export function seedPendingAppointmentRecovery(
+  dataDir: string,
+  reconcileStatus: () => string | Promise<string>,
+): BookingTool {
+  const operationId = "op-interrupted";
+  const eventId = "event-interrupted";
+  createAppointmentLedger({ dataDir }).record({
+    operationId,
+    eventId,
+    callId: "call-interrupted",
+    proposalId: "proposal-interrupted",
+    calendarId: "primary",
+    startUtc: "2026-11-20T15:00:00.000Z",
+    status: "pending",
+  });
+  writeFileSync(join(dataDir, BUDGET_LEDGER_FILE), JSON.stringify({
+    periodId: billingPeriodId(new Date()),
+    spentMicroUsd: 0,
+    reservations: {},
+  }));
+  return {
+    definitions: () => [],
+    openCall: () => ({ execute: async () => ({}), observe() {}, close() {} }),
+    reconcileUnresolvedOperations: async () => [{
+      operationId,
+      eventId,
+      status: await reconcileStatus(),
+      eventExists: true,
+    }],
   };
 }
 

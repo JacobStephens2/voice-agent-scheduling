@@ -4,6 +4,7 @@ import WebSocket from "ws";
 import {
   createIncomingCallAdmission,
   type AdmissionRejectionReason,
+  type AdmissionResult,
   type IncomingCallAdmission,
   type SignedWebhook,
 } from "./admission.js";
@@ -16,7 +17,6 @@ import {
 import {
   createCallEvidence,
   type CallEvidence,
-  type CallEvidenceContext,
   type StructuredCallEvidence,
 } from "./evidence.js";
 import {
@@ -27,6 +27,7 @@ import {
 import { createAppointmentLedger, type AppointmentLedger } from "./calendar/appointment-ledger.js";
 import {
   createTelephoneSession,
+  requestBestEffortHangup,
   type AvailabilityTool,
   type BookingTool,
   type ConnectWebSocket,
@@ -112,6 +113,10 @@ const REJECTION_STATUS: Record<WebhookRejectionReason, number> = {
   operator_paused: 503,
 };
 
+function rejectWebhook(reason: WebhookRejectionReason): WebhookResponse {
+  return { statusCode: REJECTION_STATUS[reason], body: JSON.stringify({ error: reason }) };
+}
+
 const ADMISSION_PAUSE_FILE = "admission-pause.json";
 
 function admissionPausePath(dataDir: string): string {
@@ -168,14 +173,10 @@ function defaultConnectWebSocket(
 
 function defaultHangupCall(apiKey: string): (callId: string) => Promise<void> {
   return async (callId: string) => {
-    try {
-      await fetch(`https://api.x.ai/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}` },
-      });
-    } catch {
-      // Hangup is best-effort; evidence still records the outcome.
-    }
+    await fetch(`https://api.x.ai/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
   };
 }
 
@@ -217,16 +218,33 @@ export function createCallLifecycleManager(
     operatorPaused = true;
     persistOperatorPause(options.dataDir, true);
   }
-  const onOutcome = (context: CallEvidenceContext, outcome: SessionOutcome) => {
-    admission.release(context.callId);
-    recovery.settle(context.callId, outcome.durationMs);
+  async function runAdmittedSession(
+    session: ReturnType<typeof createTelephoneSession>,
+    allocation: Extract<AdmissionResult, { admitted: true }>,
+  ): Promise<void> {
+    let outcome: SessionOutcome;
     try {
-      evidence.record(outcome, context);
+      outcome = await session.start();
     } catch {
-      // Release and settlement already happened. A recording failure must not
-      // re-enter finalization or publish an outcome that was not persisted.
+      outcome = {
+        callId: allocation.callId,
+        status: "failed",
+        toolRoundTrips: 0,
+        durationMs: 0,
+        durationWarningSent: false,
+        error: "Coordinator unhandled error",
+      };
     }
-  };
+
+    allocation.release();
+    try {
+      recovery.settle(allocation.callId, outcome.durationMs);
+      evidence.record(outcome, allocation);
+    } catch {
+      // Make a single settlement attempt. Recovery accounts for any
+      // outstanding durable reservation after a restart.
+    }
+  }
 
   const admissionsStatus = (): AdmissionsStatus => {
     const snapshot = recovery.snapshot();
@@ -251,80 +269,54 @@ export function createCallLifecycleManager(
           (result.reason === "unauthorized_caller" ||
             result.reason === "concurrency_limit_reached")
         ) {
-          void hangupCall(result.callId);
+          void requestBestEffortHangup(result.callId, hangupCall);
         }
         if (operatorPaused && result.reason === "concurrency_limit_reached") {
-          return {
-            statusCode: REJECTION_STATUS.operator_paused,
-            body: JSON.stringify({ error: "operator_paused" }),
-          };
+          return rejectWebhook("operator_paused");
         }
-        return {
-          statusCode: REJECTION_STATUS[result.reason],
-          body: JSON.stringify({ error: result.reason }),
-        };
+        return rejectWebhook(result.reason);
       }
 
-      const readiness = await recovery.beforeAdmission();
-      if (!readiness.admissionAvailable && readiness.reason) {
-        admission.release(result.callId);
-        void hangupCall(result.callId);
-        return {
-          statusCode: REJECTION_STATUS[readiness.reason],
-          body: JSON.stringify({ error: readiness.reason }),
-        };
-      }
+      let handedOff = false;
+      try {
+        const readiness = await recovery.beforeAdmission();
+        if (!readiness.admissionAvailable && readiness.reason) {
+          return rejectWebhook(readiness.reason);
+        }
 
-      if (operatorPaused) {
-        admission.release(result.callId);
-        void hangupCall(result.callId);
-        return {
-          statusCode: REJECTION_STATUS.operator_paused,
-          body: JSON.stringify({ error: "operator_paused" }),
-        };
-      }
+        if (operatorPaused) {
+          return rejectWebhook("operator_paused");
+        }
 
-      const reservation = recovery.reserve(result.callId);
-      if (!reservation.admitted) {
-        admission.release(result.callId);
-        void hangupCall(result.callId);
-        return {
-          statusCode: REJECTION_STATUS[reservation.reason],
-          body: JSON.stringify({ error: reservation.reason }),
-        };
-      }
-      const session = createTelephoneSession({
-        callId: result.callId,
-        apiKey: options.apiKey,
-        availabilityTool: options.availabilityTool,
-        booking: options.booking,
-        connectWebSocket,
-        hangupCall,
-        maxDurationMs: maxCallDurationMs,
-        warningLeadMs,
-        referenceTime: options.referenceTime,
-      });
-
-      void session
-        .start()
-        .then((outcome) => {
-          onOutcome(result, outcome);
-        })
-        .catch((error: unknown) => {
-          onOutcome(result, {
-            callId: result.callId,
-            status: "failed",
-            toolRoundTrips: 0,
-            durationMs: 0,
-            durationWarningSent: false,
-            error: `Coordinator unhandled error: ${error instanceof Error ? error.message : String(error)}`,
-          });
+        const session = createTelephoneSession({
+          callId: result.callId,
+          apiKey: options.apiKey,
+          availabilityTool: options.availabilityTool,
+          booking: options.booking,
+          connectWebSocket,
+          hangupCall,
+          maxDurationMs: maxCallDurationMs,
+          warningLeadMs,
+          referenceTime: options.referenceTime,
         });
+        const reservation = recovery.reserve(result.callId);
+        if (!reservation.admitted) {
+          return rejectWebhook(reservation.reason);
+        }
 
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ status: "admitted", call_id: result.callId }),
-      };
+        handedOff = true;
+        void runAdmittedSession(session, result);
+
+        return {
+          statusCode: 200,
+          body: JSON.stringify({ status: "admitted", call_id: result.callId }),
+        };
+      } finally {
+        if (!handedOff) {
+          result.release();
+          void requestBestEffortHangup(result.callId, hangupCall);
+        }
+      }
     },
 
     listEvidence() {

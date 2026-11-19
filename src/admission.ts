@@ -30,6 +30,7 @@ export type AdmissionResult =
       readonly callId: string;
       readonly callerNumber: string;
       readonly calledNumber: string;
+      release(): void;
     }
   | {
       readonly admitted: false;
@@ -39,7 +40,6 @@ export type AdmissionResult =
 
 export interface IncomingCallAdmission {
   admit(input: SignedWebhook): AdmissionResult;
-  release(callId: string): void;
   activeCallCount(): number;
 }
 
@@ -251,16 +251,20 @@ export function createIncomingCallAdmission(
 
       activeCalls.add(callId);
       processedWebhookIds.add(input.id);
+      let released = false;
       return {
         admitted: true,
         callId,
         callerNumber,
         calledNumber,
+        release() {
+          if (released) {
+            return;
+          }
+          released = true;
+          activeCalls.delete(callId);
+        },
       };
-    },
-
-    release(callId: string): void {
-      activeCalls.delete(callId);
     },
 
     activeCallCount(): number {
