@@ -52,7 +52,7 @@ export function signedHeaders(
   };
 }
 
-export function bookingWithPendingAppointment(
+export function seedPendingAppointmentRecovery(
   dataDir: string,
   reconcileStatus: () => string | Promise<string>,
 ): BookingTool {

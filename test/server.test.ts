@@ -11,9 +11,9 @@ import {
 import { FakeRealtimeSocket } from "./fake-socket.js";
 import {
   WEBHOOK_SECRET,
-  bookingWithPendingAppointment,
   incomingCallPayload,
   recordedEvidence,
+  seedPendingAppointmentRecovery,
   signedHeaders,
 } from "./helpers.js";
 
@@ -228,7 +228,7 @@ it("returns a bounded webhook error and admits a later call after readiness reco
       apiKey: "test-key",
       evidenceToken: EVIDENCE_TOKEN,
       dataDir,
-      booking: bookingWithPendingAppointment(dataDir, () => {
+      booking: seedPendingAppointmentRecovery(dataDir, () => {
         attempts += 1;
         if (attempts === 2) throw new Error("internal Calendar reconciliation failure");
         return attempts === 1 ? "unresolved" : "booked";

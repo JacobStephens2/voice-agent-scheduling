@@ -172,14 +172,10 @@ function defaultConnectWebSocket(
 
 function defaultHangupCall(apiKey: string): (callId: string) => Promise<void> {
   return async (callId: string) => {
-    try {
-      await fetch(`https://api.x.ai/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}` },
-      });
-    } catch {
-      // Hangup is best-effort; evidence still records the outcome.
-    }
+    await fetch(`https://api.x.ai/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
   };
 }
 
@@ -192,12 +188,12 @@ export function createCallLifecycleManager(
     allowedCallerNumbers: options.allowedCallerNumbers,
   });
   const connectWebSocket = options.connectWebSocket ?? defaultConnectWebSocket;
-  const hangupCall = options.hangupCall ?? defaultHangupCall(options.apiKey);
-  const hangupRefusedCall = async (callId: string): Promise<void> => {
+  const requestProviderHangup = options.hangupCall ?? defaultHangupCall(options.apiKey);
+  const hangupCall = async (callId: string): Promise<void> => {
     try {
-      await hangupCall(callId);
+      await requestProviderHangup(callId);
     } catch {
-      // Refusal and cleanup are independent of provider availability.
+      // Hangup is best-effort. Local cleanup continues.
     }
   };
   const maxCallDurationMs = options.maxCallDurationMs ?? MAX_CALL_DURATION_MS_DEFAULT;
@@ -279,7 +275,7 @@ export function createCallLifecycleManager(
           (result.reason === "unauthorized_caller" ||
             result.reason === "concurrency_limit_reached")
         ) {
-          void hangupRefusedCall(result.callId);
+          void hangupCall(result.callId);
         }
         if (operatorPaused && result.reason === "concurrency_limit_reached") {
           return rejectWebhook("operator_paused");
@@ -324,7 +320,7 @@ export function createCallLifecycleManager(
       } finally {
         if (!handedOff) {
           result.release();
-          void hangupRefusedCall(result.callId);
+          void hangupCall(result.callId);
         }
       }
     },

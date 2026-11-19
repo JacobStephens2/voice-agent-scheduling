@@ -301,7 +301,7 @@ export function createTelephoneSession(options: {
 
   return {
     start(): Promise<SessionOutcome> {
-      return new Promise((resolve) => {
+      return new Promise((resolve, reject) => {
         const startedAt = Date.now();
         let modelVerified: string | undefined;
         let reasoningVerified: string | undefined;
@@ -313,10 +313,17 @@ export function createTelephoneSession(options: {
         let warningTimeout: NodeJS.Timeout | undefined;
         const maxDurationMs = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS;
         const warningLeadMs = options.warningLeadMs ?? DEFAULT_WARNING_LEAD_MS;
-        const bookingCall = options.booking?.openCall({
-          callId: options.callId,
-          referenceTime: options.referenceTime,
-        });
+        let bookingCall: BookingCall | undefined;
+        try {
+          bookingCall = options.booking?.openCall({
+            callId: options.callId,
+            referenceTime: options.referenceTime,
+          });
+        } catch (error) {
+          void options.hangupCall?.(options.callId);
+          reject(error);
+          return;
+        }
 
         const finish = (status: "completed" | "failed", error?: string) => {
           if (finished) {

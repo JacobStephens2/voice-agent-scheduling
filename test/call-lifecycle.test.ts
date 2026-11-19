@@ -10,9 +10,9 @@ import { createSyntheticAvailabilityTool } from "../src/synthetic-calendar.js";
 import { FakeRealtimeSocket } from "./fake-socket.js";
 import {
   WEBHOOK_SECRET,
-  bookingWithPendingAppointment,
   incomingCallPayload,
   recordedEvidence,
+  seedPendingAppointmentRecovery,
   signedHeaders,
 } from "./helpers.js";
 
@@ -61,7 +61,7 @@ describe("scheduling call lifecycle", () => {
       const manager = createManager({
         dataDir,
         sockets,
-        booking: bookingWithPendingAppointment(dataDir, () => ++attempts === 1 ? "unresolved" : "booked"),
+        booking: seedPendingAppointmentRecovery(dataDir, () => ++attempts === 1 ? "unresolved" : "booked"),
       });
       expect(manager.recoveryStatus().reason).toBe("recovery_pending");
       const response = await manager.handleWebhook(signedHeaders(incomingCallPayload({ callId: "call-first-recovery" })));
@@ -87,7 +87,7 @@ describe("scheduling call lifecycle", () => {
       const manager = createManager({
         dataDir,
         sockets,
-        booking: bookingWithPendingAppointment(dataDir, async () => {
+        booking: seedPendingAppointmentRecovery(dataDir, async () => {
           attempts += 1;
           if (attempts === 1) return "unresolved";
           if (attempts === 2) {
@@ -230,9 +230,10 @@ describe("scheduling call lifecycle", () => {
     }
   });
 
-  it("settles a rejected Telephone session start once before recording bounded evidence", async () => {
+  it("hangs up and settles a rejected Telephone session start before recording bounded evidence", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "scheduling-start-rejection-"));
     const sockets: FakeRealtimeSocket[] = [];
+    const hangups: string[] = [];
     const recordingStates: Array<{ active: number; reserved: number }> = [];
     let starts = 0;
     try {
@@ -250,6 +251,10 @@ describe("scheduling call lifecycle", () => {
         dataDir,
         evidence,
         sockets,
+        hangupCall: async (callId) => {
+          hangups.push(callId);
+          throw new Error("hangup unavailable");
+        },
         booking: {
           definitions: () => [],
           openCall: () => {
@@ -273,6 +278,7 @@ describe("scheduling call lifecycle", () => {
       });
       expect(starts).toBe(1);
       expect(sockets).toHaveLength(0);
+      expect(hangups).toEqual([callId]);
       expect(recordingStates).toEqual([{ active: 0, reserved: 0 }]);
       expect(existsSync(join(dataDir, "active-call.json"))).toBe(false);
     } finally {
