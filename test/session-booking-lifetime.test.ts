@@ -1,6 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppointmentBooking, type AppointmentBookingCall } from "../src/calendar/booking-tool.js";
 import { createTelephoneSession } from "../src/session.js";
@@ -11,6 +12,30 @@ import { completeReadback } from "./helpers.js";
 afterEach(() => vi.useRealTimers());
 
 describe("Scheduling call closes its Appointment booking interface", () => {
+  it("reports the Appointment startup error when the provider hangup also rejects", async () => {
+    const setupError = new Error("Appointment setup failed");
+    const hangups: string[] = [];
+    const callId = "call-startup-failure";
+    const session = createTelephoneSession({
+      callId,
+      apiKey: "test-key",
+      availabilityTool: createSyntheticAvailabilityTool(),
+      booking: {
+        definitions: () => [],
+        openCall() { throw setupError; },
+      },
+      connectWebSocket() { throw new Error("Unexpected Telephone socket"); },
+      async hangupCall(id) {
+        hangups.push(id);
+        throw new Error("Provider hangup rejected");
+      },
+    });
+
+    await expect(session.start()).rejects.toBe(setupError);
+    await setImmediate();
+    expect(hangups).toEqual([callId]);
+  });
+
   it.each(["connection failure", "provider failure", "socket error", "socket closure", "duration cutoff", "model failure"] as const)(
     "seals the call on %s", async (ending) => {
       vi.useFakeTimers();

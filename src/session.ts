@@ -286,6 +286,17 @@ function durationNoticePayload(text: string): string {
   });
 }
 
+export async function requestBestEffortHangup(
+  callId: string,
+  hangupCall?: (callId: string) => Promise<void>,
+): Promise<void> {
+  try {
+    await hangupCall?.(callId);
+  } catch {
+    // Local cleanup continues if the provider is unavailable.
+  }
+}
+
 export function createTelephoneSession(options: {
   callId: string;
   apiKey: string;
@@ -320,7 +331,7 @@ export function createTelephoneSession(options: {
             referenceTime: options.referenceTime,
           });
         } catch (error) {
-          void options.hangupCall?.(options.callId);
+          void requestBestEffortHangup(options.callId, options.hangupCall);
           reject(error);
           return;
         }
@@ -337,7 +348,7 @@ export function createTelephoneSession(options: {
           if (warningTimeout) {
             clearTimeout(warningTimeout);
           }
-          void options.hangupCall?.(options.callId);
+          void requestBestEffortHangup(options.callId, options.hangupCall);
           try {
             socket?.close();
           } catch {

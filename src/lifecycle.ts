@@ -27,6 +27,7 @@ import {
 import { createAppointmentLedger, type AppointmentLedger } from "./calendar/appointment-ledger.js";
 import {
   createTelephoneSession,
+  requestBestEffortHangup,
   type AvailabilityTool,
   type BookingTool,
   type ConnectWebSocket,
@@ -188,14 +189,7 @@ export function createCallLifecycleManager(
     allowedCallerNumbers: options.allowedCallerNumbers,
   });
   const connectWebSocket = options.connectWebSocket ?? defaultConnectWebSocket;
-  const requestProviderHangup = options.hangupCall ?? defaultHangupCall(options.apiKey);
-  const hangupCall = async (callId: string): Promise<void> => {
-    try {
-      await requestProviderHangup(callId);
-    } catch {
-      // Hangup is best-effort. Local cleanup continues.
-    }
-  };
+  const hangupCall = options.hangupCall ?? defaultHangupCall(options.apiKey);
   const maxCallDurationMs = options.maxCallDurationMs ?? MAX_CALL_DURATION_MS_DEFAULT;
   const warningLeadMs = options.warningLeadMs ?? DURATION_WARNING_LEAD_MS_DEFAULT;
   const ledger = options.ledger ?? createAppointmentLedger({ dataDir: options.dataDir });
@@ -275,7 +269,7 @@ export function createCallLifecycleManager(
           (result.reason === "unauthorized_caller" ||
             result.reason === "concurrency_limit_reached")
         ) {
-          void hangupCall(result.callId);
+          void requestBestEffortHangup(result.callId, hangupCall);
         }
         if (operatorPaused && result.reason === "concurrency_limit_reached") {
           return rejectWebhook("operator_paused");
@@ -320,7 +314,7 @@ export function createCallLifecycleManager(
       } finally {
         if (!handedOff) {
           result.release();
-          void hangupCall(result.callId);
+          void requestBestEffortHangup(result.callId, hangupCall);
         }
       }
     },
