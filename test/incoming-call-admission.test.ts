@@ -284,6 +284,27 @@ describe("incoming call admission", () => {
     });
   });
 
+  it("does not take an allowlisted tel URI from an unclosed display-name quote", () => {
+    const from = '"<tel:+15550001111> <sip:+19995550000@sip.telnyx.com>';
+    const displayNameAllowlist = createIncomingCallAdmission({
+      webhookSecret: WEBHOOK_SECRET,
+      maxConcurrentCalls: 1,
+      allowedCallerNumbers: ["+15550001111"],
+    });
+    expect(
+      displayNameAllowlist.admit(
+        signedHeaders(
+          incomingCallPayload({ callId: "call-unclosed-tel-quote", callerNumber: from }),
+          { webhookId: "msg_unclosed_tel_quote" },
+        ),
+      ),
+    ).toEqual({
+      admitted: false,
+      reason: "unauthorized_caller",
+      callId: "call-unclosed-tel-quote",
+    });
+  });
+
   it("uses a tel angle-addr, not an earlier sip prefix", () => {
     const from = "sip:+15550001111@evil.example <tel:+19995550000>";
     const prefixAllowlist = createIncomingCallAdmission({

@@ -99,17 +99,31 @@ function sipHeader(headers: readonly SipHeader[] | undefined, name: string): str
 }
 
 function callerNumberFromHeader(from: string): string {
-  const subscriber = firstTelephoneSubscriber(from);
+  const unquoted = unquoteDisplayName(from);
+  const subscriber = firstTelephoneSubscriber(unquoted.visible);
   if (subscriber === undefined) {
-    return extractE164(from);
+    // A bare phone number has no display-name quote. An unmatched quote must
+    // not put that hidden text back into the allowlist decision.
+    return extractE164(unquoted.hidUnmatchedQuote ? unquoted.visible : from);
   }
   return extractE164(subscriber);
 }
 
+function unquoteDisplayName(from: string): {
+  readonly visible: string;
+  readonly hidUnmatchedQuote: boolean;
+} {
+  const closed = from.replace(/"(?:[^"\\]|\\.)*"/g, " ");
+  const unmatched = closed.indexOf('"');
+  if (unmatched === -1) {
+    return { visible: closed, hidUnmatchedQuote: false };
+  }
+  return { visible: closed.slice(0, unmatched), hidUnmatchedQuote: true };
+}
+
 function firstTelephoneSubscriber(from: string): string | undefined {
-  const visible = from.replace(/"(?:[^"\\]|\\.)*"/g, " ");
   // A non-telephone angle must not send the search back to an earlier URI.
-  let rest = visible;
+  let rest = from;
   while (rest.includes("<")) {
     const open = rest.indexOf("<");
     const close = rest.indexOf(">", open + 1);
@@ -127,7 +141,7 @@ function firstTelephoneSubscriber(from: string): string | undefined {
     }
     rest = rest.slice(close + 1);
   }
-  return firstUnbracketedTelephoneSubscriber(visible);
+  return firstUnbracketedTelephoneSubscriber(from);
 }
 
 function firstUnbracketedTelephoneSubscriber(value: string): string | undefined {
