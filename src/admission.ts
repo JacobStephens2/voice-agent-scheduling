@@ -98,31 +98,81 @@ function sipHeader(headers: readonly SipHeader[] | undefined, name: string): str
   return typeof match?.value === "string" ? match.value : "";
 }
 
-function callerNumberFromSipFrom(from: string): string {
-  const user = sipOrSipsUser(from);
-  if (user === undefined) {
-    return extractE164(from);
+function callerNumberFromHeader(from: string): string {
+  const unquoted = unquoteDisplayName(from);
+  const subscriber = firstTelephoneSubscriber(unquoted.visible);
+  if (subscriber === undefined) {
+    // A bare phone number has no display-name quote. An unmatched quote must
+    // not put that hidden text back into the allowlist decision.
+    return extractE164(unquoted.hidUnmatchedQuote ? unquoted.visible : from);
   }
-  return extractE164(user);
+  return extractE164(subscriber);
 }
 
-function sipOrSipsUser(from: string): string | undefined {
-  const visible = from.replace(/"(?:[^"\\]|\\.)*"/g, " ");
-  // A non-sip angle must not send the search back to an earlier sip: user.
-  let rest = visible;
+function unquoteDisplayName(from: string): {
+  readonly visible: string;
+  readonly hidUnmatchedQuote: boolean;
+} {
+  const closed = from.replace(/"(?:[^"\\]|\\.)*"/g, " ");
+  const unmatched = closed.indexOf('"');
+  if (unmatched === -1) {
+    return { visible: closed, hidUnmatchedQuote: false };
+  }
+  return { visible: closed.slice(0, unmatched), hidUnmatchedQuote: true };
+}
+
+function firstTelephoneSubscriber(from: string): string | undefined {
+  // A non-telephone angle must not send the search back to an earlier URI.
+  let rest = from;
   while (rest.includes("<")) {
     const open = rest.indexOf("<");
     const close = rest.indexOf(">", open + 1);
     if (close === -1) {
       break;
     }
-    const angledUser = sipUserIn(rest.slice(open + 1, close).trim());
+    const angled = rest.slice(open + 1, close).trim();
+    const telUser = telSubscriber(angled);
+    if (telUser !== undefined) {
+      return telUser;
+    }
+    const angledUser = sipUserIn(angled);
     if (angledUser !== undefined) {
       return angledUser;
     }
     rest = rest.slice(close + 1);
   }
-  return sipUserIn(visible);
+  return firstUnbracketedTelephoneSubscriber(from);
+}
+
+function firstUnbracketedTelephoneSubscriber(value: string): string | undefined {
+  const pattern = /(?:^|[^A-Za-z0-9])(tel|sips?):/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(value)) !== null) {
+    const scheme = match[1] ?? "";
+    const schemeStart = match.index + match[0].length - (scheme.length + 1);
+    const candidate = value.slice(schemeStart);
+    if (/^tel:/i.test(candidate)) {
+      return telSubscriber(candidate);
+    }
+    const sip = /^sips?:([^@]*)@/i.exec(candidate);
+    if (sip) {
+      return subscriberBeforeParameter(sip[1] ?? "");
+    }
+  }
+  return undefined;
+}
+
+function subscriberBeforeParameter(user: string): string {
+  const semi = user.indexOf(";");
+  return semi === -1 ? user : user.slice(0, semi);
+}
+
+function telSubscriber(value: string): string | undefined {
+  const matched = /^tel:([^;?\s]*)/i.exec(value);
+  if (!matched) {
+    return undefined;
+  }
+  return matched[1] ?? "";
 }
 
 function sipUserIn(value: string): string | undefined {
@@ -130,7 +180,7 @@ function sipUserIn(value: string): string | undefined {
   if (!matched) {
     return undefined;
   }
-  return matched[1] ?? "";
+  return subscriberBeforeParameter(matched[1] ?? "");
 }
 
 export function createIncomingCallAdmission(
@@ -186,7 +236,7 @@ export function createIncomingCallAdmission(
         return { admitted: false, reason: "duplicate_delivery" };
       }
 
-      const callerNumber = callerNumberFromSipFrom(
+      const callerNumber = callerNumberFromHeader(
         sipHeader(payload.data?.sip_headers, "from"),
       );
       const calledNumber = extractE164(sipHeader(payload.data?.sip_headers, "to"));
