@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { OPERATIONAL_RECORDS_FILE, createCallEvidence, type CallEvidence } from "../src/evidence.js";
-import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
-import { createCallLifecycleManager } from "../src/lifecycle.js";
+import { BUDGET_LEDGER_FILE } from "../src/budget.js";
+import { createCallLifecycleManager, type CallLifecycleManagerOptions } from "../src/lifecycle.js";
 import { createSyntheticAvailabilityTool } from "../src/synthetic-calendar.js";
 import { FakeRealtimeSocket } from "./fake-socket.js";
 import {
   WEBHOOK_SECRET,
+  bookingWithPendingAppointment,
   incomingCallPayload,
   recordedEvidence,
   signedHeaders,
@@ -20,6 +21,8 @@ const REQUIRED_MODEL = "grok-voice-think-fast-2.0";
 function createManager(options: {
   sockets: FakeRealtimeSocket[];
   hangups?: string[];
+  hangupCall?: CallLifecycleManagerOptions["hangupCall"];
+  booking?: CallLifecycleManagerOptions["booking"];
   dataDir?: string;
   maxCallDurationMs?: number;
   evidence?: CallEvidence;
@@ -36,9 +39,10 @@ function createManager(options: {
       options.sockets.push(socket);
       return socket;
     },
-    hangupCall: async (callId) => {
+    hangupCall: options.hangupCall ?? (async (callId) => {
       options.hangups?.push(callId);
-    },
+    }),
+    booking: options.booking,
     dataDir: options.dataDir,
     evidence: options.evidence,
     perMinuteMicroUsd: options.perMinuteMicroUsd,
@@ -51,45 +55,14 @@ function createManager(options: {
 describe("scheduling call lifecycle", () => {
   it("retries pending startup recovery on the first webhook before admitting its Scheduling call", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "scheduling-first-recovery-"));
-    const ledger = createAppointmentLedger({ dataDir });
-    ledger.record({
-      operationId: "op-interrupted",
-      eventId: "event-interrupted",
-      callId: "call-interrupted",
-      proposalId: "proposal-interrupted",
-      calendarId: "primary",
-      startUtc: "2026-11-20T15:00:00.000Z",
-      status: "pending",
-    });
-    writeFileSync(join(dataDir, "budget-ledger.json"), JSON.stringify({
-      periodId: "2026-11", spentMicroUsd: 0, reservations: {},
-    }));
     const sockets: FakeRealtimeSocket[] = [];
     let attempts = 0;
-    const manager = createCallLifecycleManager({
-      webhookSecret: WEBHOOK_SECRET,
-      apiKey: "test-xai-key",
-      availabilityTool: createSyntheticAvailabilityTool(),
-      dataDir,
-      ledger,
-      booking: {
-        definitions: () => [],
-        openCall: () => ({ execute: async () => ({}), observe() {}, close() {} }),
-        reconcileUnresolvedOperations: async () => [{
-          operationId: "op-interrupted",
-          eventId: "event-interrupted",
-          status: ++attempts === 1 ? "unresolved" : "booked",
-          eventExists: true,
-        }],
-      },
-      connectWebSocket: (url, headers) => {
-        const socket = new FakeRealtimeSocket(url, headers);
-        sockets.push(socket);
-        return socket;
-      },
-      hangupCall: async () => undefined,
-    });
     try {
+      const manager = createManager({
+        dataDir,
+        sockets,
+        booking: bookingWithPendingAppointment(dataDir, () => ++attempts === 1 ? "unresolved" : "booked"),
+      });
       expect(manager.recoveryStatus().reason).toBe("recovery_pending");
       const response = await manager.handleWebhook(signedHeaders(incomingCallPayload({ callId: "call-first-recovery" })));
       expect(response.statusCode).toBe(200);
@@ -98,6 +71,81 @@ describe("scheduling call lifecycle", () => {
       sockets[0]!.close();
       await recordedEvidence(() => manager.listEvidence(), "call-first-recovery");
     } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("releases the provisional slot when a pending readiness assessment rejects", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "scheduling-readiness-failure-"));
+    const sockets: FakeRealtimeSocket[] = [];
+    const hangups: Array<{ callId: string; active: number }> = [];
+    const failure = new Error("transient Calendar reconciliation failure");
+    let attempts = 0;
+    let resumeAssessment!: () => void;
+    const assessmentGate = new Promise<void>((resolve) => { resumeAssessment = resolve; });
+    try {
+      const manager = createManager({
+        dataDir,
+        sockets,
+        booking: bookingWithPendingAppointment(dataDir, async () => {
+          attempts += 1;
+          if (attempts === 1) return "unresolved";
+          if (attempts === 2) {
+            await assessmentGate;
+            throw failure;
+          }
+          return "booked";
+        }),
+        hangupCall: async (callId) => {
+          hangups.push({ callId, active: manager.activeCallCount() });
+          if (callId === "call-readiness-failure") throw new Error("hangup unavailable");
+        },
+      });
+      const failed = signedHeaders(incomingCallPayload({ callId: "call-readiness-failure" }));
+      const later = signedHeaders(incomingCallPayload({ callId: "call-readiness-recovered" }), {
+        webhookId: "evt-readiness-recovered",
+      });
+      const budgetPath = join(dataDir, BUDGET_LEDGER_FILE);
+      const initialBudget = readFileSync(budgetPath, "utf8");
+      const request = manager.handleWebhook(failed);
+      try {
+        expect(manager.activeCallCount()).toBe(1);
+        await vi.waitFor(() => expect(attempts).toBe(2));
+        expect(await manager.handleWebhook(later)).toEqual({
+          statusCode: 429,
+          body: '{"error":"concurrency_limit_reached"}',
+        });
+        expect(manager.activeCallCount()).toBe(1);
+        expect(sockets).toHaveLength(0);
+      } finally {
+        resumeAssessment();
+        await expect(request).rejects.toBe(failure);
+      }
+
+      expect(manager.activeCallCount()).toBe(0);
+      expect(hangups).toEqual([
+        { callId: "call-readiness-recovered", active: 1 },
+        { callId: "call-readiness-failure", active: 0 },
+      ]);
+      expect(manager.listEvidence()).toEqual([]);
+      expect(manager.budgetSnapshot()).toMatchObject({ reservedMicroUsd: 0, spentMicroUsd: 0 });
+      expect(readFileSync(budgetPath, "utf8")).toBe(initialBudget);
+      expect(existsSync(join(dataDir, "active-call.json"))).toBe(false);
+      expect(await manager.handleWebhook(failed)).toEqual({
+        statusCode: 409,
+        body: '{"error":"duplicate_delivery"}',
+      });
+
+      expect(await manager.handleWebhook(later)).toEqual({
+        statusCode: 200,
+        body: '{"status":"admitted","call_id":"call-readiness-recovered"}',
+      });
+      expect(attempts).toBe(3);
+      expect(sockets).toHaveLength(1);
+      sockets[0]!.close();
+      await recordedEvidence(() => manager.listEvidence(), "call-readiness-recovered");
+    } finally {
+      for (const socket of sockets) socket.close();
       rmSync(dataDir, { recursive: true, force: true });
     }
   });
@@ -137,6 +185,95 @@ describe("scheduling call lifecycle", () => {
       expect(budgetRefusal).toEqual({ statusCode: 503, body: '{"error":"budget_exhausted"}' });
       expect(complete.activeCallCount()).toBe(0);
       expect(hangups).toEqual(["call-incomplete", "call-paused", "call-exhausted"]);
+      expect(existsSync(join(dataDir, "active-call.json"))).toBe(false);
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("releases the slot and leaves usage reserved when terminal settlement fails", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "scheduling-settlement-failure-"));
+    const sockets: FakeRealtimeSocket[] = [];
+    const now = new Date("2026-11-15T15:00:00.000Z");
+    const settlementActiveCounts: number[] = [];
+    let settling = false;
+    try {
+      const manager = createManager({
+        dataDir,
+        sockets,
+        now: () => {
+          if (settling) {
+            settlementActiveCounts.push(manager.activeCallCount());
+            if (settlementActiveCounts.length === 1) throw new Error("budget clock unavailable");
+          }
+          return now;
+        },
+      });
+      const input = signedHeaders(incomingCallPayload({ callId: "call-settlement-failure" }));
+      expect((await manager.handleWebhook(input)).statusCode).toBe(200);
+      const reserved = manager.budgetSnapshot().reservedMicroUsd;
+      expect(reserved).toBeGreaterThan(0);
+
+      settling = true;
+      sockets[0]!.close();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(settlementActiveCounts).toEqual([0]);
+      expect(manager.activeCallCount()).toBe(0);
+      expect(manager.budgetSnapshot()).toMatchObject({ reservedMicroUsd: reserved, spentMicroUsd: 0 });
+      expect(manager.listEvidence()).toEqual([]);
+      const restarted = createManager({ dataDir, sockets: [], now: () => now });
+      expect(restarted.budgetSnapshot()).toMatchObject({ reservedMicroUsd: 0, spentMicroUsd: reserved });
+    } finally {
+      for (const socket of sockets) socket.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("settles a rejected Telephone session start once before recording bounded evidence", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "scheduling-start-rejection-"));
+    const sockets: FakeRealtimeSocket[] = [];
+    const recordingStates: Array<{ active: number; reserved: number }> = [];
+    let starts = 0;
+    try {
+      const evidence = createCallEvidence({
+        dataDir,
+        now: () => {
+          recordingStates.push({
+            active: manager.activeCallCount(),
+            reserved: manager.budgetSnapshot().reservedMicroUsd,
+          });
+          return new Date();
+        },
+      });
+      const manager = createManager({
+        dataDir,
+        evidence,
+        sockets,
+        booking: {
+          definitions: () => [],
+          openCall: () => {
+            starts += 1;
+            throw new Error("internal Appointment setup failure");
+          },
+        },
+      });
+      const callId = "call-rejected-start";
+      const response = await manager.handleWebhook(signedHeaders(incomingCallPayload({ callId })));
+
+      expect(response).toEqual({
+        statusCode: 200,
+        body: '{"status":"admitted","call_id":"call-rejected-start"}',
+      });
+      expect(await recordedEvidence(() => manager.listEvidence(), callId)).toMatchObject({
+        status: "failed",
+        error: "coordinator_error",
+        durationMs: 0,
+        toolRoundTrips: 0,
+      });
+      expect(starts).toBe(1);
+      expect(sockets).toHaveLength(0);
+      expect(recordingStates).toEqual([{ active: 0, reserved: 0 }]);
       expect(existsSync(join(dataDir, "active-call.json"))).toBe(false);
     } finally {
       rmSync(dataDir, { recursive: true, force: true });

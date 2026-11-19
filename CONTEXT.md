@@ -15,6 +15,9 @@ _Avoid_: Server agent, administrative agent
 **Scheduling call**:
 The inbound phone conversation in which a caller discusses availability and arranges an appointment with the scheduling agent.
 
+**Scheduling call admission**:
+The process that validates an incoming Scheduling call delivery, provisionally holds a concurrency slot during readiness, operator pause, and budget checks, and holds that slot for an admitted Scheduling call until it ends.
+
 **Scheduling call recovery**:
 The process-owned protocol that validates restored scheduling state, preserves usage for interrupted Scheduling calls, and reconciles unresolved Appointment ledger identities before new Scheduling calls proceed. It owns the durable active-call claim that identifies an interrupted Scheduling call and releases its place after a restart.
 

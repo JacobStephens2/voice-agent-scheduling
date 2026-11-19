@@ -1,4 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createSchedulingServer,
@@ -8,7 +11,9 @@ import {
 import { FakeRealtimeSocket } from "./fake-socket.js";
 import {
   WEBHOOK_SECRET,
+  bookingWithPendingAppointment,
   incomingCallPayload,
+  recordedEvidence,
   signedHeaders,
 } from "./helpers.js";
 
@@ -49,6 +54,21 @@ function requestWithHost(
 
 const PORT = 3598;
 const EVIDENCE_TOKEN = "test-evidence-token";
+
+function postSignedWebhook(baseUrl: string, callId: string, webhookId: string): Promise<Response> {
+  const payload = incomingCallPayload({ callId });
+  const signed = signedHeaders(payload, { webhookId });
+  return fetch(`${baseUrl}/xai/sip-webhook`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "webhook-id": signed.id,
+      "webhook-timestamp": signed.timestamp,
+      "webhook-signature": signed.signature,
+    },
+    body: payload,
+  });
+}
 
 describe("scheduling HTTP boundary", () => {
   const app = createSchedulingServer({
@@ -186,24 +206,65 @@ describe("scheduling HTTP boundary", () => {
   });
 
   it("admits a signed POST /xai/sip-webhook", async () => {
-    const payload = incomingCallPayload({ callId: "call-server-1" });
-    const signed = signedHeaders(payload, { webhookId: "evt_server_1" });
-    const response = await fetch(`http://127.0.0.1:${PORT}/xai/sip-webhook`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "webhook-id": signed.id,
-        "webhook-timestamp": signed.timestamp,
-        "webhook-signature": signed.signature,
-      },
-      body: payload,
-    });
+    const response = await postSignedWebhook(`http://127.0.0.1:${PORT}`, "call-server-1", "evt_server_1");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       status: "admitted",
       call_id: "call-server-1",
     });
   });
+});
+
+it("returns a bounded webhook error and admits a later call after readiness recovers", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "scheduling-http-readiness-"));
+  const sockets: FakeRealtimeSocket[] = [];
+  const hangups: string[] = [];
+  let attempts = 0;
+  let app: SchedulingServer | undefined;
+  try {
+    app = createSchedulingServer({
+      port: 0,
+      webhookSecret: WEBHOOK_SECRET,
+      apiKey: "test-key",
+      evidenceToken: EVIDENCE_TOKEN,
+      dataDir,
+      booking: bookingWithPendingAppointment(dataDir, () => {
+        attempts += 1;
+        if (attempts === 2) throw new Error("internal Calendar reconciliation failure");
+        return attempts === 1 ? "unresolved" : "booked";
+      }),
+      connectWebSocket: (url, headers) => {
+        const socket = new FakeRealtimeSocket(url, headers);
+        sockets.push(socket);
+        return socket;
+      },
+      hangupCall: async (callId) => { hangups.push(callId); },
+    });
+    await app.start();
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("Missing HTTP address");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    const failed = await postSignedWebhook(baseUrl, "call-http-readiness-failure", "evt-http-failed");
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toEqual({ error: "internal_server_error" });
+    expect(hangups).toEqual(["call-http-readiness-failure"]);
+    expect(sockets).toHaveLength(0);
+    expect(await (await fetch(`${baseUrl}/health`)).json()).toMatchObject({ activeCalls: 0 });
+
+    const callId = "call-http-readiness-recovered";
+    const later = await postSignedWebhook(baseUrl, callId, "evt-http-recovered");
+    expect(later.status).toBe(200);
+    expect(await later.json()).toEqual({ status: "admitted", call_id: callId });
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.close();
+    await recordedEvidence(app.lifecycleManager.listEvidence, callId);
+    expect(app.lifecycleManager.listEvidence().map((row) => row.callId)).toEqual([callId]);
+  } finally {
+    for (const socket of sockets) socket.close();
+    if (app?.server.listening) await app.stop();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 describe("operator setup pages", () => {

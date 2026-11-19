@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { describe, expect, it } from "vitest";
 import { createIncomingCallAdmission } from "../src/admission.js";
 import {
@@ -22,6 +23,7 @@ describe("incoming call admission", () => {
       callId: "call-1",
       callerNumber: "+15551234567",
       calledNumber: "+18005550199",
+      release: expect.any(Function),
     });
   });
 
@@ -38,7 +40,7 @@ describe("incoming call admission", () => {
     expect(result).toEqual({ admitted: false, reason: "invalid_signature" });
   });
 
-  it("rejects a replay of the same webhook id or an already-active call id", () => {
+  it("rejects a replay and lets only the current allocation release a reused call ID", () => {
     const admission = createIncomingCallAdmission({
       webhookSecret: WEBHOOK_SECRET,
       maxConcurrentCalls: 2,
@@ -46,7 +48,8 @@ describe("incoming call admission", () => {
     const payload = incomingCallPayload({ callId: "call-dup" });
     const first = signedHeaders(payload, { webhookId: "msg_dup_1" });
 
-    expect(admission.admit(first).admitted).toBe(true);
+    const original = admission.admit(first);
+    assert(original.admitted);
     expect(admission.admit(first)).toEqual({
       admitted: false,
       reason: "duplicate_delivery",
@@ -57,6 +60,21 @@ describe("incoming call admission", () => {
       admitted: false,
       reason: "duplicate_delivery",
     });
+
+    original.release();
+    original.release();
+    expect(admission.activeCallCount()).toBe(0);
+    expect(admission.admit(first)).toEqual({
+      admitted: false,
+      reason: "duplicate_delivery",
+    });
+
+    const replacement = admission.admit(second);
+    assert(replacement.admitted);
+    original.release();
+    expect(admission.activeCallCount()).toBe(1);
+    replacement.release();
+    expect(admission.activeCallCount()).toBe(0);
   });
 
   it("rejects a second caller while one scheduling call is active, then admits after release", () => {
@@ -70,21 +88,19 @@ describe("incoming call admission", () => {
       callerNumber: "+15559876543",
     });
 
-    expect(
-      admission.admit(signedHeaders(firstPayload, { webhookId: "msg_a" })).admitted,
-    ).toBe(true);
+    const first = admission.admit(signedHeaders(firstPayload, { webhookId: "msg_a" }));
+    assert(first.admitted);
 
-    expect(admission.admit(signedHeaders(secondPayload, { webhookId: "msg_b" }))).toEqual({
+    const second = signedHeaders(secondPayload, { webhookId: "msg_b" });
+    expect(admission.admit(second)).toEqual({
       admitted: false,
       reason: "concurrency_limit_reached",
       callId: "call-b",
     });
 
-    admission.release("call-a");
+    first.release();
     expect(admission.activeCallCount()).toBe(0);
-    expect(
-      admission.admit(signedHeaders(secondPayload, { webhookId: "msg_b2" })),
-    ).toEqual({
+    expect(admission.admit(second)).toMatchObject({
       admitted: true,
       callId: "call-b",
       callerNumber: "+15559876543",
@@ -124,7 +140,7 @@ describe("incoming call admission", () => {
         callerNumber: from,
       });
       const result = admission.admit(signedHeaders(payload, { webhookId: `msg_${label}` }));
-      expect(result, label).toEqual({
+      expect(result, label).toMatchObject({
         admitted: true,
         callId: `call-${label}`,
         callerNumber: "+15555550177",
@@ -174,7 +190,7 @@ describe("incoming call admission", () => {
           ),
         ),
         label,
-      ).toEqual({
+      ).toMatchObject({
         admitted: true,
         callId: `call-${label}-user`,
         callerNumber: "+19995550000",
@@ -236,7 +252,7 @@ describe("incoming call admission", () => {
           { webhookId: "msg_later_angle_admit" },
         ),
       ),
-    ).toEqual({
+    ).toMatchObject({
       admitted: true,
       callId: "call-later-angle-admit",
       callerNumber: "+19995550000",
@@ -276,7 +292,7 @@ describe("incoming call admission", () => {
           { webhookId: "msg_tel_uri" },
         ),
       ),
-    ).toEqual({
+    ).toMatchObject({
       admitted: true,
       callId: "call-tel-uri",
       callerNumber: "+15555550177",
@@ -337,7 +353,7 @@ describe("incoming call admission", () => {
           { webhookId: "msg_tel_angle" },
         ),
       ),
-    ).toEqual({
+    ).toMatchObject({
       admitted: true,
       callId: "call-tel-angle",
       callerNumber: "+19995550000",
@@ -383,7 +399,7 @@ describe("incoming call admission", () => {
           ),
         ),
         label,
-      ).toEqual({
+      ).toMatchObject({
         admitted: true,
         callId: `call-tel-${label}`,
         callerNumber: "+19995550000",
@@ -424,7 +440,7 @@ describe("incoming call admission", () => {
           { webhookId: "msg_tel_bare" },
         ),
       ),
-    ).toEqual({
+    ).toMatchObject({
       admitted: true,
       callId: "call-tel-bare",
       callerNumber: "+15555550177",
@@ -470,7 +486,7 @@ describe("incoming call admission", () => {
           ),
         ),
         label,
-      ).toEqual({
+      ).toMatchObject({
         admitted: true,
         callId: `call-${label}-sub`,
         callerNumber: "+15555550177",
@@ -503,7 +519,7 @@ describe("incoming call admission", () => {
       callId: "call-public",
       callerNumber: "+15559876543",
     });
-    expect(admission.admit(signedHeaders(payload, { webhookId: "msg_public" }))).toEqual({
+    expect(admission.admit(signedHeaders(payload, { webhookId: "msg_public" }))).toMatchObject({
       admitted: true,
       callId: "call-public",
       callerNumber: "+15559876543",
