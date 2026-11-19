@@ -244,6 +244,173 @@ describe("incoming call admission", () => {
     });
   });
 
+  it("uses the tel From URI for the allowlist, not a display-name number", () => {
+    const from = '"+15550001111" <tel:5555550177>';
+    const displayNameAllowlist = createIncomingCallAdmission({
+      webhookSecret: WEBHOOK_SECRET,
+      maxConcurrentCalls: 1,
+      allowedCallerNumbers: ["+15550001111"],
+    });
+    expect(
+      displayNameAllowlist.admit(
+        signedHeaders(
+          incomingCallPayload({ callId: "call-tel-display", callerNumber: from }),
+          { webhookId: "msg_tel_display" },
+        ),
+      ),
+    ).toEqual({
+      admitted: false,
+      reason: "unauthorized_caller",
+      callId: "call-tel-display",
+    });
+
+    const telAllowlist = createIncomingCallAdmission({
+      webhookSecret: WEBHOOK_SECRET,
+      maxConcurrentCalls: 1,
+      allowedCallerNumbers: ["+15555550177"],
+    });
+    expect(
+      telAllowlist.admit(
+        signedHeaders(
+          incomingCallPayload({ callId: "call-tel-uri", callerNumber: from }),
+          { webhookId: "msg_tel_uri" },
+        ),
+      ),
+    ).toEqual({
+      admitted: true,
+      callId: "call-tel-uri",
+      callerNumber: "+15555550177",
+      calledNumber: "+18005550199",
+    });
+  });
+
+  it("uses a tel angle-addr, not an earlier sip prefix", () => {
+    const from = "sip:+15550001111@evil.example <tel:+19995550000>";
+    const prefixAllowlist = createIncomingCallAdmission({
+      webhookSecret: WEBHOOK_SECRET,
+      maxConcurrentCalls: 1,
+      allowedCallerNumbers: ["+15550001111"],
+    });
+    expect(
+      prefixAllowlist.admit(
+        signedHeaders(
+          incomingCallPayload({ callId: "call-tel-prefix", callerNumber: from }),
+          { webhookId: "msg_tel_prefix" },
+        ),
+      ),
+    ).toEqual({
+      admitted: false,
+      reason: "unauthorized_caller",
+      callId: "call-tel-prefix",
+    });
+
+    const telAllowlist = createIncomingCallAdmission({
+      webhookSecret: WEBHOOK_SECRET,
+      maxConcurrentCalls: 1,
+      allowedCallerNumbers: ["+19995550000"],
+    });
+    expect(
+      telAllowlist.admit(
+        signedHeaders(
+          incomingCallPayload({ callId: "call-tel-angle", callerNumber: from }),
+          { webhookId: "msg_tel_angle" },
+        ),
+      ),
+    ).toEqual({
+      admitted: true,
+      callId: "call-tel-angle",
+      callerNumber: "+19995550000",
+      calledNumber: "+18005550199",
+    });
+  });
+
+  it("uses the first tel URI, not a later sip URI or a tel parameter", () => {
+    for (const [label, from] of [
+      ["later-sip", "<tel:+19995550000> <sip:+15550001111@sip.telnyx.com>"],
+      ["tag", "<tel:+19995550000>;tag=+15550001111"],
+      ["phone-context", "<tel:+19995550000;phone-context=+15550001111>"],
+    ] as const) {
+      const outsideAllowlist = createIncomingCallAdmission({
+        webhookSecret: WEBHOOK_SECRET,
+        maxConcurrentCalls: 1,
+        allowedCallerNumbers: ["+15550001111"],
+      });
+      expect(
+        outsideAllowlist.admit(
+          signedHeaders(
+            incomingCallPayload({ callId: `call-tel-${label}-outside`, callerNumber: from }),
+            { webhookId: `msg_tel_${label}_outside` },
+          ),
+        ),
+        label,
+      ).toEqual({
+        admitted: false,
+        reason: "unauthorized_caller",
+        callId: `call-tel-${label}-outside`,
+      });
+
+      const telAllowlist = createIncomingCallAdmission({
+        webhookSecret: WEBHOOK_SECRET,
+        maxConcurrentCalls: 1,
+        allowedCallerNumbers: ["+19995550000"],
+      });
+      expect(
+        telAllowlist.admit(
+          signedHeaders(
+            incomingCallPayload({ callId: `call-tel-${label}`, callerNumber: from }),
+            { webhookId: `msg_tel_${label}` },
+          ),
+        ),
+        label,
+      ).toEqual({
+        admitted: true,
+        callId: `call-tel-${label}`,
+        callerNumber: "+19995550000",
+        calledNumber: "+18005550199",
+      });
+    }
+  });
+
+  it("uses an unbracketed tel URI for the allowlist, not a parameter", () => {
+    const from = "tel:5555550177;tag=+15550001111";
+    const parameterAllowlist = createIncomingCallAdmission({
+      webhookSecret: WEBHOOK_SECRET,
+      maxConcurrentCalls: 1,
+      allowedCallerNumbers: ["+15550001111"],
+    });
+    expect(
+      parameterAllowlist.admit(
+        signedHeaders(
+          incomingCallPayload({ callId: "call-tel-param", callerNumber: from }),
+          { webhookId: "msg_tel_param" },
+        ),
+      ),
+    ).toEqual({
+      admitted: false,
+      reason: "unauthorized_caller",
+      callId: "call-tel-param",
+    });
+
+    const telAllowlist = createIncomingCallAdmission({
+      webhookSecret: WEBHOOK_SECRET,
+      maxConcurrentCalls: 1,
+      allowedCallerNumbers: ["+15555550177"],
+    });
+    expect(
+      telAllowlist.admit(
+        signedHeaders(
+          incomingCallPayload({ callId: "call-tel-bare", callerNumber: from }),
+          { webhookId: "msg_tel_bare" },
+        ),
+      ),
+    ).toEqual({
+      admitted: true,
+      callId: "call-tel-bare",
+      callerNumber: "+15555550177",
+      calledNumber: "+18005550199",
+    });
+  });
+
   it("rejects callers outside the smoke-mode allowlist", () => {
     const admission = createIncomingCallAdmission({
       webhookSecret: WEBHOOK_SECRET,

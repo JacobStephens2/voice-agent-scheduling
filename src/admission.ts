@@ -98,17 +98,17 @@ function sipHeader(headers: readonly SipHeader[] | undefined, name: string): str
   return typeof match?.value === "string" ? match.value : "";
 }
 
-function callerNumberFromSipFrom(from: string): string {
-  const user = sipOrSipsUser(from);
-  if (user === undefined) {
+function callerNumberFromHeader(from: string): string {
+  const subscriber = firstTelephoneSubscriber(from);
+  if (subscriber === undefined) {
     return extractE164(from);
   }
-  return extractE164(user);
+  return extractE164(subscriber);
 }
 
-function sipOrSipsUser(from: string): string | undefined {
+function firstTelephoneSubscriber(from: string): string | undefined {
   const visible = from.replace(/"(?:[^"\\]|\\.)*"/g, " ");
-  // A non-sip angle must not send the search back to an earlier sip: user.
+  // A non-telephone angle must not send the search back to an earlier URI.
   let rest = visible;
   while (rest.includes("<")) {
     const open = rest.indexOf("<");
@@ -116,13 +116,44 @@ function sipOrSipsUser(from: string): string | undefined {
     if (close === -1) {
       break;
     }
-    const angledUser = sipUserIn(rest.slice(open + 1, close).trim());
+    const angled = rest.slice(open + 1, close).trim();
+    const telUser = telSubscriber(angled);
+    if (telUser !== undefined) {
+      return telUser;
+    }
+    const angledUser = sipUserIn(angled);
     if (angledUser !== undefined) {
       return angledUser;
     }
     rest = rest.slice(close + 1);
   }
-  return sipUserIn(visible);
+  return firstUnbracketedTelephoneSubscriber(visible);
+}
+
+function firstUnbracketedTelephoneSubscriber(value: string): string | undefined {
+  const pattern = /(?:^|[^A-Za-z0-9])(tel|sips?):/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(value)) !== null) {
+    const scheme = match[1] ?? "";
+    const schemeStart = match.index + match[0].length - (scheme.length + 1);
+    const candidate = value.slice(schemeStart);
+    if (/^tel:/i.test(candidate)) {
+      return telSubscriber(candidate);
+    }
+    const sip = /^sips?:([^@]*)@/i.exec(candidate);
+    if (sip) {
+      return sip[1] ?? "";
+    }
+  }
+  return undefined;
+}
+
+function telSubscriber(value: string): string | undefined {
+  const matched = /^tel:([^;?\s]*)/i.exec(value);
+  if (!matched) {
+    return undefined;
+  }
+  return matched[1] ?? "";
 }
 
 function sipUserIn(value: string): string | undefined {
@@ -186,7 +217,7 @@ export function createIncomingCallAdmission(
         return { admitted: false, reason: "duplicate_delivery" };
       }
 
-      const callerNumber = callerNumberFromSipFrom(
+      const callerNumber = callerNumberFromHeader(
         sipHeader(payload.data?.sip_headers, "from"),
       );
       const calledNumber = extractE164(sipHeader(payload.data?.sip_headers, "to"));
