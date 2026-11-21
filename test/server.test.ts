@@ -3,6 +3,7 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { OPERATOR_TOKEN_BODY_CEILING_BYTES } from "../src/calendar/oauth-routes.js";
 import {
   createSchedulingServer,
   SIP_WEBHOOK_BODY_CEILING_BYTES,
@@ -290,17 +291,29 @@ describe("operator setup pages", () => {
     await app?.stop();
   });
 
-  it("gates the consent page behind the operator token and a session cookie", async () => {
+  it("gates the consent page behind the operator token form and a session cookie", async () => {
     const anonymous = await fetch(`http://127.0.0.1:${OPERATOR_PORT}/calendar/auth/start`, {
       redirect: "manual",
     });
-    expect(anonymous.status).toBe(401);
+    expect(anonymous.status).toBe(200);
+    const anonBody = await anonymous.text();
+    expect(anonBody).toContain('<form method="post" action="/calendar/auth/start">');
+    expect(anonymous.headers.get("set-cookie")).toBeNull();
 
-    const signed = await fetch(
+    const query = await fetch(
       `http://127.0.0.1:${OPERATOR_PORT}/calendar/auth/start?token=test-operator-token`,
       { redirect: "manual" },
     );
-    expect(signed.status).toBe(302);
+    expect(query.status).toBe(401);
+    expect(query.headers.get("set-cookie")).toBeNull();
+
+    const signed = await fetch(`http://127.0.0.1:${OPERATOR_PORT}/calendar/auth/start`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "token=test-operator-token",
+    });
+    expect(signed.status).toBe(303);
     expect(signed.headers.get("location")).toBe("/calendar/auth/start");
     const setCookie = signed.headers.get("set-cookie");
     expect(setCookie).toContain("HttpOnly");
@@ -314,5 +327,62 @@ describe("operator setup pages", () => {
     const body = await page.text();
     expect(body).toContain("/calendar/auth/google");
     expect(body).not.toContain("test-operator-token");
+  });
+
+  it("rejects an oversized operator token form before accepting it", async () => {
+    expect(OPERATOR_TOKEN_BODY_CEILING_BYTES).toBe(1024);
+    const response = await new Promise<{ statusCode: number; body: string; setCookie?: string }>(
+      (resolve, reject) => {
+        let settled = false;
+        const fail = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          reject(error);
+        };
+        const succeed = (value: { statusCode: number; body: string; setCookie?: string }) => {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        };
+        const request = http.request(
+          {
+            host: "127.0.0.1",
+            port: OPERATOR_PORT,
+            path: "/calendar/auth/start",
+            method: "POST",
+            headers: {
+              "content-type": "application/x-www-form-urlencoded",
+              connection: "close",
+            },
+          },
+          (incoming) => {
+            const chunks: Buffer[] = [];
+            incoming.on("data", (chunk: Buffer) => {
+              chunks.push(chunk);
+            });
+            incoming.on("end", () => {
+              const setCookie = incoming.headers["set-cookie"];
+              succeed({
+                statusCode: incoming.statusCode ?? 0,
+                body: Buffer.concat(chunks).toString("utf8"),
+                setCookie: Array.isArray(setCookie) ? setCookie[0] : setCookie,
+              });
+            });
+          },
+        );
+        request.setTimeout(2000, () => {
+          request.destroy();
+          fail(new Error("timed out waiting for 413 before the token form finished"));
+        });
+        request.on("error", (error) => {
+          fail(error);
+        });
+        request.write(Buffer.alloc(OPERATOR_TOKEN_BODY_CEILING_BYTES + 1, 0x78));
+      },
+    );
+
+    expect(response.statusCode).toBe(413);
+    expect(response.setCookie).toBeUndefined();
+    expect(response.body).not.toContain("test-operator-token");
   });
 });

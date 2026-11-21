@@ -12,6 +12,7 @@ import {
   saveClientConfig,
   saveRefreshToken,
 } from "../src/calendar/auth.js";
+import { OPERATOR_EMAIL, TEST_JWKS, operatorIdToken } from "./google-id-token.js";
 
 const CREDS = { clientId: "test-client-id", clientSecret: "test-client-secret", refreshToken: "test-refresh" };
 
@@ -63,24 +64,117 @@ describe("calendar OAuth", () => {
 
   it("exchanges an authorization code for access and refresh tokens", async () => {
     let requestBody = "";
-    const fetchFn = (async (_url: unknown, init?: unknown) => {
+    const fetchFn = (async (url: unknown, init?: unknown) => {
+      const href = String(url);
+      if (href.includes("/oauth2/v3/certs")) {
+        return Response.json(TEST_JWKS);
+      }
       requestBody = String((init as RequestInit)?.body ?? "");
-      return new Response(
-        JSON.stringify({ access_token: "access-1", expires_in: 3600, refresh_token: "refresh-1" }),
-      );
+      return Response.json({
+        access_token: "access-1",
+        expires_in: 3600,
+        refresh_token: "refresh-1",
+        id_token: operatorIdToken(),
+      });
     }) as typeof fetch;
 
     const result = await exchangeAuthCode(
       fetchFn,
-      { clientId: "id", clientSecret: "secret" },
+      { clientId: "test-client-id", clientSecret: "secret" },
       "auth-code",
       "http://localhost:1/callback",
+      OPERATOR_EMAIL,
     );
 
     expect(result).toEqual({ accessToken: "access-1", refreshToken: "refresh-1" });
     expect(requestBody).toContain("grant_type=authorization_code");
     expect(requestBody).toContain("code=auth-code");
     expect(requestBody).not.toContain("refresh-1");
+  });
+
+  it("does not return a refresh token when the verified email does not match", async () => {
+    const fetchFn = (async (url: unknown) => {
+      const href = String(url);
+      if (href.includes("/oauth2/v3/certs")) {
+        return Response.json(TEST_JWKS);
+      }
+      return Response.json({
+        access_token: "access-1",
+        expires_in: 3600,
+        refresh_token: "refresh-1",
+        id_token: operatorIdToken("other@example.com"),
+      });
+    }) as typeof fetch;
+
+    const error = await exchangeAuthCode(
+      fetchFn,
+      { clientId: "test-client-id", clientSecret: "secret" },
+      "auth-code",
+      "http://localhost:1/callback",
+      OPERATOR_EMAIL,
+    ).catch((value: unknown) => value);
+
+    expect(error).toBeInstanceOf(CalendarAuthError);
+    const message = (error as Error).message;
+    expect(message).toMatch(/not stored/i);
+    expect(message).not.toContain("refresh-1");
+    expect(message).not.toContain("other@example.com");
+    expect(message).not.toContain("secret");
+  });
+
+  it("does not return a refresh token when the ID token email is not verified", async () => {
+    const fetchFn = (async (url: unknown) => {
+      const href = String(url);
+      if (href.includes("/oauth2/v3/certs")) {
+        return Response.json(TEST_JWKS);
+      }
+      return Response.json({
+        access_token: "access-1",
+        expires_in: 3600,
+        refresh_token: "refresh-1",
+        id_token: operatorIdToken(OPERATOR_EMAIL, { email_verified: false }),
+      });
+    }) as typeof fetch;
+
+    const error = await exchangeAuthCode(
+      fetchFn,
+      { clientId: "test-client-id", clientSecret: "secret" },
+      "auth-code",
+      "http://localhost:1/callback",
+      OPERATOR_EMAIL,
+    ).catch((value: unknown) => value);
+
+    expect(error).toBeInstanceOf(CalendarAuthError);
+    expect((error as Error).message).not.toContain("refresh-1");
+  });
+
+  it("does not return a refresh token when the ID token signature does not verify", async () => {
+    const signed = operatorIdToken();
+    const parts = signed.split(".");
+    const forged = `${parts[0]}.${parts[1]}.${parts[2]!.slice(0, -2)}aa`;
+    const fetchFn = (async (url: unknown) => {
+      const href = String(url);
+      if (href.includes("/oauth2/v3/certs")) {
+        return Response.json(TEST_JWKS);
+      }
+      return Response.json({
+        access_token: "access-1",
+        expires_in: 3600,
+        refresh_token: "refresh-1",
+        id_token: forged,
+      });
+    }) as typeof fetch;
+
+    const error = await exchangeAuthCode(
+      fetchFn,
+      { clientId: "test-client-id", clientSecret: "secret" },
+      "auth-code",
+      "http://localhost:1/callback",
+      OPERATOR_EMAIL,
+    ).catch((value: unknown) => value);
+
+    expect(error).toBeInstanceOf(CalendarAuthError);
+    expect((error as Error).message).not.toContain("refresh-1");
   });
 
   it("loads credentials from the environment", () => {
@@ -122,7 +216,9 @@ describe("calendar OAuth", () => {
     );
     expect(url.searchParams.get("access_type")).toBe("offline");
     expect(url.searchParams.get("prompt")).toBe("consent");
-    expect(url.searchParams.get("scope")).toBe(CALENDAR_SCOPES.join(" "));
+    expect(url.searchParams.get("scope")).toBe(
+      ["openid", "email", ...CALENDAR_SCOPES].join(" "),
+    );
     expect(CALENDAR_SCOPES).toHaveLength(2);
     expect(url.toString()).not.toContain("test-client-secret");
   });

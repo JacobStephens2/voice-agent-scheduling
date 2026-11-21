@@ -60,7 +60,8 @@ before a resume should survive the next restart. Budget exhaustion
 | Telnyx SIP / number | Telnyx portal; not in this repo | Keep the FQDN connection on `sip.voice.x.ai` and the webhook on `/xai/sip-webhook` |
 | Google OAuth client | env file and `/var/lib/scheduling-agent/google-client.json` | Recreate the Web-app client only if the client ID changes; keep the redirect `https://scheduler.stephens.page/calendar/auth/callback` |
 | Google refresh token | `/var/lib/scheduling-agent/google-refresh` | Re-run the operator consent pages in [calendar-setup.md](calendar-setup.md). Testing-mode tokens expire after seven days |
-| `EVIDENCE_TOKEN` / `OPERATOR_TOKEN` | env file | Replace, restart. Old bearer tokens stop working immediately |
+| `EVIDENCE_TOKEN` / `OPERATOR_TOKEN` | env file | Replace, restart. Old bearer tokens stop working immediately. Submit `OPERATOR_TOKEN` on the setup form; do not put it in the address bar |
+| `OPERATOR_EMAIL` | env file | Google account allowed to authorize Calendar. Unset uses `jacob@stephens.page`. A different verified email does not store a refresh token |
 
 After any credential change, confirm `/health` is healthy and that a
 an allowlisted smoke call still verifies `grok-voice-think-fast-2.0` with high

@@ -1,14 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { createOAuthRouter, type OAuthPageResponse } from "../src/calendar/oauth-routes.js";
+import {
+  OPERATOR_TOKEN_BODY_CEILING_BYTES,
+  createOAuthRouter,
+  type OAuthPageResponse,
+} from "../src/calendar/oauth-routes.js";
+import { OPERATOR_EMAIL, TEST_JWKS, operatorIdToken } from "./google-id-token.js";
 
 const OPERATOR_TOKEN = "test-operator-token";
 const BASE_URL = "https://scheduler.example";
 const CLIENT = { clientId: "test-client-id", clientSecret: "test-client-secret" };
+const FORM_HEADERS = { "content-type": "application/x-www-form-urlencoded" };
 
-function tokenFetch(refreshToken = "test-refresh-token"): typeof fetch {
+function tokenFetch(refreshToken = "test-refresh-token", idToken = operatorIdToken()): typeof fetch {
   return (async (url: unknown) => {
-    expect(String(url)).toContain("oauth2.googleapis.com/token");
-    return Response.json({ access_token: "test-access", expires_in: 3600, refresh_token: refreshToken });
+    const href = String(url);
+    if (href.includes("oauth2.googleapis.com/token")) {
+      return Response.json({
+        access_token: "test-access",
+        expires_in: 3600,
+        refresh_token: refreshToken,
+        id_token: idToken,
+      });
+    }
+    if (href.includes("/oauth2/v3/certs")) {
+      return Response.json(TEST_JWKS);
+    }
+    throw new Error(`unexpected fetch ${href}`);
   }) as typeof fetch;
 }
 
@@ -16,6 +33,7 @@ function createRouter(overrides: Record<string, unknown> = {}) {
   const saved: Array<{ client: typeof CLIENT; refreshToken: string }> = [];
   const router = createOAuthRouter({
     operatorToken: OPERATOR_TOKEN,
+    operatorEmail: OPERATOR_EMAIL,
     baseUrl: BASE_URL,
     client: CLIENT,
     fetchFn: tokenFetch(),
@@ -41,43 +59,100 @@ async function establishSession(
   router: ReturnType<typeof createOAuthRouter>,
 ): Promise<string> {
   const redirect = await router.handle(
-    "GET",
-    new URL("/calendar/auth/start?token=test-operator-token", BASE_URL),
-    {},
+    "POST",
+    new URL("/calendar/auth/start", BASE_URL),
+    FORM_HEADERS,
+    `token=${OPERATOR_TOKEN}`,
   );
-  expect(redirect.statusCode).toBe(302);
+  expect(redirect.statusCode).toBe(303);
   expect(redirect.headers.location).toBe("/calendar/auth/start");
-  expect(redirect.headers.location).not.toContain("test-operator-token");
+  expect(redirect.headers.location).not.toContain(OPERATOR_TOKEN);
   return cookieFrom(redirect);
 }
 
 describe("OAuth consent pages", () => {
-  it("rejects visitors without the operator token", async () => {
+  it("shows a form when the setup page has no session", async () => {
     const { router } = createRouter();
     const anonymous = await router.handle("GET", new URL("/calendar/auth/start", BASE_URL), {});
-    expect(anonymous.statusCode).toBe(401);
+    expect(anonymous.statusCode).toBe(200);
     expect(anonymous.headers["set-cookie"]).toBeUndefined();
-
-    const wrong = await router.handle(
-      "GET",
-      new URL("/calendar/auth/start?token=wrong", BASE_URL),
-      {},
-    );
-    expect(wrong.statusCode).toBe(401);
+    expect(anonymous.body).toContain('<form method="post" action="/calendar/auth/start">');
+    expect(anonymous.body).toContain('name="token"');
+    expect(anonymous.body).not.toContain(OPERATOR_TOKEN);
 
     const google = await router.handle("GET", new URL("/calendar/auth/google", BASE_URL), {});
     expect(google.statusCode).toBe(401);
   });
 
+  it("refuses an operator token in the query", async () => {
+    const { router } = createRouter();
+    const matched = await router.handle(
+      "GET",
+      new URL("/calendar/auth/start?token=test-operator-token", BASE_URL),
+      {},
+    );
+    expect(matched.statusCode).toBe(401);
+    expect(matched.headers["set-cookie"]).toBeUndefined();
+    expect(matched.body).not.toContain(OPERATOR_TOKEN);
+
+    const postedWithQuery = await router.handle(
+      "POST",
+      new URL("/calendar/auth/start?token=test-operator-token", BASE_URL),
+      FORM_HEADERS,
+      `token=${OPERATOR_TOKEN}`,
+    );
+    expect(postedWithQuery.statusCode).toBe(401);
+    expect(postedWithQuery.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("refuses a posted operator token that does not match", async () => {
+    const { router } = createRouter();
+    const wrong = await router.handle(
+      "POST",
+      new URL("/calendar/auth/start", BASE_URL),
+      FORM_HEADERS,
+      "token=wrong",
+    );
+    expect(wrong.statusCode).toBe(401);
+    expect(wrong.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("refuses an operator token that is not posted as a form", async () => {
+    const { router } = createRouter();
+    const response = await router.handle(
+      "POST",
+      new URL("/calendar/auth/start", BASE_URL),
+      { "content-type": "application/json" },
+      JSON.stringify({ token: OPERATOR_TOKEN }),
+    );
+    expect(response.statusCode).toBe(401);
+    expect(response.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("refuses an operator token form larger than the body ceiling", async () => {
+    const { router } = createRouter();
+    const body = `token=${OPERATOR_TOKEN}&pad=${"a".repeat(OPERATOR_TOKEN_BODY_CEILING_BYTES)}`;
+    expect(Buffer.byteLength(body)).toBeGreaterThan(OPERATOR_TOKEN_BODY_CEILING_BYTES);
+    const response = await router.handle(
+      "POST",
+      new URL("/calendar/auth/start", BASE_URL),
+      FORM_HEADERS,
+      body,
+    );
+    expect(response.statusCode).toBe(413);
+    expect(response.headers["set-cookie"]).toBeUndefined();
+  });
+
   it("rejects an operator token whose UTF-8 byte length differs from the configured token", async () => {
-    // "é" is one UTF-16 code unit and two UTF-8 bytes, so this query value
+    // "é" is one UTF-16 code unit and two UTF-8 bytes, so this form value
     // matches the configured token's string length and not its byte length.
     const presented = `é${"x".repeat(OPERATOR_TOKEN.length - 1)}`;
     const { router } = createRouter();
     const response = await router.handle(
-      "GET",
-      new URL(`/calendar/auth/start?token=${encodeURIComponent(presented)}`, BASE_URL),
-      {},
+      "POST",
+      new URL("/calendar/auth/start", BASE_URL),
+      FORM_HEADERS,
+      `token=${encodeURIComponent(presented)}`,
     );
     expect(response.statusCode).toBe(401);
     expect(response.headers["set-cookie"]).toBeUndefined();
@@ -92,6 +167,8 @@ describe("OAuth consent pages", () => {
     });
     expect(page.statusCode).toBe(200);
     expect(page.body).toContain("/calendar/auth/google");
+    expect(page.body).toContain("openid");
+    expect(page.body).toContain("email");
     expect(page.body).toContain("calendar.freebusy");
     expect(page.body).not.toContain(OPERATOR_TOKEN);
     expect(page.body).not.toContain("test-client-secret");
@@ -109,6 +186,12 @@ describe("OAuth consent pages", () => {
     expect(target.hostname).toBe("accounts.google.com");
     expect(target.searchParams.get("access_type")).toBe("offline");
     expect(target.searchParams.get("prompt")).toBe("consent");
+    expect(target.searchParams.get("scope")?.split(" ")).toEqual([
+      "openid",
+      "email",
+      "https://www.googleapis.com/auth/calendar.freebusy",
+      "https://www.googleapis.com/auth/calendar.events.owned",
+    ]);
     expect(target.searchParams.get("redirect_uri")).toBe(`${BASE_URL}/calendar/auth/callback`);
     expect(target.searchParams.get("state")).toMatch(/^[0-9a-f]{64}$/);
     expect(redirect.headers.location).not.toContain("test-client-secret");
@@ -141,6 +224,29 @@ describe("OAuth consent pages", () => {
     );
     expect(replay.statusCode).toBe(401);
     expect(saved).toHaveLength(1);
+  });
+
+  it("does not store a refresh token when the verified email does not match", async () => {
+    const { router, saved } = createRouter({
+      fetchFn: tokenFetch("test-refresh-token", operatorIdToken("other@example.com")),
+    });
+    const cookie = await establishSession(router);
+    const google = await router.handle("GET", new URL("/calendar/auth/google", BASE_URL), {
+      cookie,
+    });
+    const state = new URL(google.headers.location!).searchParams.get("state")!;
+
+    const done = await router.handle(
+      "GET",
+      new URL(`/calendar/auth/callback?code=auth-code&state=${state}`, BASE_URL),
+      { cookie },
+    );
+    expect(done.statusCode).toBe(403);
+    expect(done.body).toContain("refresh token was not stored");
+    expect(done.body).not.toContain("other@example.com");
+    expect(done.body).not.toContain("test-refresh-token");
+    expect(done.body).not.toContain("auth-code");
+    expect(saved).toEqual([]);
   });
 
   it("rejects callbacks with forged state or missing codes", async () => {
@@ -196,9 +302,11 @@ describe("OAuth consent pages", () => {
     expect(google.statusCode).toBe(503);
   });
 
-  it("rejects non-GET requests", async () => {
+  it("rejects methods other than the setup form post", async () => {
     const { router } = createRouter();
-    const response = await router.handle("POST", new URL("/calendar/auth/start", BASE_URL), {});
+    const response = await router.handle("POST", new URL("/calendar/auth/google", BASE_URL), {});
     expect(response.statusCode).toBe(405);
+    const put = await router.handle("PUT", new URL("/calendar/auth/start", BASE_URL), {});
+    expect(put.statusCode).toBe(405);
   });
 });

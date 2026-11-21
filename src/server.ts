@@ -2,6 +2,7 @@ import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { createCallLifecycleManager, type CallLifecycleManager } from "./lifecycle.js";
 import {
+  configuredOperatorEmail,
   loadClientConfig,
   loadCredentials,
   saveClientConfig,
@@ -10,7 +11,11 @@ import {
 import { createCalendarAvailabilityTool } from "./calendar/availability-tool.js";
 import { createAppointmentLedger } from "./calendar/appointment-ledger.js";
 import { createAppointmentBooking } from "./calendar/booking-tool.js";
-import { createOAuthRouter } from "./calendar/oauth-routes.js";
+import {
+  OPERATOR_TOKEN_BODY_CEILING_BYTES,
+  createOAuthRouter,
+  operatorTokenBodyTooLarge,
+} from "./calendar/oauth-routes.js";
 import { productionReadiness, type CallerAdmissionMode } from "./admission-policy.js";
 import { loadSelection } from "./calendar/selection.js";
 import { runRetentionCleanup } from "./maintenance.js";
@@ -35,6 +40,7 @@ export interface ServerConfig {
   readonly availabilityTool?: AvailabilityTool;
   readonly booking?: BookingTool;
   readonly operatorToken?: string;
+  readonly operatorEmail?: string;
   readonly publicBaseUrl?: string;
   readonly fetchFn?: typeof fetch;
   readonly connectWebSocket?: ConnectWebSocket;
@@ -86,21 +92,26 @@ class PayloadTooLargeError extends Error {
   }
 }
 
-function declaredBodyExceedsCeiling(req: http.IncomingMessage): boolean {
+function declaredBodyExceedsCeiling(req: http.IncomingMessage, ceiling: number): boolean {
   const raw = headerValue(req.headers["content-length"]);
   if (raw === undefined) {
     return false;
   }
   const declared = Number(raw);
-  return Number.isFinite(declared) && declared > SIP_WEBHOOK_BODY_CEILING_BYTES;
+  return Number.isFinite(declared) && declared > ceiling;
 }
 
 // The route calls this after readBody rejects. 413 is written before the
 // socket is destroyed, and the oversized chunks are already dropped.
-function refuseOversizedBody(req: http.IncomingMessage, res: http.ServerResponse): void {
-  const body = JSON.stringify({ error: "payload_too_large" });
-  res.writeHead(413, {
-    "content-type": "application/json",
+function refuseOversizedBody(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  statusCode: number,
+  headers: http.OutgoingHttpHeaders,
+  body: string,
+): void {
+  res.writeHead(statusCode, {
+    ...headers,
     "content-length": Buffer.byteLength(body),
     connection: "close",
   });
@@ -109,9 +120,12 @@ function refuseOversizedBody(req: http.IncomingMessage, res: http.ServerResponse
   req.destroy();
 }
 
-function readBody(req: http.IncomingMessage): Promise<string> {
+function readBody(
+  req: http.IncomingMessage,
+  ceiling = SIP_WEBHOOK_BODY_CEILING_BYTES,
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    if (declaredBodyExceedsCeiling(req)) {
+    if (declaredBodyExceedsCeiling(req, ceiling)) {
       req.pause();
       reject(new PayloadTooLargeError());
       return;
@@ -129,7 +143,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 
     const onData = (chunk: Buffer) => {
       received += chunk.length;
-      if (received > SIP_WEBHOOK_BODY_CEILING_BYTES) {
+      if (received > ceiling) {
         chunks.length = 0;
         if (!settled) {
           settled = true;
@@ -220,6 +234,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
   const oauthRouter = config.operatorToken
     ? createOAuthRouter({
         operatorToken: config.operatorToken,
+        operatorEmail: config.operatorEmail?.trim() || configuredOperatorEmail(),
         baseUrl: config.publicBaseUrl ?? "https://scheduler.stephens.page",
         client: loadClientConfig({ dataDir: config.dataDir }),
         fetchFn,
@@ -256,14 +271,26 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
       for (const [name, value] of Object.entries(req.headers)) {
         headers[name] = Array.isArray(value) ? value[0] : value;
       }
-      void oauthRouter
-        .handle(req.method ?? "GET", url, headers)
+      void (async () => {
+        let body: string | undefined;
+        if ((req.method ?? "GET") === "POST" && url.pathname === "/calendar/auth/start") {
+          body = await readBody(req, OPERATOR_TOKEN_BODY_CEILING_BYTES);
+        }
+        return oauthRouter.handle(req.method ?? "GET", url, headers, body);
+      })()
         .then((page) => {
           res.writeHead(page.statusCode, { "content-type": "text/html; charset=utf-8", ...page.headers });
           res.end(page.body);
         })
-        .catch(() => {
-          json(res, 500, { error: "internal_server_error" });
+        .catch((error: unknown) => {
+          if (error instanceof PayloadTooLargeError) {
+            const page = operatorTokenBodyTooLarge();
+            refuseOversizedBody(req, res, page.statusCode, page.headers, page.body);
+            return;
+          }
+          if (!res.headersSent) {
+            json(res, 500, { error: "internal_server_error" });
+          }
         });
       return;
     }
@@ -367,7 +394,8 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         })
         .catch((error: unknown) => {
           if (error instanceof PayloadTooLargeError) {
-            refuseOversizedBody(req, res);
+            const body = JSON.stringify({ error: "payload_too_large" });
+            refuseOversizedBody(req, res, 413, { "content-type": "application/json" }, body);
             return;
           }
           if (!res.headersSent) {

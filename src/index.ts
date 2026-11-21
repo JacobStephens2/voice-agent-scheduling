@@ -7,6 +7,7 @@ import {
   MONTHLY_TARGET_MICRO_USD_DEFAULT,
   RESERVE_MARGIN_DEFAULT,
 } from "./budget.js";
+import { configuredOperatorEmail } from "./calendar/auth.js";
 import { loadSelection } from "./calendar/selection.js";
 
 function requiredEnv(name: string): string {
@@ -74,6 +75,7 @@ const app = createSchedulingServer({
   apiKey: requiredEnv("XAI_API_KEY"),
   evidenceToken: requiredEnv("EVIDENCE_TOKEN"),
   operatorToken,
+  operatorEmail: configuredOperatorEmail(),
   publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() || undefined,
   maxConcurrentCalls: Number.parseInt(process.env.MAX_CONCURRENT_CALLS || "1", 10),
   allowedCallerNumbers,

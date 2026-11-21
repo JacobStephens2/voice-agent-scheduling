@@ -2,9 +2,9 @@
  * Operator setup for Google Calendar authorization and selection.
  *
  * Human steps (also see docs/deployment/calendar-setup.md):
- *   1. Create a Desktop-app OAuth client for jacob@stephens.page.
+ *   1. Create a Desktop-app OAuth client for the configured operator address.
  *   2. GOOGLE_CALENDAR_CLIENT_ID=... npm run calendars:auth-url
- *      -> open the printed URL, authorize, copy the code.
+ *      -> open the printed URL as that address, authorize, copy the code.
  *   3. GOOGLE_CALENDAR_CLIENT_ID=... GOOGLE_CALENDAR_CLIENT_SECRET=... \
  *        npm run calendars:auth -- --code <code>
  *      -> exchanges the code and stores the refresh token (0600) in the data dir.
@@ -23,6 +23,7 @@
 import { randomBytes } from "node:crypto";
 import {
   buildConsentUrl,
+  configuredOperatorEmail,
   createTokenProvider,
   exchangeAuthCode,
   loadCredentials,
@@ -70,7 +71,7 @@ async function authUrl(): Promise<void> {
   const url = buildConsentUrl({ clientId: clientIdOrThrow(), redirectUri });
   process.stdout.write(
     [
-      "Open this URL as jacob@stephens.page, authorize Calendar access, and copy the code.",
+      `Open this URL as ${configuredOperatorEmail()}, authorize Calendar access, and copy the code.`,
       "",
       url,
       "",
@@ -98,6 +99,7 @@ async function auth(): Promise<void> {
     { clientId, clientSecret },
     code,
     redirectUri,
+    configuredOperatorEmail(),
   );
   saveClientConfig(dataDir(), { clientId, clientSecret });
   saveRefreshToken(dataDir(), refreshToken);

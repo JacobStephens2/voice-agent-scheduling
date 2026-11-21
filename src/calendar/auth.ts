@@ -1,3 +1,4 @@
+import { createPublicKey, createVerify, timingSafeEqual, type JsonWebKey } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -5,6 +6,12 @@ export const CALENDAR_SCOPES = [
   "https://www.googleapis.com/auth/calendar.freebusy",
   "https://www.googleapis.com/auth/calendar.events.owned",
 ] as const;
+
+/** OpenID scopes required so the ID token carries a verified email. */
+export const CONSENT_SCOPES = ["openid", "email", ...CALENDAR_SCOPES] as const;
+
+export const DEFAULT_OPERATOR_EMAIL = "jacob@stephens.page";
+export const GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
 
 export const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -20,6 +27,22 @@ export class CalendarAuthError extends Error {
     super(message);
     this.name = "CalendarAuthError";
   }
+}
+
+const SIGN_IN_UNVERIFIED =
+  "The Google sign-in could not be verified. The refresh token was not stored.";
+
+export class OperatorEmailMismatchError extends CalendarAuthError {
+  constructor() {
+    super(
+      "The Google account's verified email does not match the configured operator address. The refresh token was not stored.",
+    );
+    this.name = "OperatorEmailMismatchError";
+  }
+}
+
+export function configuredOperatorEmail(env: NodeJS.ProcessEnv = process.env): string {
+  return env.OPERATOR_EMAIL?.trim() || DEFAULT_OPERATOR_EMAIL;
 }
 
 function readFileIfPresent(path: string): string | undefined {
@@ -116,7 +139,7 @@ export function buildConsentUrl(options: {
   url.searchParams.set("response_type", "code");
   url.searchParams.set("access_type", "offline");
   url.searchParams.set("prompt", "consent");
-  url.searchParams.set("scope", CALENDAR_SCOPES.join(" "));
+  url.searchParams.set("scope", CONSENT_SCOPES.join(" "));
   return url.toString();
 }
 
@@ -124,6 +147,7 @@ export interface TokenResponse {
   readonly access_token: string;
   readonly expires_in: number;
   readonly refresh_token?: string;
+  readonly id_token?: string;
 }
 
 type FetchFn = typeof fetch;
@@ -149,6 +173,7 @@ async function postTokenRequest(
     access_token?: unknown;
     expires_in?: unknown;
     refresh_token?: unknown;
+    id_token?: unknown;
   } = {};
   try {
     payload = (await response.json()) as typeof payload;
@@ -172,6 +197,7 @@ async function postTokenRequest(
         ? payload.expires_in
         : 3600,
     ...(typeof payload.refresh_token === "string" ? { refresh_token: payload.refresh_token } : {}),
+    ...(typeof payload.id_token === "string" ? { id_token: payload.id_token } : {}),
   };
 }
 
@@ -180,6 +206,8 @@ export async function exchangeAuthCode(
   credentials: { clientId: string; clientSecret: string },
   code: string,
   redirectUri: string,
+  expectedEmail: string,
+  nowMs?: () => number,
 ): Promise<{ accessToken: string; refreshToken: string }> {
   const payload = await postTokenRequest(fetchFn, {
     code,
@@ -194,7 +222,178 @@ export async function exchangeAuthCode(
       "Google did not return a refresh token. Calendar data is unavailable.",
     );
   }
+  if (typeof payload.id_token !== "string" || !payload.id_token) {
+    throw new CalendarAuthError(SIGN_IN_UNVERIFIED);
+  }
+  const verifiedAtMs = nowMs?.() ?? Date.now();
+  const email = await verifiedEmailFromIdToken(
+    fetchFn,
+    payload.id_token,
+    credentials.clientId,
+    verifiedAtMs,
+  );
+  if (!emailsMatch(expectedEmail, email)) {
+    throw new OperatorEmailMismatchError();
+  }
   return { accessToken: payload.access_token, refreshToken: full.refresh_token };
+}
+
+const GOOGLE_ISSUERS = new Set(["https://accounts.google.com", "accounts.google.com"]);
+
+interface GoogleJwk extends JsonWebKey {
+  kid?: string;
+  alg?: string;
+  use?: string;
+}
+
+interface IdTokenHeader {
+  alg?: unknown;
+  kid?: unknown;
+}
+
+interface IdTokenClaims {
+  iss?: unknown;
+  aud?: unknown;
+  azp?: unknown;
+  exp?: unknown;
+  email?: unknown;
+  email_verified?: unknown;
+}
+
+function unverified(): CalendarAuthError {
+  return new CalendarAuthError(SIGN_IN_UNVERIFIED);
+}
+
+function decodeSegment(segment: string): Buffer {
+  if (!/^[A-Za-z0-9_-]+$/.test(segment)) {
+    throw unverified();
+  }
+  return Buffer.from(segment, "base64url");
+}
+
+function emailsMatch(expected: string, actual: string): boolean {
+  const expectedBuf = Buffer.from(expected.trim().toLowerCase());
+  const actualBuf = Buffer.from(actual.trim().toLowerCase());
+  return (
+    expectedBuf.length > 0 &&
+    expectedBuf.length === actualBuf.length &&
+    timingSafeEqual(expectedBuf, actualBuf)
+  );
+}
+
+function audienceMatches(claims: IdTokenClaims, clientId: string): boolean {
+  if (typeof claims.aud === "string") {
+    return claims.aud === clientId;
+  }
+  if (
+    Array.isArray(claims.aud) &&
+    claims.aud.length > 0 &&
+    claims.aud.every((item) => typeof item === "string") &&
+    claims.aud.includes(clientId)
+  ) {
+    return claims.azp === clientId;
+  }
+  return false;
+}
+
+async function verifiedEmailFromIdToken(
+  fetchFn: FetchFn,
+  idToken: string,
+  clientId: string,
+  nowMs: number,
+): Promise<string> {
+  const parts = idToken.split(".");
+  if (parts.length !== 3 || parts.some((part) => part.length === 0)) {
+    throw unverified();
+  }
+  const encodedHeader = parts[0]!;
+  const encodedPayload = parts[1]!;
+  const encodedSignature = parts[2]!;
+  let header: IdTokenHeader;
+  let claims: IdTokenClaims;
+  try {
+    header = JSON.parse(decodeSegment(encodedHeader).toString("utf8")) as IdTokenHeader;
+    claims = JSON.parse(decodeSegment(encodedPayload).toString("utf8")) as IdTokenClaims;
+  } catch (error) {
+    if (error instanceof CalendarAuthError) {
+      throw error;
+    }
+    throw unverified();
+  }
+  if (
+    typeof header !== "object" ||
+    header === null ||
+    typeof claims !== "object" ||
+    claims === null ||
+    header.alg !== "RS256" ||
+    typeof header.kid !== "string" ||
+    header.kid.length === 0
+  ) {
+    throw unverified();
+  }
+  const key = await googleSigningKey(fetchFn, header.kid);
+  let signatureOk = false;
+  try {
+    const publicKey = createPublicKey({ key, format: "jwk" });
+    const verifier = createVerify("RSA-SHA256");
+    verifier.update(`${encodedHeader}.${encodedPayload}`);
+    signatureOk = verifier.verify(publicKey, decodeSegment(encodedSignature));
+  } catch {
+    signatureOk = false;
+  }
+  if (!signatureOk) {
+    throw unverified();
+  }
+  if (typeof claims.iss !== "string" || !GOOGLE_ISSUERS.has(claims.iss)) {
+    throw unverified();
+  }
+  if (!audienceMatches(claims, clientId)) {
+    throw unverified();
+  }
+  if (typeof claims.exp !== "number" || !Number.isFinite(claims.exp) || claims.exp * 1000 <= nowMs) {
+    throw unverified();
+  }
+  if (claims.email_verified !== true || typeof claims.email !== "string" || claims.email.trim() === "") {
+    throw unverified();
+  }
+  return claims.email;
+}
+
+async function googleSigningKey(fetchFn: FetchFn, kid: string): Promise<GoogleJwk> {
+  let response: Response;
+  try {
+    response = await fetchFn(GOOGLE_JWKS_URL);
+  } catch {
+    throw unverified();
+  }
+  if (!response.ok) {
+    throw unverified();
+  }
+  let payload: { keys?: unknown };
+  try {
+    payload = (await response.json()) as { keys?: unknown };
+  } catch {
+    throw unverified();
+  }
+  if (!Array.isArray(payload.keys)) {
+    throw unverified();
+  }
+  const key = payload.keys.find((candidate): candidate is GoogleJwk => {
+    if (typeof candidate !== "object" || candidate === null) {
+      return false;
+    }
+    const parsed = candidate as GoogleJwk;
+    return (
+      parsed.kid === kid &&
+      parsed.kty === "RSA" &&
+      (parsed.alg === undefined || parsed.alg === "RS256") &&
+      (parsed.use === undefined || parsed.use === "sig")
+    );
+  });
+  if (!key) {
+    throw unverified();
+  }
+  return key;
 }
 
 export interface AccessTokenProvider {
