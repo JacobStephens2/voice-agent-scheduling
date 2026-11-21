@@ -103,10 +103,15 @@ function declaredBodyExceedsCeiling(req: http.IncomingMessage, ceiling: number):
 
 // The route calls this after readBody rejects. 413 is written before the
 // socket is destroyed, and the oversized chunks are already dropped.
-function refuseOversizedBody(req: http.IncomingMessage, res: http.ServerResponse): void {
-  const body = JSON.stringify({ error: "payload_too_large" });
-  res.writeHead(413, {
-    "content-type": "application/json",
+function refuseOversizedBody(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  statusCode: number,
+  headers: http.OutgoingHttpHeaders,
+  body: string,
+): void {
+  res.writeHead(statusCode, {
+    ...headers,
     "content-length": Buffer.byteLength(body),
     connection: "close",
   });
@@ -280,14 +285,7 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         .catch((error: unknown) => {
           if (error instanceof PayloadTooLargeError) {
             const page = operatorTokenBodyTooLarge();
-            res.writeHead(page.statusCode, {
-              "content-type": "text/html; charset=utf-8",
-              ...page.headers,
-              connection: "close",
-            });
-            res.end(page.body);
-            req.on("error", () => {});
-            req.destroy();
+            refuseOversizedBody(req, res, page.statusCode, page.headers, page.body);
             return;
           }
           if (!res.headersSent) {
@@ -396,7 +394,8 @@ export function createSchedulingServer(config: ServerConfig): SchedulingServer {
         })
         .catch((error: unknown) => {
           if (error instanceof PayloadTooLargeError) {
-            refuseOversizedBody(req, res);
+            const body = JSON.stringify({ error: "payload_too_large" });
+            refuseOversizedBody(req, res, 413, { "content-type": "application/json" }, body);
             return;
           }
           if (!res.headersSent) {

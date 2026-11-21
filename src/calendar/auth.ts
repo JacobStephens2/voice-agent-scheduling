@@ -206,7 +206,8 @@ export async function exchangeAuthCode(
   credentials: { clientId: string; clientSecret: string },
   code: string,
   redirectUri: string,
-  operator: { readonly email: string; readonly nowMs?: () => number },
+  expectedEmail: string,
+  nowMs?: () => number,
 ): Promise<{ accessToken: string; refreshToken: string }> {
   const payload = await postTokenRequest(fetchFn, {
     code,
@@ -224,13 +225,14 @@ export async function exchangeAuthCode(
   if (typeof payload.id_token !== "string" || !payload.id_token) {
     throw new CalendarAuthError(SIGN_IN_UNVERIFIED);
   }
+  const verifiedAtMs = nowMs?.() ?? Date.now();
   const email = await verifiedEmailFromIdToken(
     fetchFn,
     payload.id_token,
     credentials.clientId,
-    operator.nowMs?.() ?? Date.now(),
+    verifiedAtMs,
   );
-  if (!emailsMatch(operator.email, email)) {
+  if (!emailsMatch(expectedEmail, email)) {
     throw new OperatorEmailMismatchError();
   }
   return { accessToken: payload.access_token, refreshToken: full.refresh_token };

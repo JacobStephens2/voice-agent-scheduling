@@ -286,7 +286,8 @@ export function createOAuthRouter(options: OAuthRouterOptions): {
             options.client,
             code,
             callbackUrl,
-            { email: options.operatorEmail, nowMs },
+            options.operatorEmail,
+            nowMs,
           );
           options.onTokensSaved?.(options.client, refreshToken);
         } catch (error) {

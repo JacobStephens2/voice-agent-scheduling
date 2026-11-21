@@ -83,7 +83,7 @@ describe("calendar OAuth", () => {
       { clientId: "test-client-id", clientSecret: "secret" },
       "auth-code",
       "http://localhost:1/callback",
-      { email: OPERATOR_EMAIL },
+      OPERATOR_EMAIL,
     );
 
     expect(result).toEqual({ accessToken: "access-1", refreshToken: "refresh-1" });
@@ -111,7 +111,7 @@ describe("calendar OAuth", () => {
       { clientId: "test-client-id", clientSecret: "secret" },
       "auth-code",
       "http://localhost:1/callback",
-      { email: OPERATOR_EMAIL },
+      OPERATOR_EMAIL,
     ).catch((value: unknown) => value);
 
     expect(error).toBeInstanceOf(CalendarAuthError);
@@ -141,7 +141,7 @@ describe("calendar OAuth", () => {
       { clientId: "test-client-id", clientSecret: "secret" },
       "auth-code",
       "http://localhost:1/callback",
-      { email: OPERATOR_EMAIL },
+      OPERATOR_EMAIL,
     ).catch((value: unknown) => value);
 
     expect(error).toBeInstanceOf(CalendarAuthError);
@@ -170,7 +170,7 @@ describe("calendar OAuth", () => {
       { clientId: "test-client-id", clientSecret: "secret" },
       "auth-code",
       "http://localhost:1/callback",
-      { email: OPERATOR_EMAIL },
+      OPERATOR_EMAIL,
     ).catch((value: unknown) => value);
 
     expect(error).toBeInstanceOf(CalendarAuthError);
