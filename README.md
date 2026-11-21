@@ -47,7 +47,7 @@ The service listens on `127.0.0.1:3531` behind the `https://scheduler.stephens.p
 | `POST /maintenance/pause` | Stop new admissions (`EVIDENCE_TOKEN` bearer) |
 | `POST /maintenance/resume` | Resume admissions after an operator pause (`EVIDENCE_TOKEN` bearer) |
 | `POST /maintenance/cleanup` | Purge operational records older than 30 days without deleting Calendar events (`EVIDENCE_TOKEN` bearer) |
-| `/calendar/auth/*` | Operator consent pages for Google Calendar authorization (`OPERATOR_TOKEN`) |
+| `/calendar/auth/*` | Operator consent pages for Google Calendar authorization. Submit `OPERATOR_TOKEN` on the setup form |
 
 ## Development
 

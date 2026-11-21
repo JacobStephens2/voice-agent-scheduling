@@ -11,20 +11,25 @@ after explicit booking confirmation. No audio or transcripts are retained.
    `jacob@stephens.page`, with this authorized redirect URI:
    `https://scheduler.stephens.page/calendar/auth/callback`.
    Request only these scopes when consenting:
+   - `openid`
+   - `email`
    - `https://www.googleapis.com/auth/calendar.freebusy` (read availability)
    - `https://www.googleapis.com/auth/calendar.events.owned` (create the
      confirmed appointment on a calendar Jacob owns)
 2. **Authorize in the browser**: put `GOOGLE_CALENDAR_CLIENT_ID`,
-   `GOOGLE_CALENDAR_CLIENT_SECRET`, and `OPERATOR_TOKEN` in
-   `/etc/scheduling-agent/scheduling-agent.env`, restart the service, then
-   open as Jacob:
-   `https://scheduler.stephens.page/calendar/auth/start?token=OPERATOR_TOKEN`
-   (use the real token value once; the page immediately trades it for a
-   short-lived session cookie and drops it from the address bar). Click
-   through to Google, approve offline access so the server can refresh, and
-   you will land on a confirmation page. The exchange happens server-side;
-   codes and tokens never render, and the refresh token is stored with
-   owner-only permissions in `/var/lib/scheduling-agent`.
+   `GOOGLE_CALENDAR_CLIENT_SECRET`, `OPERATOR_TOKEN`, and `OPERATOR_EMAIL`
+   in `/etc/scheduling-agent/scheduling-agent.env`, restart the service, then
+   open `https://scheduler.stephens.page/calendar/auth/start`. Submit the
+   operator token in the form. Do not put the token in the address bar.
+   A match sets the short-lived session cookie and sends the browser back
+   to the setup page. Click through to Google as the configured operator
+   address (`OPERATOR_EMAIL`, or `jacob@stephens.page` when that variable
+   is unset), approve offline access so the server can refresh, and you
+   will land on a confirmation page. The exchange happens server-side;
+   codes and tokens never render. The service stores the refresh token
+   only when the ID token's verified email matches that address. The
+   refresh token is stored with owner-only permissions in
+   `/var/lib/scheduling-agent`. The form body is limited to 1 KiB.
 3. **Authorize without the browser instead** (fallback; needs a Desktop-app
    client with a localhost redirect):
    ```bash
@@ -122,6 +127,9 @@ On the host, credential and selection files live under
 - Refresh credentials stay outside source control (`.gitignore` covers
   `.env*` and `.scratch/`), model context, and logs. Error messages carry
   bounded categories only, never secrets or caller contact data.
+- The HTTPS vhost for `scheduler.stephens.page` writes
+  `/var/log/apache2/scheduler.stephens.page-access.log` and leaves
+  `/calendar/auth/` requests out of that log.
 - Booking confirmation is tied to the current proposal on that call.
   `confirm_appointment` creates the appointment only when the caller has
   explicitly agreed (`confirmed: true`), the `proposalId` is the current one,

@@ -1,6 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
-  CALENDAR_SCOPES,
+  CONSENT_SCOPES,
+  OperatorEmailMismatchError,
   buildConsentUrl,
   exchangeAuthCode,
   type GoogleOAuthClient,
@@ -18,8 +19,12 @@ export interface CalendarSetupStatus {
   readonly selection?: CalendarSelection;
 }
 
+/** A posted operator token is one field. 1 KiB is above that field and below a logged payload. */
+export const OPERATOR_TOKEN_BODY_CEILING_BYTES = 1024;
+
 export interface OAuthRouterOptions {
   readonly operatorToken: string;
+  readonly operatorEmail: string;
   readonly baseUrl: string;
   readonly client: GoogleOAuthClient | undefined;
   readonly fetchFn?: typeof fetch;
@@ -66,12 +71,16 @@ function html(statusCode: number, title: string, body: string): OAuthPageRespons
   };
 }
 
-function redirect(location: string, setCookie?: string): OAuthPageResponse {
+function redirect(location: string, setCookie?: string, statusCode = 302): OAuthPageResponse {
   const headers: Record<string, string> = { location };
   if (setCookie) {
     headers["set-cookie"] = setCookie;
   }
-  return { statusCode: 302, headers, body: "" };
+  return { statusCode, headers, body: "" };
+}
+
+export function operatorTokenBodyTooLarge(): OAuthPageResponse {
+  return html(413, "Token not accepted", "<p>The operator token form is too large.</p>");
 }
 
 function newToken(): string {
@@ -111,12 +120,18 @@ function parseCookies(header: string | undefined): Record<string, string> {
 
 /**
  * Operator-only Google consent pages. Every step requires proof the visitor
- * is the operator: the long-lived operator token once (query), then a
- * short-lived session cookie, plus a single-use OAuth state on the way back.
- * Callback codes are exchanged server-side; tokens and codes never render.
+ * is the operator: the long-lived operator token once, posted in a form,
+ * then a short-lived session cookie, plus a single-use OAuth state on the
+ * way back. A token in the query is refused. Callback codes are exchanged
+ * server-side; tokens and codes never render.
  */
 export function createOAuthRouter(options: OAuthRouterOptions): {
-  handle(method: string, url: URL, headers: Record<string, string | undefined>): Promise<OAuthPageResponse>;
+  handle(
+    method: string,
+    url: URL,
+    headers: Record<string, string | undefined>,
+    body?: string,
+  ): Promise<OAuthPageResponse>;
 } {
   const fetchFn = options.fetchFn ?? fetch;
   const nowMs = options.nowMs ?? (() => Date.now());
@@ -161,23 +176,49 @@ export function createOAuthRouter(options: OAuthRouterOptions): {
       method: string,
       url: URL,
       headers: Record<string, string | undefined>,
+      body?: string,
     ): Promise<OAuthPageResponse> {
-      if (method !== "GET") {
-        return html(405, "Method not allowed", "<p>Use the link provided on the setup page.</p>");
+      if (method !== "GET" && !(method === "POST" && url.pathname === "/calendar/auth/start")) {
+        return html(405, "Method not allowed", "<p>Use the form on the setup page.</p>");
       }
 
       if (url.pathname === "/calendar/auth/start") {
-        const token = url.searchParams.get("token") ?? undefined;
-        if (token !== undefined) {
-          if (!tokensMatch(options.operatorToken, token)) {
+        if (url.searchParams.has("token")) {
+          return html(
+            401,
+            "Not authorized",
+            "<p>Open the setup page and submit the operator token in the form. A token in the address bar is not accepted.</p>",
+          );
+        }
+        if (method === "POST") {
+          const contentType = headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+          if (contentType !== "application/x-www-form-urlencoded") {
+            return html(401, "Not authorized", "<p>Submit the operator token in the form.</p>");
+          }
+          if (body === undefined || Buffer.byteLength(body) > OPERATOR_TOKEN_BODY_CEILING_BYTES) {
+            return operatorTokenBodyTooLarge();
+          }
+          const presented = new URLSearchParams(body).get("token") ?? undefined;
+          if (!tokensMatch(options.operatorToken, presented)) {
             return html(401, "Not authorized", "<p>This setup page is operator-only.</p>");
           }
           const session = newToken();
           sessions.set(session, nowMs() + SESSION_TTL_MS);
-          return redirect("/calendar/auth/start", sessionCookie(session));
+          return redirect("/calendar/auth/start", sessionCookie(session), 303);
         }
         if (!validSession(headers)) {
-          return html(401, "Not authorized", "<p>This setup page is operator-only.</p>");
+          return html(
+            200,
+            "Connect Google Calendar",
+            [
+              "<p>Paste the operator token, then continue. The token is not accepted in the address bar.</p>",
+              '<form method="post" action="/calendar/auth/start">',
+              '<p><label for="operator-token">Operator token</label><br>',
+              '<input id="operator-token" name="token" type="password" autocomplete="off" required></p>',
+              '<p><button type="submit">Continue</button></p>',
+              "</form>",
+            ].join("\n"),
+          );
         }
         return html(
           200,
@@ -185,7 +226,7 @@ export function createOAuthRouter(options: OAuthRouterOptions): {
           [
             statusLines(),
             "<p>Connect Jacob's Google Calendar so the scheduling agent can read real availability. This slice only reads; no calendar event is created.</p>",
-            `<p>Google will ask for: <code>${CALENDAR_SCOPES.map(escapeHtml).join("</code>, <code>")}</code>.</p>`,
+            `<p>Google will ask for: <code>${CONSENT_SCOPES.map(escapeHtml).join("</code>, <code>")}</code>.</p>`,
             '<p><a href="/calendar/auth/google">Connect Google Calendar</a></p>',
           ].join("\n"),
         );
@@ -245,9 +286,13 @@ export function createOAuthRouter(options: OAuthRouterOptions): {
             options.client,
             code,
             callbackUrl,
+            { email: options.operatorEmail, nowMs },
           );
           options.onTokensSaved?.(options.client, refreshToken);
-        } catch {
+        } catch (error) {
+          if (error instanceof OperatorEmailMismatchError) {
+            return html(403, "Authorization failed", `<p>${escapeHtml(error.message)}</p>`);
+          }
           return html(
             502,
             "Authorization failed",

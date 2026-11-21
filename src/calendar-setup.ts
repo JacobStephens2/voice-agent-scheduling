@@ -23,6 +23,7 @@
 import { randomBytes } from "node:crypto";
 import {
   buildConsentUrl,
+  configuredOperatorEmail,
   createTokenProvider,
   exchangeAuthCode,
   loadCredentials,
@@ -98,6 +99,7 @@ async function auth(): Promise<void> {
     { clientId, clientSecret },
     code,
     redirectUri,
+    { email: configuredOperatorEmail() },
   );
   saveClientConfig(dataDir(), { clientId, clientSecret });
   saveRefreshToken(dataDir(), refreshToken);
