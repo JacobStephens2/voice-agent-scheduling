@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { extractE164, isE164 } from "../phone.js";
 import { createBookingReadback, type ReadbackHandle } from "./booking-readback.js";
-import { computeAvailableStarts, SCHEDULING_TIMEZONE } from "./policy.js";
+import { prepareBookingDay, SCHEDULING_TIMEZONE } from "./policy.js";
 
 export interface AppointmentProposal {
   readonly proposalId: string;
@@ -168,8 +168,10 @@ function validateProposal(
     return invalid("Please include the chosen date and Eastern start time.");
   }
   const referenceTime = options.referenceTime ?? options.now();
-  const permitted = computeAvailableStarts({ date, now: referenceTime, busy: [] });
-  const slot = permitted.find((entry) => entry.startTime === startTime);
+  const day = prepareBookingDay(date, referenceTime);
+  const slot = day.window === "invalid_date"
+    ? undefined
+    : day.eligibleStarts().find((entry) => entry.startTime === startTime);
   if (!slot) {
     return invalid(
       "That time is not a permitted 30-minute weekday start in Eastern Time. Check availability and propose an offered time.",

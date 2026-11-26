@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createCalendarAvailabilityTool } from "../src/calendar/availability-tool.js";
 
 const MONDAY_14H = new Date("2026-09-07T14:00:00-04:00");
@@ -88,6 +88,23 @@ describe("calendar availability tool", () => {
     expect(result.status).toBe("unavailable");
     expect(result.reason).toBe("invalid_date");
     expect(result.slots).toEqual([]);
+  });
+
+  it.each([
+    [{ timezone: "Not/AZone" }, "date_required"],
+    [{ date: "2026-02-30", timezone: "Not/AZone" }, "invalid_date"],
+    [{ date: "2026-09-26", timezone: "Not/AZone" }, "invalid_timezone"],
+    [{ date: "2026-09-26" }, "weekend_not_permitted"],
+    [{ date: "2026-09-09" }, "notice_insufficient"],
+    [{ date: "2026-09-22" }, "beyond_horizon"],
+  ] as const)("refuses %o with %s before accessing Calendar", async (args, reason) => {
+    const fetchFn = vi.fn(googleFetch(EMPTY_DAY));
+    const getAccessToken = vi.fn(TOKEN_PROVIDER.getAccessToken);
+    const tool = toolWith(EMPTY_DAY, { fetchFn, tokenProvider: { getAccessToken } });
+
+    expect(await tool.execute(args)).toMatchObject({ status: "unavailable", reason, slots: [] });
+    expect(getAccessToken).not.toHaveBeenCalled();
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 
   it("rejects a date inside the 72-hour notice period", async () => {

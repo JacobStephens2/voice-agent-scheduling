@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { zonedDateTime } from "../time.js";
 import {
   createTokenProvider,
   loadCredentials,
@@ -27,8 +26,7 @@ import {
 import { project, type Confirmation } from "./stored-event-projection.js";
 import {
   appointmentEndMs,
-  computeAvailableStarts,
-  SCHEDULING_TIMEZONE,
+  prepareBookingDay,
   type BusyInterval,
 } from "./policy.js";
 import { loadSelection, requiredCalendarIds, type CalendarSelection } from "./selection.js";
@@ -299,10 +297,9 @@ async function confirm(
   }
 
   const referenceTime = execOptions.referenceTime ?? ctx.now();
-  const dayStart = zonedDateTime(proposal.date, "00:00", SCHEDULING_TIMEZONE);
-  const dayEnd = zonedDateTime(proposal.date, "23:59", SCHEDULING_TIMEZONE);
-  const start = zonedDateTime(proposal.date, proposal.startTime, SCHEDULING_TIMEZONE);
-  if (!dayStart || !dayEnd || !start) {
+  const day = prepareBookingDay(proposal.date, referenceTime);
+  const start = day.window === "invalid_date" ? undefined : day.nominalStart(proposal.startTime);
+  if (day.window === "invalid_date" || !start) {
     return {
       status: "failed",
       message: "The proposed appointment time could not be understood. Do not claim it is booked.",
@@ -328,7 +325,7 @@ async function confirm(
     callId: proposal.callId,
     proposalId: proposal.proposalId,
     calendarId,
-    startUtc: start.toISOString(),
+    startUtc: start.startUtc,
     numberHash,
   };
   const attempt = ctx.ledger.beginAttempt(identities);
@@ -364,17 +361,12 @@ async function confirm(
   try {
     busy = await queryBusyIntervals(ctx.fetchFn, accessToken, {
       calendarIds: requiredCalendarIds(ctx.selection),
-      timeMin: dayStart,
-      timeMax: dayEnd,
+      ...day.freeBusyBounds,
     });
   } catch {
     return stoppedAttemptResult(attempt.fail());
   }
-  const stillOpen = computeAvailableStarts({
-    date: proposal.date,
-    now: referenceTime,
-    busy,
-  }).some((slot) => slot.startTime === proposal.startTime);
+  const stillOpen = day.eligibleStarts(busy).some((slot) => slot.startUtc === start.startUtc);
   if (!stillOpen) {
     // The slot can read busy because this operation's own uncertain write
     // already landed. Reconcile against the original event identity before

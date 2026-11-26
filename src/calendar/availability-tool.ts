@@ -1,4 +1,4 @@
-import { formatTimeInZone, isIsoDate, isValidCalendarDate, weekdayInTimeZone, zonedDateTime } from "../time.js";
+import { formatTimeInZone } from "../time.js";
 import {
   createTokenProvider,
   loadCredentials,
@@ -7,15 +7,14 @@ import {
 } from "./auth.js";
 import { queryBusyIntervals } from "./client.js";
 import {
-  MAX_HORIZON_MS,
-  MIN_NOTICE_MS,
   SCHEDULING_TIMEZONE,
-  computeAvailableStarts,
-  type AvailableStart,
+  appointmentEndMs,
+  prepareBookingDay,
+  type AppointmentStart,
 } from "./policy.js";
 import { loadSelection, requiredCalendarIds, type CalendarSelection } from "./selection.js";
 
-export interface OfferedAvailabilitySlot extends AvailableStart {
+export interface OfferedAvailabilitySlot extends AppointmentStart {
   readonly requestedStartTime?: string;
   readonly requestedEndTime?: string;
   readonly requestedTimezone?: string;
@@ -145,7 +144,8 @@ export function createCalendarAvailabilityTool(
           "Please ask the caller which date they would like, and check that exact date.",
         );
       }
-      if (!isIsoDate(args.date) || !isValidCalendarDate(args.date) || !zonedDateTime(args.date, "12:00", SCHEDULING_TIMEZONE)) {
+      const day = prepareBookingDay(args.date, referenceTime);
+      if (day.window === "invalid_date") {
         return unavailable(
           "invalid_date",
           `I could not understand '${args.date}' as a date. Please clarify the exact date with the caller and check again.`,
@@ -159,28 +159,20 @@ export function createCalendarAvailabilityTool(
         );
       }
 
-      const weekday = weekdayInTimeZone(args.date, SCHEDULING_TIMEZONE);
-      if (weekday === "Sat" || weekday === "Sun") {
+      if (day.window === "weekend_not_permitted") {
         return unavailable(
           "weekend_not_permitted",
           "Appointments are only available Monday through Friday, 10:00 AM to 5:00 PM Eastern. Please ask the caller for a weekday date.",
         );
       }
 
-      const earliestPermitted = referenceTime.getTime() + MIN_NOTICE_MS;
-      const latestPermitted = referenceTime.getTime() + MAX_HORIZON_MS;
-      const firstStart = zonedDateTime(args.date, "10:00", SCHEDULING_TIMEZONE);
-      const lastStart = zonedDateTime(args.date, "16:30", SCHEDULING_TIMEZONE);
-      if (!firstStart || !lastStart) {
-        return unavailable("invalid_date", "Please clarify the exact date with the caller.");
-      }
-      if (lastStart.getTime() < earliestPermitted) {
+      if (day.window === "notice_insufficient") {
         return unavailable(
           "notice_insufficient",
           "Appointments require at least 72 hours advance notice. Please ask the caller for a later date.",
         );
       }
-      if (firstStart.getTime() > latestPermitted) {
+      if (day.window === "beyond_horizon") {
         return unavailable(
           "beyond_horizon",
           "Appointments can only be scheduled up to 14 days in advance. Please ask the caller for an earlier date.",
@@ -200,17 +192,14 @@ export function createCalendarAvailabilityTool(
         );
       }
 
-      const dayStart = zonedDateTime(args.date, "00:00", SCHEDULING_TIMEZONE);
-      const dayEnd = zonedDateTime(args.date, "23:59", SCHEDULING_TIMEZONE);
-      let starts: AvailableStart[];
+      let starts: readonly AppointmentStart[];
       try {
         const accessToken = await tokenProvider.getAccessToken();
         const busy = await queryBusyIntervals(fetchFn, accessToken, {
           calendarIds: requiredCalendarIds(explicitSelection),
-          timeMin: dayStart ?? firstStart,
-          timeMax: dayEnd ?? lastStart,
+          ...day.freeBusyBounds,
         });
-        starts = computeAvailableStarts({ date: args.date, now: referenceTime, busy });
+        starts = day.eligibleStarts(busy);
       } catch {
         return unavailable(
           "calendar_unavailable",
@@ -229,16 +218,8 @@ export function createCalendarAvailabilityTool(
         if (!requestedTimezone || requestedTimezone === SCHEDULING_TIMEZONE) {
           return slot;
         }
-        const instant = zonedDateTime(slot.date, slot.startTime, SCHEDULING_TIMEZONE);
-        const endInstant = instant
-          ? new Date(instant.getTime() + slot.durationMinutes * 60_000)
-          : undefined;
-        const requestedStartTime = instant
-          ? formatTimeInZone(instant, requestedTimezone)
-          : undefined;
-        const requestedEndTime = endInstant
-          ? formatTimeInZone(endInstant, requestedTimezone)
-          : undefined;
+        const requestedStartTime = formatTimeInZone(new Date(slot.startUtc), requestedTimezone);
+        const requestedEndTime = formatTimeInZone(new Date(appointmentEndMs(slot.startUtc)), requestedTimezone);
         if (!requestedStartTime || !requestedEndTime) {
           return slot;
         }
