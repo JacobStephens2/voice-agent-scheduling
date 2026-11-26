@@ -2,8 +2,9 @@ import { isValidCalendarDate, weekdayInTimeZone, zonedDateTime } from "../time.j
 
 export const SCHEDULING_TIMEZONE = "America/New_York";
 export const APPOINTMENT_MINUTES = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const MIN_NOTICE_MS = 72 * 60 * 60 * 1000;
-const MAX_HORIZON_MS = 14 * 24 * 60 * 60 * 1000;
+const MAX_HORIZON_MS = 14 * DAY_MS;
 const FIRST_START = "10:00";
 const LAST_START = "16:30";
 
@@ -14,7 +15,7 @@ export interface BusyInterval {
   readonly transparency?: "opaque" | "transparent";
 }
 
-export interface AvailableStart {
+export interface AppointmentStart {
   readonly date: string;
   readonly startTime: string;
   readonly endTime: string;
@@ -27,8 +28,8 @@ export interface AvailableStart {
 interface PreparedBookingDay {
   readonly window: "open" | "weekend_not_permitted" | "notice_insufficient" | "beyond_horizon";
   readonly freeBusyBounds: { readonly timeMin: Date; readonly timeMax: Date };
-  nominalStart(startTime: string): AvailableStart | undefined;
-  eligibleStarts(busy?: readonly BusyInterval[]): readonly AvailableStart[];
+  nominalStart(startTime: string): AppointmentStart | undefined;
+  eligibleStarts(busy?: readonly BusyInterval[]): readonly AppointmentStart[];
 }
 
 export function endTimeOf(startTime: string): string {
@@ -59,7 +60,7 @@ export function prepareBookingDay(
     return { window: "invalid_date" };
   }
 
-  const nominalStarts: AvailableStart[] = [];
+  const nominalStarts: AppointmentStart[] = [];
   if (weekday !== "Sat" && weekday !== "Sun") {
     for (let startTime = FIRST_START; startTime <= LAST_START; startTime = endTimeOf(startTime)) {
       const instant = zonedDateTime(date, startTime, SCHEDULING_TIMEZONE);
@@ -114,4 +115,24 @@ export function prepareBookingDay(
       });
     },
   };
+}
+
+/** Select the first eligible start for verification, before applying Calendar busy intervals. */
+export function firstVerificationStart(referenceTime: Date): AppointmentStart {
+  const easternDate = new Intl.DateTimeFormat("en-CA", {
+    timeZone: SCHEDULING_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const referenceMs = referenceTime.getTime();
+  for (let offset = MIN_NOTICE_MS; offset <= MAX_HORIZON_MS; offset += DAY_MS) {
+    const date = easternDate.format(new Date(referenceMs + offset));
+    const day = prepareBookingDay(date, referenceTime);
+    const start = day.window === "open" ? day.eligibleStarts()[0] : undefined;
+    if (start) {
+      return start;
+    }
+  }
+  throw new Error("No permitted weekday slot in the booking window.");
 }

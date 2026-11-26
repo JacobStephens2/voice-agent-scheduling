@@ -10,11 +10,11 @@ import {
   SCHEDULING_TIMEZONE,
   appointmentEndMs,
   prepareBookingDay,
-  type AvailableStart,
+  type AppointmentStart,
 } from "./policy.js";
 import { loadSelection, requiredCalendarIds, type CalendarSelection } from "./selection.js";
 
-export interface OfferedAvailabilitySlot extends AvailableStart {
+export interface OfferedAvailabilitySlot extends AppointmentStart {
   readonly requestedStartTime?: string;
   readonly requestedEndTime?: string;
   readonly requestedTimezone?: string;
@@ -192,7 +192,7 @@ export function createCalendarAvailabilityTool(
         );
       }
 
-      let starts: readonly AvailableStart[];
+      let starts: readonly AppointmentStart[];
       try {
         const accessToken = await tokenProvider.getAccessToken();
         const busy = await queryBusyIntervals(fetchFn, accessToken, {

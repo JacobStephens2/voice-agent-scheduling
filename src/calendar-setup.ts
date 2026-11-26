@@ -36,7 +36,7 @@ import {
   deleteAppointmentEvent,
   validateCalendars,
 } from "./calendar/client.js";
-import { prepareBookingDay, SCHEDULING_TIMEZONE } from "./calendar/policy.js";
+import { firstVerificationStart } from "./calendar/policy.js";
 import { saveSelection } from "./calendar/selection.js";
 
 const DEFAULT_REDIRECT_URI = "http://localhost:1/callback";
@@ -153,27 +153,6 @@ async function select(): Promise<void> {
   );
 }
 
-function easternDate(instant: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: SCHEDULING_TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(instant);
-}
-
-function firstPermittedSlot(now: Date): { date: string; startTime: string } {
-  for (let offset = 3; offset <= 14; offset += 1) {
-    const date = easternDate(new Date(now.getTime() + offset * 24 * 60 * 60 * 1000));
-    const day = prepareBookingDay(date, now);
-    const slot = day.window === "open" ? day.eligibleStarts()[0] : undefined;
-    if (slot) {
-      return { date: slot.date, startTime: slot.startTime };
-    }
-  }
-  throw new Error("No permitted weekday slot in the booking window.");
-}
-
 async function verifyBooking(): Promise<void> {
   const calendarId = flagValue("--calendar");
   if (!calendarId) {
@@ -190,7 +169,7 @@ async function verifyBooking(): Promise<void> {
   if (!credentials) {
     throw new Error("Calendar authorization is incomplete. Run calendars:auth first.");
   }
-  const slot = firstPermittedSlot(new Date());
+  const slot = firstVerificationStart(new Date());
   const eventId = randomBytes(16).toString("hex");
   const token = await createTokenProvider(credentials, fetch).getAccessToken();
   const reading = await commitStoredCalendarEvent(fetch, token, {

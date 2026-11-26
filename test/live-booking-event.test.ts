@@ -6,7 +6,7 @@ import {
   commitStoredCalendarEvent,
   deleteAppointmentEvent,
 } from "../src/calendar/client.js";
-import { prepareBookingDay, SCHEDULING_TIMEZONE } from "../src/calendar/policy.js";
+import { firstVerificationStart } from "../src/calendar/policy.js";
 
 const live = process.env.SCHEDULING_LIVE_BOOKING_TEST === "1";
 const calendarId = process.env.SCHEDULING_LIVE_BOOKING_CALENDAR?.trim();
@@ -14,27 +14,6 @@ const credentials = loadCredentials({
   env: process.env,
   dataDir: process.env.SCHEDULING_DATA_DIR,
 });
-
-function easternDate(instant: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: SCHEDULING_TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(instant);
-}
-
-function firstPermittedSlot(now: Date): { date: string; startTime: string } {
-  for (let offset = 3; offset <= 14; offset += 1) {
-    const date = easternDate(new Date(now.getTime() + offset * 24 * 60 * 60 * 1000));
-    const day = prepareBookingDay(date, now);
-    const slot = day.window === "open" ? day.eligibleStarts()[0] : undefined;
-    if (slot) {
-      return { date: slot.date, startTime: slot.startTime };
-    }
-  }
-  throw new Error("No permitted weekday slot in the booking window.");
-}
 
 describe.skipIf(!live || !calendarId || !credentials)(
   "authorized test calendar notifications",
@@ -45,7 +24,7 @@ describe.skipIf(!live || !calendarId || !credentials)(
           "Refusing to write the Google primary calendar. Set SCHEDULING_LIVE_BOOKING_CALENDAR to a test calendar.",
         );
       }
-      const slot = firstPermittedSlot(new Date());
+      const slot = firstVerificationStart(new Date());
       const eventId = randomBytes(16).toString("hex");
       const token = await createTokenProvider(credentials!, fetch).getAccessToken();
       try {

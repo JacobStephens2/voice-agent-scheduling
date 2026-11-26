@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { prepareBookingDay, type BusyInterval } from "../src/calendar/policy.js";
+import { firstVerificationStart, prepareBookingDay, type BusyInterval } from "../src/calendar/policy.js";
 
 const MONDAY_14H = new Date("2026-09-07T14:00:00-04:00");
 
@@ -170,6 +170,15 @@ describe("Booking window", () => {
     const monday = preparedDay("2026-03-09", friday);
     expect(monday.nominalStart("10:00")?.startUtc).toBe("2026-03-09T14:00:00.000Z");
     expect(monday.eligibleStarts()[0]?.startUtc).toBe("2026-03-09T15:00:00.000Z");
+  });
+
+  it("selects the first verification start after a spring-forward weekend", () => {
+    const thursday = new Date("2026-03-05T16:30:00-05:00");
+    expect(firstVerificationStart(thursday)).toMatchObject({
+      date: "2026-03-09",
+      startTime: "10:00",
+      startUtc: "2026-03-09T14:00:00.000Z",
+    });
   });
 
   it.each([
