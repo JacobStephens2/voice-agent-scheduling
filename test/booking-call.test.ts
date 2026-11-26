@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createAppointmentLedger } from "../src/calendar/appointment-ledger.js";
+import { createAppointmentLedger, type BookingRecord } from "../src/calendar/appointment-ledger.js";
 import { createAppointmentBooking, type AppointmentBookingCall, type BookingToolOptions } from "../src/calendar/booking-tool.js";
 import { assistantResponseEvents, completeReadback, fakeGoogleCalendar, readbackText, TEST_EVENT_ID } from "./helpers.js";
 
@@ -269,5 +269,49 @@ describe("Appointment booking call lifetime", () => {
     completeReadback(bound, proposed);
     expect(await bound.execute("confirm_appointment", { confirmed: true, proposalId: proposed.proposalId })).toMatchObject({ status: "booked" });
     expect(await liveClock.execute("propose_appointment", ARGS)).toMatchObject({ status: "invalid" });
+  });
+
+  it("reads the original event after a 16:30 Eastern start ages out by one millisecond", async () => {
+    let now = new Date("2026-09-07T20:30:00.000Z");
+    const google = fakeGoogleCalendar({});
+    const requests: string[] = [];
+    let freeBusyBody: unknown;
+    let rowAtFreeBusy: BookingRecord | undefined;
+    const f = fixture({
+      now: () => now,
+      fetchFn: async (input, init) => {
+        const url = new URL(String(input));
+        requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        if (url.pathname.endsWith("/freeBusy")) {
+          freeBusyBody = JSON.parse(String(init?.body));
+          rowAtFreeBusy = f.ledger.latestForProposal(proposed.proposalId);
+        }
+        return google.fetchFn(input, init);
+      },
+    });
+    const call = f.booking.openCall({ callId: "notice-edge" });
+    const proposed = await propose(call, { date: "2026-09-10", startTime: "16:30" });
+    completeReadback(call, proposed);
+    now = new Date("2026-09-07T20:30:00.001Z");
+
+    const result = await call.execute("confirm_appointment", { confirmed: true, proposalId: proposed.proposalId });
+
+    expect(freeBusyBody).toMatchObject({
+      timeMin: "2026-09-10T04:00:00.000Z",
+      timeMax: "2026-09-11T03:59:00.000Z",
+    });
+    expect(rowAtFreeBusy).toMatchObject({
+      operationId: "operation-1",
+      eventId: TEST_EVENT_ID,
+      startUtc: "2026-09-10T20:30:00.000Z",
+      status: "pending",
+    });
+    expect(requests).toEqual([
+      "POST /calendar/v3/freeBusy",
+      `GET /calendar/v3/calendars/primary/events/${TEST_EVENT_ID}`,
+    ]);
+    expect(google.writes).toEqual([]);
+    expect(result).toMatchObject({ status: "unavailable", eventId: TEST_EVENT_ID, eventExists: false });
+    expect(f.ledger.latestForProposal(proposed.proposalId)).toMatchObject({ status: "unavailable" });
   });
 });

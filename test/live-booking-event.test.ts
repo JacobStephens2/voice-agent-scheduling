@@ -6,7 +6,7 @@ import {
   commitStoredCalendarEvent,
   deleteAppointmentEvent,
 } from "../src/calendar/client.js";
-import { computeAvailableStarts, SCHEDULING_TIMEZONE } from "../src/calendar/policy.js";
+import { prepareBookingDay, SCHEDULING_TIMEZONE } from "../src/calendar/policy.js";
 
 const live = process.env.SCHEDULING_LIVE_BOOKING_TEST === "1";
 const calendarId = process.env.SCHEDULING_LIVE_BOOKING_CALENDAR?.trim();
@@ -27,7 +27,8 @@ function easternDate(instant: Date): string {
 function firstPermittedSlot(now: Date): { date: string; startTime: string } {
   for (let offset = 3; offset <= 14; offset += 1) {
     const date = easternDate(new Date(now.getTime() + offset * 24 * 60 * 60 * 1000));
-    const slot = computeAvailableStarts({ date, now, busy: [] })[0];
+    const day = prepareBookingDay(date, now);
+    const slot = day.window === "open" ? day.eligibleStarts()[0] : undefined;
     if (slot) {
       return { date: slot.date, startTime: slot.startTime };
     }
