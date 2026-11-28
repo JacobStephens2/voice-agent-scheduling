@@ -82,8 +82,9 @@ The agent warns briefly about a minute before the limit
 (`CALL_DURATION_WARNING_MS`, default 60000), stops accepting new
 `confirm_appointment` calls at the cutoff (`duration_cutoff`, never
 reported as booked), and ends the media session with the same call-ended
-path as hangup (`duration_limit_reached`). An already-confirmed Calendar
-write finishes independently of the cutoff.
+path as hangup (`duration_limit_reached`). Startup refuses to run when
+`CALL_DURATION_WARNING_MS` is not shorter than `MAX_CALL_DURATION_MS`.
+An already-confirmed Calendar write finishes independently of the cutoff.
 
 ### Bounded real telephone check
 

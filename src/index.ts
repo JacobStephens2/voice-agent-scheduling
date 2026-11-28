@@ -69,6 +69,22 @@ if (!operatorToken) {
   );
 }
 
+const maxCallDurationMs = optionalEnvNumber(
+  "MAX_CALL_DURATION_MS",
+  (raw) => Number.parseInt(raw, 10),
+  (value) => value > 0,
+  MAX_CALL_DURATION_MS_DEFAULT,
+);
+const warningLeadMs = optionalEnvNumber(
+  "CALL_DURATION_WARNING_MS",
+  (raw) => Number.parseInt(raw, 10),
+  (value) => value > 0,
+  DURATION_WARNING_LEAD_MS_DEFAULT,
+);
+if (warningLeadMs >= maxCallDurationMs) {
+  throw new Error("CALL_DURATION_WARNING_MS must be shorter than MAX_CALL_DURATION_MS.");
+}
+
 const app = createSchedulingServer({
   port: Number.parseInt(process.env.SCHEDULING_PORT || "3531", 10),
   webhookSecret: requiredEnv("XAI_WEBHOOK_SECRET"),
@@ -82,18 +98,8 @@ const app = createSchedulingServer({
   admissionMode,
   pauseAdmissions: process.env.SCHEDULING_PAUSE_ADMISSIONS === "true",
   publicPhoneNumber: process.env.SCHEDULING_PUBLIC_PHONE_NUMBER?.trim() || undefined,
-  maxCallDurationMs: optionalEnvNumber(
-    "MAX_CALL_DURATION_MS",
-    (raw) => Number.parseInt(raw, 10),
-    (value) => value > 0,
-    MAX_CALL_DURATION_MS_DEFAULT,
-  ),
-  warningLeadMs: optionalEnvNumber(
-    "CALL_DURATION_WARNING_MS",
-    (raw) => Number.parseInt(raw, 10),
-    (value) => value > 0,
-    DURATION_WARNING_LEAD_MS_DEFAULT,
-  ),
+  maxCallDurationMs,
+  warningLeadMs,
   monthlyTargetMicroUsd: optionalEnvNumber(
     "SCHEDULING_MONTHLY_TARGET_MICRO_USD",
     (raw) => Number.parseInt(raw, 10),

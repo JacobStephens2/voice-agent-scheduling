@@ -167,6 +167,10 @@ function unexpectedModelError(reported: unknown): string {
   return `Expected model ${REQUIRED_MODEL}, but provider returned ${String(reported)}`;
 }
 
+function websocketFailure(error: unknown): string {
+  return `WebSocket error: ${error instanceof Error ? error.message : String(error)}`;
+}
+
 function sessionUpdatePayload(
   availabilityTool: AvailabilityTool,
   booking: BookingTool | undefined,
@@ -369,29 +373,37 @@ export function createTelephoneSession(options: {
         const limitLabel = callLimitLabel(maxDurationMs);
 
         warningTimeout = setTimeout(() => {
-          if (finished) {
-            return;
+          try {
+            if (finished) {
+              return;
+            }
+            warningSent = true;
+            socket?.send(
+              durationNoticePayload(
+                `The ${limitLabel} scheduling-call limit approaches. Briefly warn the caller, wrap up the current point, and do not start a new booking confirmation.`,
+              ),
+            );
+            socket?.send(JSON.stringify({ type: "response.create" }));
+          } catch (error) {
+            finish("failed", websocketFailure(error));
           }
-          warningSent = true;
-          socket?.send(
-            durationNoticePayload(
-              `The ${limitLabel} scheduling-call limit approaches. Briefly warn the caller, wrap up the current point, and do not start a new booking confirmation.`,
-            ),
-          );
-          socket?.send(JSON.stringify({ type: "response.create" }));
         }, Math.max(0, maxDurationMs - warningLeadMs));
 
         timeout = setTimeout(() => {
-          if (finished) {
-            return;
+          try {
+            if (finished) {
+              return;
+            }
+            cutoffReached = true;
+            socket?.send(
+              durationNoticePayload(
+                `The ${limitLabel} scheduling-call limit is reached. Do not accept a new booking confirmation; politely close the scheduling call.`,
+              ),
+            );
+            finish("completed", "duration_limit_reached");
+          } catch (error) {
+            finish("failed", websocketFailure(error));
           }
-          cutoffReached = true;
-          socket?.send(
-            durationNoticePayload(
-              `The ${limitLabel} scheduling-call limit is reached. Do not accept a new booking confirmation; politely close the scheduling call.`,
-            ),
-          );
-          finish("completed", "duration_limit_reached");
         }, maxDurationMs);
 
         try {
@@ -508,25 +520,24 @@ export function createTelephoneSession(options: {
               break;
             }
             case "error": {
-              const details = event.error;
-              finish(
-                "failed",
-                `Provider error: ${typeof details === "object" ? JSON.stringify(details) : String(details)}`,
-              );
+              finish("failed", "Provider error");
               break;
             }
           }
         };
 
-        socket.on("message", handleMessage);
+        socket.on("message", (raw) => {
+          try {
+            handleMessage(raw);
+          } catch (error) {
+            finish("failed", websocketFailure(error));
+          }
+        });
         socket.on("close", () => {
           finish("completed");
         });
         socket.on("error", (error) => {
-          finish(
-            "failed",
-            `WebSocket error: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          finish("failed", websocketFailure(error));
         });
       });
     },

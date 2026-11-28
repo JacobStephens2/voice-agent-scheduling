@@ -153,11 +153,17 @@ function persistOperatorPause(dataDir: string | undefined, paused: boolean): voi
   }
 }
 
-function defaultConnectWebSocket(
+/** Bound a stalled upgrade so it fails as a socket error instead of holding the Scheduling call. */
+const REALTIME_HANDSHAKE_TIMEOUT_MS = 10_000;
+
+export function connectProductionRealtimeSocket(
   url: string,
   headers: Record<string, string>,
 ): RealtimeSocket {
-  const socket = new WebSocket(url, { headers });
+  const socket = new WebSocket(url, {
+    headers,
+    handshakeTimeout: REALTIME_HANDSHAKE_TIMEOUT_MS,
+  });
   return {
     send(data) {
       socket.send(data);
@@ -188,7 +194,7 @@ export function createCallLifecycleManager(
     maxConcurrentCalls: options.maxConcurrentCalls ?? 1,
     allowedCallerNumbers: options.allowedCallerNumbers,
   });
-  const connectWebSocket = options.connectWebSocket ?? defaultConnectWebSocket;
+  const connectWebSocket = options.connectWebSocket ?? connectProductionRealtimeSocket;
   const hangupCall = options.hangupCall ?? defaultHangupCall(options.apiKey);
   const maxCallDurationMs = options.maxCallDurationMs ?? MAX_CALL_DURATION_MS_DEFAULT;
   const warningLeadMs = options.warningLeadMs ?? DURATION_WARNING_LEAD_MS_DEFAULT;
